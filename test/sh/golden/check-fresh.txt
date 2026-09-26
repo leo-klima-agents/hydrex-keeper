@@ -1,0 +1,4 @@
+gcloud run jobs describe hydrex-keeper --region=us-central1 --project=hydrex-keeper-test --format=json
+exit=1
+--- output ---
+error: job hydrex-keeper not found; run deploy.sh

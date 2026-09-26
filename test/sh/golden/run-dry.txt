@@ -1,0 +1,3 @@
+gcloud run jobs execute hydrex-keeper --region=us-central1 --project=hydrex-keeper-test --wait --args=--dry-run,--now
+exit=0
+--- output ---
