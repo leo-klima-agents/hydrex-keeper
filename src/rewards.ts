@@ -9,6 +9,11 @@ export type Reward = { token: Address; amount: bigint; decimals: number };
 
 export type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; rewards: Reward[] };
 
+type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
+
+/** What does not change within an epoch: gauges, bribe contracts, their reward tokens. */
+export type Static = { pools: Address[]; gauges: Address[]; slots: Slot[] };
+
 /** Current epoch, the conduit's power in it and the pools it currently votes for. */
 export async function readEpoch(chain: Chain): Promise<Epoch> {
   const { client, voter, ve, conduit } = chain;
@@ -30,38 +35,25 @@ export async function readEpoch(chain: Chain): Promise<Epoch> {
   return { start, flip: start + WEEK, power: power as bigint, votedThisEpoch, currentVote: currentVote as Address[] };
 }
 
-/** This epoch's bribes and fees per pool, and the votes each pool has from others. */
-export async function readRewards(chain: Chain, pools: Address[], epoch: Epoch): Promise<PoolRewards[]> {
-  const { client, voter, conduit } = chain;
+export async function readStatic(chain: Chain, pools: Address[]): Promise<Static> {
+  const { client, voter } = chain;
   const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
 
   const gauges = await readMany<Address>(client, pools.map((pool) => v("gauges", [pool])));
-  const perPool = await readMany<boolean | bigint | Address>(
+  const bribes = await readMany<Address>(
     client,
-    gauges.flatMap((gauge, i) => [
-      v("isAlive", [gauge]),
-      v("weights", [pools[i]]),
-      v("votes", [conduit, pools[i]]),
-      v("external_bribes", [gauge]),
-      v("internal_bribes", [gauge]),
-    ]),
+    gauges.flatMap((gauge) => [v("external_bribes", [gauge]), v("internal_bribes", [gauge])]),
   );
-  const bribes = pools.map((_, i) => [perPool[5 * i + 3] as Address, perPool[5 * i + 4] as Address]).flat();
-
   const lengths = await readMany<bigint>(
     client,
     bribes.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
   );
-  const slots = bribes.flatMap((address, b) =>
-    Array.from({ length: Number(lengths[b]) }, (_, j) => ({ bribe: b, address, index: BigInt(j) })),
+  const slots = bribes.flatMap((bribe, b) =>
+    Array.from({ length: Number(lengths[b]) }, (_, j) => ({ pool: b >> 1, bribe, index: BigInt(j) })),
   );
   const tokens = await readMany<Address>(
     client,
-    slots.map((s) => ({ address: s.address, abi: bribeAbi, functionName: "rewardTokens", args: [s.index] })),
-  );
-  const data = await readMany<[bigint, bigint, bigint]>(
-    client,
-    slots.map((s, k) => ({ address: s.address, abi: bribeAbi, functionName: "rewardData", args: [tokens[k], epoch.start] })),
+    slots.map((s) => ({ address: s.bribe, abi: bribeAbi, functionName: "rewardTokens", args: [s.index] })),
   );
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
   const decimals = await readMany<number>(
@@ -69,22 +61,30 @@ export async function readRewards(chain: Chain, pools: Address[], epoch: Epoch):
     distinct.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
   );
   const decimalsOf = new Map(distinct.map((t, i) => [t, decimals[i]!]));
+  return {
+    pools,
+    gauges,
+    slots: slots.map((s, k) => ({ pool: s.pool, bribe: s.bribe, token: tokens[k]!, decimals: decimalsOf.get(tokens[k]!.toLowerCase() as Address)! })),
+  };
+}
 
-  return pools.map((pool, i) => {
-    const rewards: Reward[] = [];
-    slots.forEach((s, k) => {
-      const amount = data[k]![1];
-      if (s.bribe >> 1 === i && amount > 0n) {
-        const token = tokens[k]!;
-        rewards.push({ token, amount, decimals: decimalsOf.get(token.toLowerCase() as Address)! });
-      }
-    });
-    return {
-      pool,
-      alive: perPool[5 * i] as boolean,
-      // Voter.votes keeps last epoch's figure until the next vote resets it.
-      otherVotes: (perPool[5 * i + 1] as bigint) - (epoch.votedThisEpoch ? (perPool[5 * i + 2] as bigint) : 0n),
-      rewards,
-    };
-  });
+/** This epoch's bribes and fees per pool, and the votes each pool has from others. */
+export async function readRewards(chain: Chain, { pools, gauges, slots }: Static, epoch: Epoch): Promise<PoolRewards[]> {
+  const { client, voter, conduit } = chain;
+  const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
+
+  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(client, [
+    ...gauges.flatMap((gauge, i) => [v("isAlive", [gauge]), v("weights", [pools[i]]), v("votes", [conduit, pools[i]])]),
+    ...slots.map((s) => ({ address: s.bribe, abi: bribeAbi, functionName: "rewardData", args: [s.token, epoch.start] })),
+  ]);
+  const perPool = results.slice(0, 3 * pools.length);
+  const data = results.slice(3 * pools.length) as [bigint, bigint, bigint][];
+
+  return pools.map((pool, i) => ({
+    pool,
+    alive: perPool[3 * i] as boolean,
+    // Voter.votes keeps last epoch's figure until the next vote resets it.
+    otherVotes: (perPool[3 * i + 1] as bigint) - (epoch.votedThisEpoch ? (perPool[3 * i + 2] as bigint) : 0n),
+    rewards: slots.flatMap((s, k) => (s.pool === i && data[k]![1] > 0n ? [{ token: s.token, amount: data[k]![1], decimals: s.decimals }] : [])),
+  }));
 }

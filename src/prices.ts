@@ -35,3 +35,14 @@ async function getJson(url: string, fetchFn: typeof fetch): Promise<Response> {
   }
   throw new Error(`DefiLlama unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
+
+export function priceFeed(maxAgeMs: number, fetchFn: typeof fetch = fetch): (tokens: Address[]) => Promise<Map<Address, number>> {
+  let cached: { at: number; requested: Set<Address>; map: Map<Address, number> } | undefined;
+  return async (tokens) => {
+    const requested = new Set(tokens.map((t) => t.toLowerCase() as Address));
+    if (!cached || Date.now() - cached.at > maxAgeMs || [...requested].some((t) => !cached!.requested.has(t))) {
+      cached = { at: Date.now(), requested, map: await prices(tokens, fetchFn) };
+    }
+    return cached.map;
+  };
+}

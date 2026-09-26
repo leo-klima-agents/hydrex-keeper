@@ -3,34 +3,45 @@ import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
 import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
-import { prices } from "./prices.ts";
-import { readEpoch, readRewards } from "./rewards.ts";
+import { priceFeed } from "./prices.ts";
+import { readEpoch, readRewards, readStatic, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, sameVote } from "./vote.ts";
 
 const PUBLIC_RPC = "https://mainnet.base.org";
+const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
+const HORIZON = 3600n; // an execution runs the passes due within this many seconds
+const PRICE_MAX_AGE = 10 * 60_000;
 const ATTEMPTS = 3;
 const RETRY_DELAY = 5_000;
-const LAST_MARGIN = 5_000; // ms before the flip after which nothing is attempted
+const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted
 
 type Whitelist = { pool: Address; name: string }[];
 
 const now = () => BigInt(Math.floor(Date.now() / 1000));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Times (unix seconds) of the passes still ahead, earliest first. */
-export function passTimes(flip: bigint, offsets: bigint[], at: bigint): bigint[] {
-  return [...new Set(offsets.map((o) => flip - o))].filter((t) => t > at).sort((a, b) => (a < b ? -1 : 1));
+/** Times (unix seconds) of the passes due within the horizon, earliest first. */
+export function passTimes(flip: bigint, offsets: bigint[], at: bigint, horizon = HORIZON): bigint[] {
+  return [...new Set(offsets.map((o) => flip - o))].filter((t) => t > at && t <= at + horizon).sort((a, b) => (a < b ? -1 : 1));
 }
 
-async function pass(chain: Chain, whitelist: Whitelist, account: LocalAccount | undefined, dryRun: boolean): Promise<void> {
+type Run = {
+  chain: Chain;
+  whitelist: Whitelist;
+  static: Static;
+  prices: (tokens: Address[]) => Promise<Map<Address, number>>;
+  account: LocalAccount | undefined;
+  dryRun: boolean;
+};
+
+async function pass({ chain, whitelist, static: fixed, prices, account, dryRun }: Run): Promise<void> {
   const epoch = await readEpoch(chain);
   const t = now();
   if (epoch.start !== (t / WEEK) * WEEK) throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
-  const pools = whitelist.map((w) => w.pool);
-  const rewards = await readRewards(chain, pools, epoch);
+  const rewards = await readRewards(chain, fixed, epoch);
   const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)));
   const candidates: Candidate[] = [];
   for (const [i, p] of rewards.entries()) {
@@ -67,7 +78,7 @@ async function main(): Promise<number> {
   const module = getAddress(required("MODULE"));
   const keyVersion = process.env.KMS_KEY_VERSION;
   if (!keyVersion && !dryRun) throw new Error("KMS_KEY_VERSION is not set");
-  const offsets = (process.env.VOTE_OFFSETS ?? "3600,600,60").split(",").map((s) => BigInt(s.trim()));
+  const offsets = (process.env.VOTE_OFFSETS ?? DEFAULT_OFFSETS).split(",").map((s) => BigInt(s.trim()));
   const whitelist = (JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist).map(
     (w) => ({ pool: getAddress(w.pool), name: String(w.name) }),
   );
@@ -79,8 +90,9 @@ async function main(): Promise<number> {
 
   const { flip } = await readEpoch(chain);
   const times = immediately ? [now()] : passTimes(flip, offsets, now());
-  if (times.length === 0) throw new Error(`started too late: the epoch flips at ${flip}, offsets ${offsets.join(",")}`);
+  if (times.length === 0) throw new Error(`no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}`);
   const deadline = flip * 1000n - BigInt(LAST_MARGIN);
+  const run: Run = { chain, whitelist, static: await readStatic(chain, whitelist.map((w) => w.pool)), prices: priceFeed(PRICE_MAX_AGE), account, dryRun };
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
@@ -88,12 +100,14 @@ async function main(): Promise<number> {
     const until = i + 1 < times.length ? times[i + 1]! * 1000n : deadline;
     log.info("pass", { at: time, flip, secondsToFlip: flip - now() });
     for (let attempt = 1; ; attempt++) {
+      const started = Date.now();
       try {
-        await pass(chain, whitelist, account, dryRun);
+        await pass(run);
+        log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
         break;
       } catch (error) {
         const retry = attempt < ATTEMPTS && BigInt(Date.now() + RETRY_DELAY) < until;
-        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, error: describe(error) });
+        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms: Date.now() - started, error: describe(error) });
         if (!retry) {
           failed++;
           break;

@@ -37,7 +37,7 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULE RPC_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -45,8 +45,8 @@ load_config() {
   KEEPER_SA_NAME=${KEEPER_SA_NAME:-hydrex-keeper}
   SCHEDULER_SA_NAME=${SCHEDULER_SA_NAME:-hydrex-keeper-scheduler}
   MODULE=${MODULE:-0x750973E0CB728C3112561Bc8E9b235afA9B17E81}
-  VOTE_OFFSETS=${VOTE_OFFSETS:-3600,600,60}
-  SCHEDULE=${SCHEDULE:-50 22 * * 3}
+  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
+  SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
 
   for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
@@ -70,6 +70,9 @@ load_config() {
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
     *) die "ALERT_EMAIL must be an email address" ;;
+  esac
+  case "$SCHEDULES" in
+    "" | *";;"* | ";"* | *";") die "SCHEDULES must be cron expressions separated by ;" ;;
   esac
 
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
@@ -173,7 +176,21 @@ find_alert() {
 
 job_exists() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
-scheduler_exists() { gcloud scheduler jobs describe "$JOB" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
+# schedules: one "NAME<TAB>CRON" line per entry of SCHEDULES; NAME is $JOB-1, $JOB-2, ...
+schedules() {
+  schedules_rest=$SCHEDULES
+  schedules_i=0
+  while [ -n "$schedules_rest" ]; do
+    schedules_i=$((schedules_i + 1))
+    case "$schedules_rest" in
+      *";"*) schedules_cron=${schedules_rest%%;*} schedules_rest=${schedules_rest#*;} ;;
+      *) schedules_cron=$schedules_rest schedules_rest='' ;;
+    esac
+    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$schedules_cron"
+  done
+}
+
+scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
 secret_versions() {
   gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json | jq 'length'

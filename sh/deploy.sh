@@ -20,8 +20,13 @@ gcloud run jobs deploy "$JOB" --source="$REPO_ROOT" --region="$REGION" --project
 log "== 2/3 job IAM"
 set_iam_authoritative "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$(render_policy job.iam.json.tmpl)" run jobs
 
-log "== 3/3 schedule"
-if [ -n "$(scheduler_exists)" ]; then verb=update; else verb=create; fi
-gcloud scheduler jobs "$verb" http "$JOB" --location="$REGION" --project="$KEEPER_PROJECT" \
-  --schedule="$SCHEDULE" --time-zone=Etc/UTC --uri="$RUN_URI" --http-method=POST \
-  --oauth-service-account-email="$SCHEDULER_SA" --description="starts $JOB before the Hydrex epoch flip"
+log "== 3/3 schedules"
+tab=$(printf '\t')
+while IFS="$tab" read -r name cron; do
+  if [ -n "$(scheduler_exists "$name")" ]; then verb=update; else verb=create; fi
+  gcloud scheduler jobs "$verb" http "$name" --location="$REGION" --project="$KEEPER_PROJECT" \
+    --schedule="$cron" --time-zone=Etc/UTC --uri="$RUN_URI" --http-method=POST \
+    --oauth-service-account-email="$SCHEDULER_SA" --description="starts $JOB before the Hydrex epoch flip"
+done <<LIST
+$(schedules)
+LIST

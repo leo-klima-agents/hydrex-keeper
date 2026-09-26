@@ -19,9 +19,9 @@ export function sameVote(current: Address[], desired: Vote): boolean {
 export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean): Promise<void> {
   const { client, module, keeper, voter, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
-  await client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper });
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
-  const [gas, fees, nonce, balance] = await Promise.all([
+  const [, gas, fees, nonce, balance] = await Promise.all([
+    client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
     client.estimateGas({ account: keeper, to: module, data }),
     client.estimateFeesPerGas(),
     client.getTransactionCount({ address: keeper, blockTag: "pending" }),

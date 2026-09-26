@@ -71,7 +71,7 @@ jobs:
           KMS_KEY_VERSION: ${{ vars.KMS_KEY_VERSION }}
           MODULE: ${{ vars.MODULE }}
           VOTE_OFFSETS: ${{ vars.VOTE_OFFSETS }}
-          SCHEDULE: ${{ vars.SCHEDULE }}
+          SCHEDULES: ${{ vars.SCHEDULES }}
           RPC_SECRET: ${{ vars.RPC_SECRET }}
           ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
         run: |
@@ -84,7 +84,7 @@ jobs:
           KMS_KEY_VERSION='$KMS_KEY_VERSION'
           MODULE='$MODULE'
           VOTE_OFFSETS='$VOTE_OFFSETS'
-          SCHEDULE='$SCHEDULE'
+          SCHEDULES='$SCHEDULES'
           RPC_SECRET='$RPC_SECRET'
           ALERT_EMAIL='$ALERT_EMAIL'
           CFG

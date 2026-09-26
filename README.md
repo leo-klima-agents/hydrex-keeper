@@ -11,8 +11,9 @@ calls `vote` on [hydrex-conduit-executor](https://github.com/ldeso/hydrex-condui
 accepts that key and forwards to Hydrex's Voter. This repo holds the job (`src/`), the whitelist of pools it may vote
 for (`pools.json`), and the scripts that create its Google Cloud project resources and check them for drift (`sh/`).
 
-Every Wednesday at 22:50 UTC Cloud Scheduler starts the job. The job reads the epoch from the Voter, then at 60, 10
-and 1 minute before the Thursday 00:00 UTC flip it reads this epoch's bribes and fees for every whitelisted pool,
+Cloud Scheduler starts the job twice a week: Tuesday 23:50 UTC and Wednesday 23:40 UTC. Each execution runs the
+passes due within the following hour: one 24 hours before the Thursday 00:00 UTC flip, then a geometric series at
+600, 200, 70, 25, 10 and 5 seconds before it. A pass reads this epoch's bribes and fees for every whitelisted pool,
 prices them, and votes for the pool that would pay the conduit the most. Votes do not carry over between epochs, so
 the first pass always votes; later passes only send a transaction if the best pool changed. Claiming and swapping
 rewards is not implemented yet.
@@ -76,8 +77,8 @@ sh/deploy.sh
 
 Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both
 images pinned by digest), deploys the job with the RPC secret and the config as environment, sets the job's IAM so
-only the scheduler account can start it, and creates or updates the schedule. Safe to re-run; re-run it after any
-change to `src/` or `pools.json`.
+only the scheduler account can start it, and creates or updates one Cloud Scheduler job per entry of `SCHEDULES`
+(`hydrex-keeper-1`, `hydrex-keeper-2`). Safe to re-run; re-run it after any change to `src/` or `pools.json`.
 
 ## 7. First vote, watched
 
@@ -88,7 +89,7 @@ sh/run.sh --now             # votes now, unless this epoch already has a vote fo
 
 Read the execution's logs in Cloud Run. The dry run proves the whole path including that the KMS key recovers to
 `KEEPER`. During the real vote, watch `Voter.poolVote(CONDUIT, 0)` and `Voter.votes(CONDUIT, pool)`; the job checks
-both after the receipt and logs them. Without `--now` the job waits for the configured offsets.
+both after the receipt and logs them. Without `--now` the job runs the passes due within the next hour, if any.
 
 ## 8. Check for drift
 
@@ -97,7 +98,7 @@ sh/check.sh
 ```
 
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
-`config.env` and `policy/`; if the schedule, its target, its service account or its state differ; if the secret has no
+`config.env` and `policy/`; if a schedule, its target, its service account or its state differ; if the secret has no
 enabled version or extra readers; if the keeper's service account has a user-managed key, any IAM binding on itself
 (impersonation) or any project-level role; or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
 
@@ -105,7 +106,7 @@ CI runs it every Friday after the vote, and on demand from the Actions tab, exac
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
 a Workload Identity Federation pool and GitHub OIDC provider restricted to this repository, and repository variables
 `KEEPER_PROJECT`, `REGION`, `JOB`, `KEEPER_SA_NAME`, `SCHEDULER_SA_NAME`, `KMS_KEY_VERSION`, `MODULE`, `VOTE_OFFSETS`,
-`SCHEDULE`, `RPC_SECRET`, `ALERT_EMAIL`, `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`. All public material.
+`SCHEDULES`, `RPC_SECRET`, `ALERT_EMAIL`, `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`. All public material.
 
 ## How it votes
 
@@ -126,6 +127,12 @@ into the wrong epoch. Each pass retries up to three times while there is time be
 for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed job up to three times, and
 the restart recomputes the remaining passes from the clock.
 
+The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
+few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution
+reads gauges, bribe contracts and reward tokens once, reuses prices younger than ten minutes, and then needs one
+round trip for the epoch state and one for the pools before signing; a pass measures under a second, and Base blocks
+are two seconds apart, so the last offset of five seconds leaves the transaction a block of margin.
+
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
@@ -133,7 +140,7 @@ the restart recomputes the remaining passes from the clock.
 | Base RPC (`BASE_RPC_URL`, then `https://mainnet.base.org`) | All reads, simulation, sending | Falls back to the public endpoint; if both fail the pass fails and is retried |
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts, then the pass fails. A token it does not price counts as zero and is logged. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
-| Cloud Scheduler | Starting the job | No vote that week; the alert covers failed executions, not absent ones (see below) |
+| Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so |
 | Hydrex's minter | Epoch timestamp | If `_epochTimestamp()` lags the calendar epoch, the job refuses to vote |
 
@@ -171,8 +178,8 @@ by Dependabot, as are npm packages and base images.
 - One pool, all voting power. Water-filling across the whitelist is the planned next strategy.
 - No claiming or swapping of rewards yet.
 - Prices come from one source and are trusted for ranking only.
-- The last pass is one minute before the flip. Pre-signing one transaction per candidate and broadcasting the chosen
-  one after a final read would allow a later last pass.
+- The last pass is five seconds before the flip. Pre-signing one transaction per candidate and broadcasting the
+  chosen one after a final read would allow a later one.
 
 ## License
 

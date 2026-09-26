@@ -34,16 +34,17 @@ job_json() {
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"}'
   else
     sa=$keeper_sa retries=3
-    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"3600,600,60"}'
+    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400,600,200,70,25,10,5"}'
   fi
   printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,{"name":"BASE_RPC_URL","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}}],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \
     "$env" "$region" "$project" "$job" "$retries" "$sa"
 }
 
-scheduler_json() {
-  if [ "$drift" = yes ]; then state=PAUSED; else state=ENABLED; fi
-  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","schedule":"50 22 * * 3","state":"%s","timeZone":"Etc/UTC"}\n' \
-    "$scheduler_sa" "$run_uri" "$project" "$region" "$job" "$state"
+scheduler_json() { # NAME
+  case "$1" in "$job-1") cron='50 23 * * 2' ;; *) cron='40 23 * * 3' ;; esac
+  if [ "$drift" = yes ] && [ "$1" = "$job-2" ]; then state=PAUSED; else state=ENABLED; fi
+  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
+    "$scheduler_sa" "$run_uri" "$project" "$region" "$1" "$cron" "$state"
 }
 
 job_policy_json() {
@@ -171,7 +172,7 @@ case "$*" in
   "scheduler jobs describe "*)
     log_call "$@"
     [ "$has_scheduler" = yes ] || missing "$4"
-    scheduler_json ;;
+    scheduler_json "$4" ;;
   "scheduler jobs create http "* | "scheduler jobs update http "*)
     log_call "$@" ;;
   "projects get-iam-policy "*)

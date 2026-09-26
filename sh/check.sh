@@ -43,14 +43,22 @@ else
   ok "job IAM policy matches template"
 fi
 
-# Schedule
-scheduler=$(scheduler_exists) || die "scheduler job $JOB not found; run deploy.sh"
-expect "schedule" "$(json_field "$scheduler" .schedule)" "$SCHEDULE"
-expect "schedule time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
-expect "schedule target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
-expect "schedule method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
-expect "schedule service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
-expect "schedule state" "$(json_field "$scheduler" .state)" "ENABLED"
+# Schedules
+tab=$(printf '\t')
+while IFS="$tab" read -r name cron; do
+  if ! scheduler=$(scheduler_exists "$name"); then
+    fail "scheduler job $name not found; run deploy.sh"
+    continue
+  fi
+  expect "$name schedule" "$(json_field "$scheduler" .schedule)" "$cron"
+  expect "$name time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
+  expect "$name target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
+  expect "$name method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
+  expect "$name service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
+  expect "$name state" "$(json_field "$scheduler" .state)" "ENABLED"
+done <<LIST
+$(schedules)
+LIST
 
 # Secret
 if [ "$(secret_versions)" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
