@@ -4,7 +4,7 @@ import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
-import { readEpoch, readRewards, readStatic, StaticChanged, type Static } from "./rewards.ts";
+import { readEpoch, readRewards, readStatic, StaticChanged, type Epoch, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, sameVote } from "./vote.ts";
 
@@ -31,6 +31,20 @@ export function missed(flip: bigint, offsets: bigint[], at: bigint, horizon = HO
   return offsets.some((o) => flip - o <= at && flip - o > at - horizon);
 }
 
+/** The passes this execution runs: the ones due ahead, or a missed one right now, or none. */
+export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediately: boolean): { times: bigint[]; note?: string } {
+  if (immediately) return { times: [at] };
+  const times = passTimes(flip, offsets, at);
+  if (times.length) return { times };
+  if (flip > at && missed(flip, offsets, at)) return { times: [at], note: "running the missed pass now" };
+  return { times: [], note: `no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}` };
+}
+
+function assertFresh(epoch: Epoch): void {
+  const t = now();
+  if (epoch.start !== (t / WEEK) * WEEK) throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
+}
+
 type Run = {
   chain: Chain;
   whitelist: Whitelist;
@@ -40,11 +54,10 @@ type Run = {
   dryRun: boolean;
 };
 
-async function pass(run: Run): Promise<void> {
+async function pass(run: Run, until: bigint): Promise<void> {
   const { chain, whitelist, prices, account, dryRun } = run;
   const epoch = await readEpoch(chain);
-  const t = now();
-  if (epoch.start !== (t / WEEK) * WEEK) throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
+  assertFresh(epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
   run.static ??= await readStatic(chain, whitelist.map((w) => w.pool));
@@ -74,6 +87,7 @@ async function pass(run: Run): Promise<void> {
     log.info("candidate", { pool: nameOf(p.pool), alive: p.alive, rewardsUsd, otherVotes: p.otherVotes, rewards: detail });
   }
 
+  if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
   const vote = select(candidates, epoch.power);
   if (!vote) {
     log.warning("no pool pays anything; keeping the current vote", { currentVote: epoch.currentVote });
@@ -85,7 +99,7 @@ async function pass(run: Run): Promise<void> {
     return;
   }
   log.info("voting", { pools: names, currentVote: epoch.currentVote, power: epoch.power });
-  await castVote(chain, account, vote, dryRun);
+  await castVote(chain, account, vote, dryRun, until);
 }
 
 async function main(): Promise<number> {
@@ -106,16 +120,19 @@ async function main(): Promise<number> {
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 
-  const { flip } = await readEpoch(chain);
-  const times = immediately ? [now()] : passTimes(flip, offsets, now());
-  if (times.length === 0) {
-    const message = `no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}`;
-    if (missed(flip, offsets, now())) throw new Error(`started too late; ${message}`);
-    log.warning(message);
-    return 0;
-  }
+  const epoch = await readEpoch(chain);
+  assertFresh(epoch);
+  const { flip } = epoch;
+  const { times, note } = schedule(flip, offsets, now(), immediately);
+  if (note) log.warning(note, { flip });
+  if (times.length === 0) return 0;
   const deadline = flip * 1000n - BigInt(LAST_MARGIN);
   const run: Run = { chain, whitelist, prices: priceFeed(PRICE_MAX_AGE), account, dryRun };
+  try {
+    run.static = await readStatic(chain, whitelist.map((w) => w.pool));
+  } catch (error) {
+    log.warning("static read failed; the first pass retries it", { error: describe(error) });
+  }
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
@@ -129,7 +146,7 @@ async function main(): Promise<number> {
     for (let attempt = 1; ; attempt++) {
       const started = Date.now();
       try {
-        await pass(run);
+        await pass(run, until);
         log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
         break;
       } catch (error) {

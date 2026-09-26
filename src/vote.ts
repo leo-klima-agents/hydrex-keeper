@@ -1,4 +1,4 @@
-import { encodeFunctionData, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
+import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
 import { readMany, type Chain } from "./chain.ts";
@@ -15,8 +15,8 @@ export function sameVote(current: Address[], desired: Vote): boolean {
   );
 }
 
-/** Simulates, signs and sends module.vote; verifies the Voter recorded it. */
-export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean): Promise<void> {
+/** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
+export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: bigint): Promise<void> {
   const { client, module, keeper, voter, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
@@ -24,7 +24,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
     client.estimateGas({ account: keeper, to: module, data }),
     client.estimateFeesPerGas(),
-    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
+    client.getTransactionCount({ address: keeper, blockTag: "latest" }),
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
@@ -33,8 +33,9 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     to: module,
     data,
     gas: (gas * 12n) / 10n,
-    maxFeePerGas: fees.maxFeePerGas,
-    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    // A quarter above the estimate replaces a vote still pending under the same nonce.
+    maxFeePerGas: (fees.maxFeePerGas * 5n) / 4n,
+    maxPriorityFeePerGas: (fees.maxPriorityFeePerGas * 5n) / 4n,
     nonce,
   };
   const cost = tx.gas! * tx.maxFeePerGas! + l1Fee;
@@ -62,7 +63,15 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
 
   const hash = await client.sendRawTransaction({ serializedTransaction: signed });
   log.info("vote sent", { hash });
-  const receipt = await client.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT });
+  const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
+  let receipt;
+  try {
+    receipt = await client.waitForTransactionReceipt({ hash, timeout });
+  } catch (error) {
+    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw error;
+    log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
+    return;
+  }
   if (receipt.status !== "success") throw new Error(`vote ${hash} reverted`);
   const recorded = await readMany<Address | bigint>(
     client,

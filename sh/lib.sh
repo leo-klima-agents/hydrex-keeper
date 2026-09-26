@@ -102,6 +102,11 @@ json_field() {
   printf '%s\n' "$1" | jq -r "($2) // \"\"" || die "cannot parse JSON"
 }
 
+# require_json JSON LABEL: dies unless JSON parses.
+require_json() {
+  printf '%s\n' "$1" | jq -e . >/dev/null 2>&1 || die "$2 is not JSON: $1"
+}
+
 # Canonical policy: sorted bindings, without etag and version.
 normalize_policy() {
   jq -S '{
@@ -131,7 +136,9 @@ get_iam() {
   iam_flags=$2
   shift 2
   # shellcheck disable=SC2086
-  gcloud "$@" get-iam-policy $iam_flags "$iam_resource" --format=json
+  iam_json=$(gcloud "$@" get-iam-policy $iam_flags "$iam_resource" --format=json) || die "cannot read IAM policy of $iam_resource"
+  require_json "$iam_json" "IAM policy of $iam_resource"
+  printf '%s\n' "$iam_json"
 }
 
 # write_iam_if_changed RESOURCE FLAGS LIVE DESIRED gcloud-subcommand...: writes DESIRED in full with LIVE's etag.
@@ -165,16 +172,18 @@ set_iam_authoritative() {
 
 # find_channel: name of the email notification channel for ALERT_EMAIL, or "".
 find_channel() {
-  gcloud beta monitoring channels list --project="$KEEPER_PROJECT" \
-    --filter="type=email AND labels.email_address=$ALERT_EMAIL" --format=json |
-    jq -r 'first(.[] | .name) // ""'
+  channels=$(gcloud beta monitoring channels list --project="$KEEPER_PROJECT" \
+    --filter="type=email AND labels.email_address=$ALERT_EMAIL" --format=json) || die "cannot list notification channels"
+  require_json "$channels" "channel list"
+  printf '%s\n' "$channels" | jq -r 'first(.[] | .name) // ""'
 }
 
 # find_alert: the alert policy named ALERT_NAME as JSON, or "".
 find_alert() {
-  gcloud monitoring policies list --project="$KEEPER_PROJECT" \
-    --filter="displayName=\"$ALERT_NAME\"" --format=json |
-    jq -c 'first(.[]) // empty'
+  alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" \
+    --filter="displayName=\"$ALERT_NAME\"" --format=json) || die "cannot list alert policies"
+  require_json "$alerts" "alert policy list"
+  printf '%s\n' "$alerts" | jq -c 'first(.[]) // empty'
 }
 
 job_exists() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
@@ -187,12 +196,16 @@ schedule_start() {
   set +f
   [ $# -eq 5 ] && [ "$3" = '*' ] && [ "$4" = '*' ] || die "SCHEDULES entries must be 'M H * * D': $*"
   case "$1$2$5" in *[!0-9]*) die "SCHEDULES entries must be 'M H * * D': $*" ;; esac
-  schedule_start_seconds=$(((FLIP_WEEKDAY - $5 + 7) % 7 * 86400 - $2 * 3600 - $1 * 60))
+  # Leading zeros would read as octal in arithmetic.
+  minute=$(printf '%s' "$1" | sed 's/^0*\([0-9]\)/\1/')
+  hour=$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')
+  weekday=$(printf '%s' "$5" | sed 's/^0*\([0-9]\)/\1/')
+  schedule_start_seconds=$(((FLIP_WEEKDAY - weekday + 7) % 7 * 86400 - hour * 3600 - minute * 60))
   [ "$schedule_start_seconds" -gt 0 ] || schedule_start_seconds=$((schedule_start_seconds + 604800))
   printf '%s\n' "$schedule_start_seconds"
 }
 
-# Every offset must fall within HORIZON after some schedule start, or the job never runs that pass.
+# Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
 check_offsets_covered() {
   starts=''
   rest=$SCHEDULES
@@ -203,7 +216,7 @@ check_offsets_covered() {
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
     covered=no
     for start in $starts; do
-      [ "$offset" -le "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
+      [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
     done
     [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
   done
@@ -228,7 +241,9 @@ scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --
 # stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists.
 stale_schedulers() {
   stale_configured=$(schedules | cut -f1)
-  gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json |
+  stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
+  require_json "$stale_list" "scheduler job list"
+  printf '%s\n' "$stale_list" |
     jq -r --arg job "$JOB" '.[].name | split("/") | last | select(. == $job or startswith($job + "-"))' |
     while IFS= read -r stale_name; do
       printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
@@ -236,5 +251,8 @@ stale_schedulers() {
 }
 
 secret_versions() {
-  gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json | jq 'length'
+  versions=$(gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
+    die "cannot list versions of $RPC_SECRET"
+  require_json "$versions" "secret version list"
+  printf '%s\n' "$versions" | jq 'length'
 }

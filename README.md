@@ -40,8 +40,8 @@ cp config.env.example config.env
 
 Fill in `KEEPER_PROJECT` (a project that holds nothing else), `KMS_KEY_VERSION` (`version` from the key repo's
 `record/keeper.json`) and `ALERT_EMAIL`. The defaults for the rest match the deployed module and the sibling repos.
-Every script checks that each `VOTE_OFFSETS` entry falls within the hour after some `SCHEDULES` entry (which must be
-of the form `M H * * D`), since an execution only runs the passes due within that hour.
+Every script checks that each `VOTE_OFFSETS` entry falls strictly within the hour after some `SCHEDULES` entry (which
+must be of the form `M H * * D`), since an execution only runs the passes due within that hour.
 
 ## 2. Create the project resources
 
@@ -130,10 +130,13 @@ The Voter keeps last epoch's `poolVote` and `votes` until that reset, so the job
 `lastVoted` falls in the current epoch.
 Voting at or after the flip reverts (`EpochFlipInProgress`, `EpochStale`), so a late pass fails instead of voting
 into the wrong epoch. A pass that is already overdue when its turn comes (an earlier pass waited on a slow receipt)
-is skipped. Each pass retries up to three times while there is time before the next one. A pass that fails for good
-makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed job up to three times, and the
-restart recomputes the remaining passes from the clock. An execution that finds nothing due exits non-zero only if a
-pass was due within the past hour (a late start); a restart after the flip exits cleanly.
+is skipped; the receipt wait itself is bounded by the next pass, and a vote whose receipt has not arrived by then is
+left for the next pass to observe on the Voter. Each pass retries up to three times while there is time before the
+next one. A pass that fails for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed
+job up to three times, and the restart recomputes the remaining passes from the clock: a pass missed within the past
+hour runs right away, a restart after the flip exits cleanly. A vote is sent with the account's confirmed nonce and
+fees a quarter above the estimate, so a re-vote replaces a transaction still pending rather than queueing behind it.
+A Voter whose epoch lags the calendar (minter not updated) fails the execution at startup and at every pass.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution

@@ -24,6 +24,7 @@ expect() {
 
 # Job
 job=$(job_exists) || die "job $JOB not found; run deploy.sh"
+require_json "$job" "job $JOB"
 task='.spec.template.spec.template.spec'
 expect "job service account" "$(json_field "$job" "$task.serviceAccountName")" "$KEEPER_SA"
 expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT_SECONDS"
@@ -50,6 +51,7 @@ while IFS="$tab" read -r name cron; do
     fail "scheduler job $name not found; run deploy.sh"
     continue
   fi
+  require_json "$scheduler" "scheduler job $name"
   expect "$name schedule" "$(json_field "$scheduler" .schedule)" "$cron"
   expect "$name time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
   expect "$name target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
@@ -75,6 +77,7 @@ fi
 # Service accounts: no downloadable key, nobody can impersonate the keeper, no project-level role.
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||
   die "cannot list keys of $KEEPER_SA"
+require_json "$sa_keys" "key list of $KEEPER_SA"
 sa_key_ids=$(printf '%s\n' "$sa_keys" | jq -r '[.[].name | split("/") | last] | join(" ")')
 if [ -z "$sa_key_ids" ]; then ok "$KEEPER_SA has no user-managed keys"; else fail "$KEEPER_SA has user-managed keys: $sa_key_ids"; fi
 sa_policy=$(get_iam "$KEEPER_SA" "--project=$KEEPER_PROJECT" iam service-accounts)
