@@ -1,5 +1,26 @@
 [
-  { "pool": "0x51f0B932855986B0E621c9D4DB6Eee1f4644D3D2", "name": "HYDX/USDC" },
   { "pool": "0x7796fc53B75960A9762Ba267c19F5da9868B7853", "name": "wtSPYM/USDC" },
-  { "pool": "0x9849E92f29a9d3b89fe09694746E7AcF52bBc37D", "name": "wtGRND/USDC" }
+  { "pool": "0x51f0B932855986B0E621c9D4DB6Eee1f4644D3D2", "name": "HYDX/USDC" },
+  { "pool": "0x9849E92f29a9d3b89fe09694746E7AcF52bBc37D", "name": "wtGRND/USDC" },
+  { "pool": "0x3f9b863EF4B295d6Ba370215bcCa3785FCC44f44", "name": "WETH/cbBTC" },
+  { "pool": "0x680581725840958141Bb328666D8Fc185aC4FA49", "name": "BNKR/WETH" },
+  { "pool": "0x02107bAb40bBA06AE979A15f67B5AD3853c5E116", "name": "USDC/VVV" },
+  { "pool": "0x82dbe18346a8656dBB5E76F74bf3AE279cC16B29", "name": "WETH/USDC" },
+  { "pool": "0x0BA69825c4C033e72309F6AC0Bde0023b15Cc97c", "name": "USDC/cbBTC" },
+  { "pool": "0xB20f018Dde5A6FE7F93c31Da05a5Da9EfBc52772", "name": "WETH/EURC" },
+  { "pool": "0x6C072f7c8E54Ff147817d0Dd6Fd08734EDE6dE1f", "name": "SOL/cbBTC" },
+  { "pool": "0xFE4D6560D04fED2c9b6b163cb88979D7Cce3874a", "name": "EURC/cbBTC" },
+  { "pool": "0xB651439c9B086c7B4399C623e54dEeBCb3905f17", "name": "VVV/cbBTC" },
+  { "pool": "0x558684fDAd1D3b69f920b0C8E5Ae9ff797e3f045", "name": "WETH/cbBTC (2)" },
+  { "pool": "0xed14CC089C687695565079E816fBAd4132BcaccE", "name": "BNKR/WETH (2)" },
+  { "pool": "0xCf27Dd90878Dd88FD58bFfFCBDfBC7E0Cf7cd779", "name": "WETH/cbBTC (3)" },
+  { "pool": "0x25154C35b24aF82196bAc0D143dD973335201b6a", "name": "USDC/cbBTC (2)" },
+  { "pool": "0x4DC7EfB7d005DD514aCDc0a0631630b67dD83A4B", "name": "WETH/USDC (2)" },
+  { "pool": "0x0f0824706b8daa0096377054D3f942ccb0d5E3D4", "name": "BNKR/WETH (3)" },
+  { "pool": "0x07e72E46C319a6d5aCA28Ad52f5C41a7821989Ad", "name": "WETH/USDC (3)" },
+  { "pool": "0x0C9be6dF4e114D5Cb04Cbb934172Be1FcC5526c6", "name": "WETH/USDC (4)" },
+  { "pool": "0x855fcFC162d89bB4930C746D01F25d255DE5f772", "name": "EURC/USDC" },
+  { "pool": "0xE72258d2844Dcd3092825D51bF3C380424723B2d", "name": "WETH/EURC (2)" },
+  { "pool": "0x904E1638172736e81e729E350c6521e9C0CB353D", "name": "EURC/cbBTC (2)" },
+  { "pool": "0x7e20dB1f411458875aD1D862dB100cc1dcCFBD50", "name": "EURC/cbBTC (3)" }
 ]

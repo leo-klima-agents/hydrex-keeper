@@ -21,7 +21,9 @@ rewards is not implemented yet.
 ## What it can and cannot do
 
 - **Can:** call `vote` on the module with pools from `pools.json`, at the times in `VOTE_OFFSETS`. That is the entire
-  effect of a compromised keeper: a suboptimal vote within the whitelist. The module, the conduit and the Voter enforce
+  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address; it
+  currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC, BNKR, wtSPYM and VVV, plus the
+  HYDX/USDC and wtGRND/USDC pools. The module, the conduit and the Voter enforce
   everything else (single caller, gauge liveness, voting power, epoch timing).
 - **Cannot:** claim, swap, move funds, call any other contract, or read the private key. It asks Cloud KMS to sign
   one hash per vote; the key never leaves the HSM. The job's service account has no role in its own project beyond
