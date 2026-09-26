@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { passTimes } from "../src/main.ts";
+import { missed, passTimes } from "../src/main.ts";
 import { sameVote } from "../src/vote.ts";
 
 const A = "0x000000000000000000000000000000000000000a";
@@ -21,4 +21,12 @@ test("sameVote compares pools case-insensitively and in order", () => {
   assert.equal(sameVote([A], { pools: [A.toUpperCase() as typeof A], weights: [100n] }), true);
   assert.equal(sameVote([A, B], { pools: [B, A], weights: [1n, 1n] }), false);
   assert.equal(sameVote([], { pools: [A], weights: [100n] }), false);
+});
+
+test("missed tells a late start from a restart after the flip", () => {
+  const flip = 1_790_812_800n;
+  assert.equal(missed(flip, [600n, 5n], flip - 300n), true, "the 600 s pass was due 5 minutes ago");
+  assert.equal(missed(flip, [600n, 5n], flip + 100n), true, "both passes were due within the last hour");
+  assert.equal(missed(flip + 604800n, [86400n, 600n, 5n], flip + 100n), false, "next week's passes are not due");
+  assert.equal(missed(flip, [86400n], flip - 3600n), false, "due exactly one horizon ago does not count");
 });

@@ -1,4 +1,5 @@
 import type { Address } from "viem";
+import { describe, log } from "./log.ts";
 
 // USD prices from DefiLlama. Tokens it does not know are absent from the result.
 const ENDPOINT = "https://coins.llama.fi/prices/current/";
@@ -39,10 +40,15 @@ async function getJson(url: string, fetchFn: typeof fetch): Promise<Response> {
 export function priceFeed(maxAgeMs: number, fetchFn: typeof fetch = fetch): (tokens: Address[]) => Promise<Map<Address, number>> {
   let cached: { at: number; requested: Set<Address>; map: Map<Address, number> } | undefined;
   return async (tokens) => {
-    const requested = new Set(tokens.map((t) => t.toLowerCase() as Address));
-    if (!cached || Date.now() - cached.at > maxAgeMs || [...requested].some((t) => !cached!.requested.has(t))) {
-      cached = { at: Date.now(), requested, map: await prices(tokens, fetchFn) };
+    const requested = tokens.map((t) => t.toLowerCase() as Address);
+    const covered = cached !== undefined && requested.every((t) => cached!.requested.has(t));
+    if (covered && Date.now() - cached!.at <= maxAgeMs) return cached!.map;
+    try {
+      cached = { at: Date.now(), requested: new Set(requested), map: await prices(tokens, fetchFn) };
+    } catch (error) {
+      if (!covered) throw error;
+      log.warning("using cached prices", { ageMs: Date.now() - cached!.at, reason: describe(error) });
     }
-    return cached.map;
+    return cached!.map;
   };
 }

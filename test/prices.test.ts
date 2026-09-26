@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { prices } from "../src/prices.ts";
+import { priceFeed, prices } from "../src/prices.ts";
 
 const WETH = "0x4200000000000000000000000000000000000006";
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -46,4 +46,28 @@ test("retries on failure, then gives up", async () => {
   const failing = fakeFetch([() => new Response("", { status: 503 }), () => new Response("", { status: 503 }), () => new Response("", { status: 503 })]);
   await assert.rejects(prices([WETH], failing.fetchFn), /DefiLlama unavailable: HTTP 503/);
   assert.equal(failing.urls.length, 3);
+});
+
+test("priceFeed reuses fresh prices, refreshes on age or new tokens, serves stale ones on failure", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const responses = [
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 }, [`base:${USDC.toLowerCase()}`]: { price: 1 } } }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 3 } } }),
+    () => new Response("", { status: 503 }),
+    () => new Response("", { status: 503 }),
+    () => new Response("", { status: 503 }),
+  ];
+  const { fetchFn, urls } = fakeFetch(responses);
+  const feed = priceFeed(60_000, fetchFn);
+  assert.equal((await feed([WETH])).get(WETH), 1);
+  assert.equal((await feed([WETH])).get(WETH), 1, "cached");
+  assert.equal(urls.length, 1);
+  assert.equal((await feed([WETH, USDC])).get(WETH), 2, "a new token forces a refresh");
+  t.mock.timers.tick(60_001);
+  assert.equal((await feed([WETH])).get(WETH), 3, "expired");
+  t.mock.timers.tick(60_001);
+  assert.equal((await feed([WETH])).get(WETH), 3, "stale prices are served when the refresh fails");
+  assert.equal(urls.length, 6);
+  await assert.rejects(feed([JUNK]), /DefiLlama unavailable/);
 });

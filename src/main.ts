@@ -4,14 +4,14 @@ import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
-import { readEpoch, readRewards, readStatic, type Static } from "./rewards.ts";
+import { readEpoch, readRewards, readStatic, StaticChanged, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, sameVote } from "./vote.ts";
 
 const PUBLIC_RPC = "https://mainnet.base.org";
 const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
 const HORIZON = 3600n; // an execution runs the passes due within this many seconds
-const PRICE_MAX_AGE = 10 * 60_000;
+const PRICE_MAX_AGE = 30 * 60_000;
 const ATTEMPTS = 3;
 const RETRY_DELAY = 5_000;
 const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted
@@ -26,24 +26,40 @@ export function passTimes(flip: bigint, offsets: bigint[], at: bigint, horizon =
   return [...new Set(offsets.map((o) => flip - o))].filter((t) => t > at && t <= at + horizon).sort((a, b) => (a < b ? -1 : 1));
 }
 
+/** Whether a pass was due within the horizon before `at`: a late start, as opposed to a restart after the flip. */
+export function missed(flip: bigint, offsets: bigint[], at: bigint, horizon = HORIZON): boolean {
+  return offsets.some((o) => flip - o <= at && flip - o > at - horizon);
+}
+
 type Run = {
   chain: Chain;
   whitelist: Whitelist;
-  static: Static;
+  static?: Static;
   prices: (tokens: Address[]) => Promise<Map<Address, number>>;
   account: LocalAccount | undefined;
   dryRun: boolean;
 };
 
-async function pass({ chain, whitelist, static: fixed, prices, account, dryRun }: Run): Promise<void> {
+async function pass(run: Run): Promise<void> {
+  const { chain, whitelist, prices, account, dryRun } = run;
   const epoch = await readEpoch(chain);
   const t = now();
   if (epoch.start !== (t / WEEK) * WEEK) throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
-  const rewards = await readRewards(chain, fixed, epoch);
+  run.static ??= await readStatic(chain, whitelist.map((w) => w.pool));
+  let rewards;
+  try {
+    rewards = await readRewards(chain, run.static, epoch);
+  } catch (error) {
+    if (!(error instanceof StaticChanged)) throw error;
+    log.info("reward tokens changed, re-reading");
+    run.static = await readStatic(chain, whitelist.map((w) => w.pool));
+    rewards = await readRewards(chain, run.static, epoch);
+  }
   const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)));
   const candidates: Candidate[] = [];
+  const nameOf = (pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
   for (const [i, p] of rewards.entries()) {
     const detail = p.rewards.map((r) => {
       const price = priced.get(r.token.toLowerCase() as Address);
@@ -52,10 +68,10 @@ async function pass({ chain, whitelist, static: fixed, prices, account, dryRun }
     });
     const rewardsUsd = detail.reduce((sum, d) => sum + (d.usd ?? 0), 0);
     const unpriced = detail.filter((d) => d.usd === null);
-    if (unpriced.length) log.warning("unpriced rewards count as zero", { pool: whitelist[i]!.name, unpriced });
-    if (!p.alive) log.warning("gauge is dead, skipping", { pool: whitelist[i]!.name });
+    if (unpriced.length) log.warning("unpriced rewards count as zero", { pool: nameOf(p.pool), unpriced });
+    if (!p.alive) log.warning("gauge is dead, skipping", { pool: nameOf(p.pool) });
     else candidates.push({ pool: p.pool, rewardsUsd, otherVotes: p.otherVotes });
-    log.info("candidate", { pool: whitelist[i]!.name, alive: p.alive, rewardsUsd, otherVotes: p.otherVotes, rewards: detail });
+    log.info("candidate", { pool: nameOf(p.pool), alive: p.alive, rewardsUsd, otherVotes: p.otherVotes, rewards: detail });
   }
 
   const vote = select(candidates, epoch.power);
@@ -63,7 +79,7 @@ async function pass({ chain, whitelist, static: fixed, prices, account, dryRun }
     log.warning("no pool pays anything; keeping the current vote", { currentVote: epoch.currentVote });
     return;
   }
-  const names = vote.pools.map((pool) => whitelist.find((w) => w.pool === pool)?.name ?? pool);
+  const names = vote.pools.map(nameOf);
   if (sameVote(epoch.currentVote, vote)) {
     log.info("already voted for the best pool this epoch", { pools: names });
     return;
@@ -78,7 +94,9 @@ async function main(): Promise<number> {
   const module = getAddress(required("MODULE"));
   const keyVersion = process.env.KMS_KEY_VERSION;
   if (!keyVersion && !dryRun) throw new Error("KMS_KEY_VERSION is not set");
-  const offsets = (process.env.VOTE_OFFSETS ?? DEFAULT_OFFSETS).split(",").map((s) => BigInt(s.trim()));
+  const offsetFields = (process.env.VOTE_OFFSETS ?? DEFAULT_OFFSETS).split(",");
+  if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
+  const offsets = offsetFields.map(BigInt);
   const whitelist = (JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist).map(
     (w) => ({ pool: getAddress(w.pool), name: String(w.name) }),
   );
@@ -90,14 +108,23 @@ async function main(): Promise<number> {
 
   const { flip } = await readEpoch(chain);
   const times = immediately ? [now()] : passTimes(flip, offsets, now());
-  if (times.length === 0) throw new Error(`no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}`);
+  if (times.length === 0) {
+    const message = `no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}`;
+    if (missed(flip, offsets, now())) throw new Error(`started too late; ${message}`);
+    log.warning(message);
+    return 0;
+  }
   const deadline = flip * 1000n - BigInt(LAST_MARGIN);
-  const run: Run = { chain, whitelist, static: await readStatic(chain, whitelist.map((w) => w.pool)), prices: priceFeed(PRICE_MAX_AGE), account, dryRun };
+  const run: Run = { chain, whitelist, prices: priceFeed(PRICE_MAX_AGE), account, dryRun };
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
     await sleep(Number(time * 1000n - BigInt(Date.now())));
     const until = i + 1 < times.length ? times[i + 1]! * 1000n : deadline;
+    if (BigInt(Date.now()) >= until) {
+      log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
+      continue;
+    }
     log.info("pass", { at: time, flip, secondsToFlip: flip - now() });
     for (let attempt = 1; ; attempt++) {
       const started = Date.now();

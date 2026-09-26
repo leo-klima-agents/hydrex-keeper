@@ -2,6 +2,7 @@ gcloud run jobs describe hydrex-keeper --region=us-central1 --project=hydrex-kee
 gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
 gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --format=json
+gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
 gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --managed-by=user --format=json
@@ -43,6 +44,7 @@ ok: hydrex-keeper-2 target is https://run.googleapis.com/v2/projects/hydrex-keep
 ok: hydrex-keeper-2 method is POST
 ok: hydrex-keeper-2 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 FAIL: hydrex-keeper-2 state is PAUSED, expected ENABLED
+FAIL: stale scheduler jobs: hydrex-keeper
 ok: base-rpc-url has an enabled version
 FAIL: secret IAM policy differs from template
 @@ -2,7 +2,8 @@

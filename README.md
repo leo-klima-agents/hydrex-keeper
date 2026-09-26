@@ -40,6 +40,8 @@ cp config.env.example config.env
 
 Fill in `KEEPER_PROJECT` (a project that holds nothing else), `KMS_KEY_VERSION` (`version` from the key repo's
 `record/keeper.json`) and `ALERT_EMAIL`. The defaults for the rest match the deployed module and the sibling repos.
+Every script checks that each `VOTE_OFFSETS` entry falls within the hour after some `SCHEDULES` entry (which must be
+of the form `M H * * D`), since an execution only runs the passes due within that hour.
 
 ## 2. Create the project resources
 
@@ -67,7 +69,8 @@ The job falls back to `https://mainnet.base.org` when this URL fails.
 ## 5. Fund the keeper
 
 Send ETH on Base to `KEEPER` (`0x625CF6663d9D090535FBd57680bFFE6fA0262434`, from the key repo's record). A vote costs
-a few thousandths of a cent; 0.005 ETH lasts years. The job refuses to vote with less than twice the estimated cost.
+a few thousandths of a cent; 0.005 ETH lasts years. The job refuses to vote with less than twice the estimated cost,
+L1 data fee included.
 
 ## 6. Deploy
 
@@ -78,7 +81,8 @@ sh/deploy.sh
 Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both
 images pinned by digest), deploys the job with the RPC secret and the config as environment, sets the job's IAM so
 only the scheduler account can start it, and creates or updates one Cloud Scheduler job per entry of `SCHEDULES`
-(`hydrex-keeper-1`, `hydrex-keeper-2`). Safe to re-run; re-run it after any change to `src/` or `pools.json`.
+(`hydrex-keeper-1`, `hydrex-keeper-2`), deleting any `hydrex-keeper*` scheduler job no longer listed. Safe to re-run;
+re-run it after any change to `src/` or `pools.json`.
 
 ## 7. First vote, watched
 
@@ -98,7 +102,8 @@ sh/check.sh
 ```
 
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
-`config.env` and `policy/`; if a schedule, its target, its service account or its state differ; if the secret has no
+`config.env` and `policy/`; if a schedule, its target, its service account or its state differ, or a stale scheduler
+job remains; if the secret has no
 enabled version or extra readers; if the keeper's service account has a user-managed key, any IAM binding on itself
 (impersonation) or any project-level role; or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
 
@@ -112,9 +117,10 @@ a Workload Identity Federation pool and GitHub OIDC provider restricted to this 
 
 Everything on-chain is derived from `MODULE`: its `CONDUIT` and `KEEPER`, the conduit's `voter` and `veToken`.
 
-For each pool in `pools.json` the job reads the gauge, whether it is alive, its votes this epoch, and this epoch's
-`rewardsPerEpoch` of every token in its external bribe (bribes) and internal bribe (trading fees) contracts, then
-prices the tokens in USD. With `v` the conduit's voting power at epoch start and `V` the pool's votes from others,
+For each pool in `pools.json` the job reads the gauge (a pool without one is skipped), whether it is alive, its votes
+this epoch, and this epoch's `rewardsPerEpoch` of every token in its external bribe (bribes) and internal bribe
+(trading fees) contracts, then prices the tokens in USD. Bribes notified during an epoch are keyed to that epoch on
+Hydrex's `BribeV2`, which is what the job reads. With `v` the conduit's voting power at epoch start and `V` the pool's votes from others,
 voting everything for one pool is expected to pay `usd × v / (V + v)`. The pool with the largest value wins; ties keep
 whitelist order; if nothing pays, the current vote is kept. `src/select.ts` is this function and nothing else, so a
 different strategy (water-filling across several pools) replaces one file.
@@ -123,22 +129,26 @@ Re-voting is safe: Hydrex's `VOTE_DELAY` is zero and `vote` resets before recast
 The Voter keeps last epoch's `poolVote` and `votes` until that reset, so the job treats them as absent unless
 `lastVoted` falls in the current epoch.
 Voting at or after the flip reverts (`EpochFlipInProgress`, `EpochStale`), so a late pass fails instead of voting
-into the wrong epoch. Each pass retries up to three times while there is time before the next one. A pass that fails
-for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed job up to three times, and
-the restart recomputes the remaining passes from the clock.
+into the wrong epoch. A pass that is already overdue when its turn comes (an earlier pass waited on a slow receipt)
+is skipped. Each pass retries up to three times while there is time before the next one. A pass that fails for good
+makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed job up to three times, and the
+restart recomputes the remaining passes from the clock. An execution that finds nothing due exits non-zero only if a
+pass was due within the past hour (a late start); a restart after the flip exits cleanly.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution
-reads gauges, bribe contracts and reward tokens once, reuses prices younger than ten minutes, and then needs one
-round trip for the epoch state and one for the pools before signing; a pass measures under a second, and Base blocks
-are two seconds apart, so the last offset of five seconds leaves the transaction a block of margin.
+reads gauges, bribe contracts and reward tokens once (re-reading them if a bribe contract gains a token), reuses
+prices younger than thirty minutes (and keeps serving them if DefiLlama fails), and then needs one round trip for the
+epoch state and one for the pools before signing; a pass measures under a second, and Base blocks are two seconds
+apart, so the last offset of five seconds leaves the transaction a block of margin. After a vote the Voter is read at
+the receipt's block, so a lagging fallback node cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
 | Base RPC (`BASE_RPC_URL`, then `https://mainnet.base.org`) | All reads, simulation, sending | Falls back to the public endpoint; if both fail the pass fails and is retried |
-| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts, then the pass fails. A token it does not price counts as zero and is logged. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
+| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts, then prices from the last half hour are reused, else the pass fails. A token it does not price counts as zero and is logged. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so |
@@ -155,7 +165,7 @@ are two seconds apart, so the last offset of five seconds leaves the transaction
 ## Development
 
 `npm ci`, then `npm run typecheck` and `npm test` (unit tests: selection, DER and low-s handling with a throwaway key
-and a stubbed KMS, price parsing, pass scheduling). `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
+and a stubbed KMS, price parsing and caching, reward mapping against a fake client, pass scheduling). `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
 BASE_RPC_URL=… npm run dry-run` runs a full pass against Base without a metadata server: it stops after simulating
 and estimating, logging what it would have signed.
 

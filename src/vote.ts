@@ -20,13 +20,14 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   const { client, module, keeper, voter, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
-  const [, gas, fees, nonce, balance] = await Promise.all([
+  const [gas, fees, nonce, balance, l1Fee] = await allOrFirstFailure([
     client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
     client.estimateGas({ account: keeper, to: module, data }),
     client.estimateFeesPerGas(),
     client.getTransactionCount({ address: keeper, blockTag: "pending" }),
     client.getBalance({ address: keeper }),
-  ]);
+    client.estimateL1Fee({ account: keeper, to: module, data }),
+  ]).then(([, ...rest]) => rest);
   const tx: TransactionSerializableEIP1559 = {
     chainId: base.id,
     to: module,
@@ -36,7 +37,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
     nonce,
   };
-  const cost = tx.gas! * tx.maxFeePerGas!;
+  const cost = tx.gas! * tx.maxFeePerGas! + l1Fee;
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce });
 
@@ -63,11 +64,23 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   log.info("vote sent", { hash });
   const receipt = await client.waitForTransactionReceipt({ hash, timeout: RECEIPT_TIMEOUT });
   if (receipt.status !== "success") throw new Error(`vote ${hash} reverted`);
-  const recorded = await readMany<Address | bigint>(client, [
-    ...vote.pools.map((_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
-    ...vote.pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
-  ]);
+  const recorded = await readMany<Address | bigint>(
+    client,
+    [
+      ...vote.pools.map((_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
+      ...vote.pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
+    ],
+    { blockNumber: receipt.blockNumber },
+  );
   const pools = recorded.slice(0, vote.pools.length) as Address[];
   if (!sameVote(pools, vote)) throw new Error(`Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
+}
+
+/** Like Promise.all, but the rejection reported is the earliest in the list, not the earliest in time. */
+async function allOrFirstFailure<T extends readonly unknown[]>(promises: { [K in keyof T]: Promise<T[K]> }): Promise<T> {
+  const settled = await Promise.allSettled(promises);
+  const failure = settled.find((s) => s.status === "rejected");
+  if (failure) throw failure.reason;
+  return settled.map((s) => (s as PromiseFulfilledResult<unknown>).value) as unknown as T;
 }

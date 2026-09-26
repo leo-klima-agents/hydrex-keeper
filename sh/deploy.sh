@@ -30,3 +30,7 @@ while IFS="$tab" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
+for name in $(stale_schedulers); do
+  log "deleting stale scheduler job $name"
+  gcloud scheduler jobs delete "$name" --location="$REGION" --project="$KEEPER_PROJECT" --quiet
+done

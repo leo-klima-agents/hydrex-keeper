@@ -59,6 +59,8 @@ while IFS="$tab" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
+stale=$(stale_schedulers | paste -sd ' ' -)
+if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
 # Secret
 if [ "$(secret_versions)" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi

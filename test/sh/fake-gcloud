@@ -173,8 +173,14 @@ case "$*" in
     log_call "$@"
     [ "$has_scheduler" = yes ] || missing "$4"
     scheduler_json "$4" ;;
-  "scheduler jobs create http "* | "scheduler jobs update http "*)
+  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs delete "*)
     log_call "$@" ;;
+  "scheduler jobs list "*)
+    log_call "$@"
+    names=''
+    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/$job-2\""
+    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job\",\"projects/$project/locations/$region/jobs/other-job\""
+    printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')" ;;
   "projects get-iam-policy "*)
     log_call "$@"
     project_policy_json ;;

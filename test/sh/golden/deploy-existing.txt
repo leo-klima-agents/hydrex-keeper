@@ -5,6 +5,7 @@ gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=
 gcloud scheduler jobs update http hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --schedule=50 23 * * 2 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip
 gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs update http hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --schedule=40 23 * * 3 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip
+gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 exit=0
 --- output ---
 == 1/3 job

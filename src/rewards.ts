@@ -1,6 +1,7 @@
-import type { Address } from "viem";
+import { zeroAddress, type Address } from "viem";
 import { bribeAbi, erc20Abi, veAbi, voterAbi } from "./abi.ts";
 import { readMany, WEEK, type Chain } from "./chain.ts";
+import { log } from "./log.ts";
 
 /** `currentVote` is empty unless the conduit voted in this epoch: votes do not carry over. */
 export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean; currentVote: Address[] };
@@ -11,8 +12,11 @@ export type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; r
 
 type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
 
-/** What does not change within an epoch: gauges, bribe contracts, their reward tokens. */
-export type Static = { pools: Address[]; gauges: Address[]; slots: Slot[] };
+/** What rarely changes within an epoch: gauges, bribe contracts, their reward tokens. */
+export type Static = { pools: Address[]; gauges: Address[]; bribes: Address[]; lengths: bigint[]; slots: Slot[] };
+
+/** A bribe contract gained a reward token since `readStatic`. */
+export class StaticChanged extends Error {}
 
 /** Current epoch, the conduit's power in it and the pools it currently votes for. */
 export async function readEpoch(chain: Chain): Promise<Epoch> {
@@ -35,11 +39,16 @@ export async function readEpoch(chain: Chain): Promise<Epoch> {
   return { start, flip: start + WEEK, power: power as bigint, votedThisEpoch, currentVote: currentVote as Address[] };
 }
 
-export async function readStatic(chain: Chain, pools: Address[]): Promise<Static> {
+export async function readStatic(chain: Chain, whitelist: Address[]): Promise<Static> {
   const { client, voter } = chain;
   const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
 
-  const gauges = await readMany<Address>(client, pools.map((pool) => v("gauges", [pool])));
+  const allGauges = await readMany<Address>(client, whitelist.map((pool) => v("gauges", [pool])));
+  const missing = whitelist.filter((_, i) => allGauges[i] === zeroAddress);
+  if (missing.length) log.warning("no gauge, skipping", { pools: missing });
+  const pools = whitelist.filter((_, i) => allGauges[i] !== zeroAddress);
+  const gauges = allGauges.filter((gauge) => gauge !== zeroAddress);
+
   const bribes = await readMany<Address>(
     client,
     gauges.flatMap((gauge) => [v("external_bribes", [gauge]), v("internal_bribes", [gauge])]),
@@ -56,29 +65,34 @@ export async function readStatic(chain: Chain, pools: Address[]): Promise<Static
     slots.map((s) => ({ address: s.bribe, abi: bribeAbi, functionName: "rewardTokens", args: [s.index] })),
   );
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
-  const decimals = await readMany<number>(
+  const decimals = await readMany<number | undefined>(
     client,
     distinct.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
+    { lenient: true },
   );
-  const decimalsOf = new Map(distinct.map((t, i) => [t, decimals[i]!]));
+  const decimalsOf = new Map(distinct.map((t, i) => [t, decimals[i] ?? 18]));
   return {
     pools,
     gauges,
+    bribes,
+    lengths,
     slots: slots.map((s, k) => ({ pool: s.pool, bribe: s.bribe, token: tokens[k]!, decimals: decimalsOf.get(tokens[k]!.toLowerCase() as Address)! })),
   };
 }
 
 /** This epoch's bribes and fees per pool, and the votes each pool has from others. */
-export async function readRewards(chain: Chain, { pools, gauges, slots }: Static, epoch: Epoch): Promise<PoolRewards[]> {
+export async function readRewards(chain: Chain, { pools, gauges, bribes, lengths, slots }: Static, epoch: Epoch): Promise<PoolRewards[]> {
   const { client, voter, conduit } = chain;
   const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
 
   const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(client, [
+    ...bribes.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
     ...gauges.flatMap((gauge, i) => [v("isAlive", [gauge]), v("weights", [pools[i]]), v("votes", [conduit, pools[i]])]),
     ...slots.map((s) => ({ address: s.bribe, abi: bribeAbi, functionName: "rewardData", args: [s.token, epoch.start] })),
   ]);
-  const perPool = results.slice(0, 3 * pools.length);
-  const data = results.slice(3 * pools.length) as [bigint, bigint, bigint][];
+  if (lengths.some((length, b) => results[b] !== length)) throw new StaticChanged("reward tokens changed");
+  const perPool = results.slice(bribes.length, bribes.length + 3 * pools.length);
+  const data = results.slice(bribes.length + 3 * pools.length) as [bigint, bigint, bigint][];
 
   return pools.map((pool, i) => ({
     pool,

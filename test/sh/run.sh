@@ -56,6 +56,7 @@ golden_case setup-existing existing setup.sh
 golden_case deploy-no-secret fresh deploy.sh
 golden_case deploy-first first-deploy deploy.sh
 golden_case deploy-existing existing deploy.sh
+golden_case deploy-stale drift deploy.sh
 golden_case run-dry existing run.sh --dry-run --now
 golden_case run-bad-arg existing run.sh --later
 golden_case check-ok existing check.sh

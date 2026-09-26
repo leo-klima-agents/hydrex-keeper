@@ -7,6 +7,8 @@ TASK_TIMEOUT=90m
 TASK_TIMEOUT_SECONDS=5400
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
+HORIZON=3600 # seconds; same as HORIZON in src/main.ts
+FLIP_WEEKDAY=4 # Thursday 00:00 UTC
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -65,7 +67,7 @@ load_config() {
     *) die "MODULE must be a 20-byte hex address" ;;
   esac
   case "$VOTE_OFFSETS" in
-    "" | *[!0-9,]*) die "VOTE_OFFSETS must be comma-separated seconds" ;;
+    "" | *[!0-9,]* | *,,* | ,* | *,) die "VOTE_OFFSETS must be comma-separated seconds" ;;
   esac
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
@@ -74,6 +76,7 @@ load_config() {
   case "$SCHEDULES" in
     "" | *";;"* | ";"* | *";") die "SCHEDULES must be cron expressions separated by ;" ;;
   esac
+  check_offsets_covered
 
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
@@ -176,6 +179,36 @@ find_alert() {
 
 job_exists() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
+# schedule_start CRON: seconds before the flip at which a "M H * * D" schedule fires.
+schedule_start() {
+  set -f
+  # shellcheck disable=SC2086
+  set -- $1
+  set +f
+  [ $# -eq 5 ] && [ "$3" = '*' ] && [ "$4" = '*' ] || die "SCHEDULES entries must be 'M H * * D': $*"
+  case "$1$2$5" in *[!0-9]*) die "SCHEDULES entries must be 'M H * * D': $*" ;; esac
+  schedule_start_seconds=$(((FLIP_WEEKDAY - $5 + 7) % 7 * 86400 - $2 * 3600 - $1 * 60))
+  [ "$schedule_start_seconds" -gt 0 ] || schedule_start_seconds=$((schedule_start_seconds + 604800))
+  printf '%s\n' "$schedule_start_seconds"
+}
+
+# Every offset must fall within HORIZON after some schedule start, or the job never runs that pass.
+check_offsets_covered() {
+  starts=''
+  rest=$SCHEDULES
+  while [ -n "$rest" ]; do
+    case "$rest" in *";"*) cron=${rest%%;*} rest=${rest#*;} ;; *) cron=$rest rest='' ;; esac
+    starts="$starts $(schedule_start "$cron")"
+  done
+  for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
+    covered=no
+    for start in $starts; do
+      [ "$offset" -le "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
+    done
+    [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
+  done
+}
+
 # schedules: one "NAME<TAB>CRON" line per entry of SCHEDULES; NAME is $JOB-1, $JOB-2, ...
 schedules() {
   schedules_rest=$SCHEDULES
@@ -191,6 +224,16 @@ schedules() {
 }
 
 scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
+
+# stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists.
+stale_schedulers() {
+  stale_configured=$(schedules | cut -f1)
+  gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json |
+    jq -r --arg job "$JOB" '.[].name | split("/") | last | select(. == $job or startswith($job + "-"))' |
+    while IFS= read -r stale_name; do
+      printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
+    done
+}
 
 secret_versions() {
   gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json | jq 'length'
