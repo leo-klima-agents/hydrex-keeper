@@ -1,0 +1,57 @@
+gcloud run jobs describe hydrex-keeper --region=us-central1 --project=hydrex-keeper-test --format=json
+gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
+gcloud scheduler jobs describe hydrex-keeper --location=us-central1 --project=hydrex-keeper-test --format=json
+gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
+gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --managed-by=user --format=json
+gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --format=json
+gcloud projects get-iam-policy hydrex-keeper-test --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
+exit=1
+--- output ---
+FAIL: job service account is 123456789-compute@developer.gserviceaccount.com, expected hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
+ok: job task timeout is 5400
+FAIL: job max retries is 0, expected 3
+ok: job task count is 1
+ok: job containers is 1
+FAIL: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81, expected KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=3600,600,60
+ok: job secrets is BASE_RPC_URL=base-rpc-url:latest
+FAIL: job IAM policy differs from template
+@@ -1,10 +1,3 @@
+ {
+-  "bindings": [
+-    {
+-      "members": [
+-        "serviceAccount:hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com"
+-      ],
+-      "role": "roles/run.invoker"
+-    }
+-  ]
++  "bindings": []
+ }
+ok: schedule is 50 22 * * 3
+ok: schedule time zone is Etc/UTC
+ok: schedule target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
+ok: schedule method is POST
+ok: schedule service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
+FAIL: schedule state is PAUSED, expected ENABLED
+ok: base-rpc-url has an enabled version
+FAIL: secret IAM policy differs from template
+@@ -2,7 +2,8 @@
+   "bindings": [
+     {
+       "members": [
+-        "serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"
++        "serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com",
++        "user:stray@example.com"
+       ],
+       "role": "roles/secretmanager.secretAccessor"
+     }
+FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has user-managed keys: 0123abcd
+FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has IAM bindings: roles/iam.serviceAccountTokenCreator:user:stray@example.com
+FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has project-level roles: roles/editor
+ok: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
+FAIL: alert enabled is false, expected true
+FAIL: alert does not notify hydrex-admin@example.com
+ok: alert filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"

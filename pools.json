@@ -1,0 +1,5 @@
+[
+  { "pool": "0x51f0B932855986B0E621c9D4DB6Eee1f4644D3D2", "name": "HYDX/USDC" },
+  { "pool": "0x7796fc53B75960A9762Ba267c19F5da9868B7853", "name": "wtSPYM/USDC" },
+  { "pool": "0x9849E92f29a9d3b89fe09694746E7AcF52bBc37D", "name": "wtGRND/USDC" }
+]

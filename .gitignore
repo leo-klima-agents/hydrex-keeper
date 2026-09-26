@@ -1,0 +1,5 @@
+# Filled-in configuration. Public material, but per-operator; the example is the reference.
+config.env
+
+node_modules/
+*.log

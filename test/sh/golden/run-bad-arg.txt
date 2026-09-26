@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: usage: run.sh [--dry-run] [--now]

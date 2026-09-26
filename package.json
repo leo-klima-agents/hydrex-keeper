@@ -1,0 +1,24 @@
+{
+  "name": "hydrex-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Weekly Hydrex vote through KlimaVeTokenConduitExecutor, signed by a Cloud KMS key",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "dry-run": "node src/main.ts --dry-run --now",
+    "test": "node --test",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "typescript": "7.0.2"
+  }
+}
