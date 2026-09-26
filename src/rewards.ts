@@ -18,29 +18,34 @@ export type Static = { pools: Address[]; gauges: Address[]; bribes: Address[]; l
 /** A bribe contract gained a reward token since `readStatic`. */
 export class StaticChanged extends Error {}
 
-/** Current epoch, the conduit's power in it and the pools it currently votes for. */
-export async function readEpoch(chain: Chain): Promise<Epoch> {
+/**
+ * Current epoch, the conduit's power in it and the pools it currently votes for, at most `maxPools` of them
+ * (a longer list reads as a different vote). Power is read at the calendar epoch; `assertFresh` in main.ts
+ * makes that the Voter's epoch before it is used.
+ */
+export async function readEpoch(chain: Chain, maxPools = 8): Promise<Epoch> {
   const { client, voter, ve, conduit } = chain;
-  const [start, lastVoted, poolVoteLength] = (await readMany<bigint>(client, [
-    { address: voter, abi: voterAbi, functionName: "_epochTimestamp" },
-    { address: voter, abi: voterAbi, functionName: "lastVoted", args: [conduit] },
-    { address: voter, abi: voterAbi, functionName: "poolVoteLength", args: [conduit] },
-  ])) as [bigint, bigint, bigint];
-  const votedThisEpoch = lastVoted >= start;
-  const [power, ...pools] = await readMany<bigint | Address>(client, [
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, start] },
-    ...Array.from({ length: votedThisEpoch ? Number(poolVoteLength) : 0 }, (_, i) => ({
-      address: voter,
-      abi: voterAbi,
-      functionName: "poolVote",
-      args: [conduit, BigInt(i)],
-    })),
-  ]);
+  const calendar = (BigInt(Math.floor(Date.now() / 1000)) / WEEK) * WEEK;
+  const [start, lastVoted, poolVoteLength, power, ...listed] = await readMany<bigint | Address | undefined>(
+    client,
+    [
+      { address: voter, abi: voterAbi, functionName: "_epochTimestamp" },
+      { address: voter, abi: voterAbi, functionName: "lastVoted", args: [conduit] },
+      { address: voter, abi: voterAbi, functionName: "poolVoteLength", args: [conduit] },
+      { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendar] },
+      ...Array.from({ length: maxPools }, (_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
+    ],
+    { lenient: true },
+  );
+  if (start === undefined || lastVoted === undefined || poolVoteLength === undefined || power === undefined) throw new Error("cannot read the epoch");
+  const votedThisEpoch = (lastVoted as bigint) >= (start as bigint);
+  const pools = (votedThisEpoch ? listed.slice(0, Number(poolVoteLength)) : []) as Address[];
+  if (pools.some((pool) => pool === undefined)) throw new Error("cannot read the current vote");
   const votes = await readMany<bigint>(
     client,
     pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
   );
-  return { start, flip: start + WEEK, power: power as bigint, votedThisEpoch, currentVote: { pools: pools as Address[], votes } };
+  return { start: start as bigint, flip: (start as bigint) + WEEK, power: power as bigint, votedThisEpoch, currentVote: { pools, votes } };
 }
 
 export async function readStatic(chain: Chain, whitelist: Address[]): Promise<Static> {

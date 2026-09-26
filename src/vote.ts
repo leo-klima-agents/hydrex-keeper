@@ -3,7 +3,7 @@ import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
 import { readMany, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
-import { log } from "./log.ts";
+import { describe, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 const RECEIPT_TIMEOUT = 60_000;
@@ -30,16 +30,19 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   const { client, module, keeper, voter, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
-  const [gas, fees, nonce, balance, l1Fee] = await allOrFirstFailure([
+  const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
     client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
     client.estimateGas({ account: keeper, to: module, data }),
     client.estimateFeesPerGas(),
     client.getTransactionCount({ address: keeper, blockTag: "latest" }),
+    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
-  // A vote still pending under the same nonce is replaced by paying a quarter more than it did.
+  // A vote still pending under `latest` is replaced by paying a quarter more than it did when its fees are
+  // known (sent by this process); a pending vote of unknown fees is queued behind instead.
   const lastSent = lastSentBy.get(client);
+  const nonce = pending > latest && lastSent?.nonce !== latest ? pending : latest;
   const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
   const max = (a: bigint, b: bigint) => (a > b ? a : b);
   const tx: TransactionSerializableEIP1559 = {
@@ -83,19 +86,25 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   try {
     receipt = await client.waitForTransactionReceipt({ hash, timeout });
   } catch (error) {
-    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw error;
+    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw new VoteSent(`vote ${hash}: outcome unknown: ${describe(error)}`);
     log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
     return;
   }
+  if (receipt.transactionHash !== hash) throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
   if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
-  const recorded = await readMany<Address | bigint>(
-    client,
-    [
-      ...vote.pools.map((_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
-      ...vote.pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
-    ],
-    { blockNumber: receipt.blockNumber },
-  );
+  let recorded: (Address | bigint)[];
+  try {
+    recorded = await readMany<Address | bigint>(
+      client,
+      [
+        ...vote.pools.map((_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
+        ...vote.pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
+      ],
+      { blockNumber: receipt.blockNumber },
+    );
+  } catch (error) {
+    throw new VoteSent(`vote ${hash} mined in block ${receipt.blockNumber}, verification failed: ${describe(error)}`);
+  }
   const pools = recorded.slice(0, vote.pools.length) as Address[];
   if (pools.some((pool, i) => pool.toLowerCase() !== vote.pools[i]!.toLowerCase())) {
     throw new VoteSent(`vote ${hash}: Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);

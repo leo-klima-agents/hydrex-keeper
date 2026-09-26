@@ -9,7 +9,7 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
 const signer = privateKeyToAccount(generatePrivateKey());
 
-type Behaviour = { nonce?: number; receipt?: "success" | "reverted" | "timeout"; recorded?: Address; fee?: bigint };
+type Behaviour = { nonce?: number; pending?: number; receipt?: "success" | "reverted" | "timeout"; recorded?: Address; fee?: bigint; minedHash?: Hex; verifyFails?: boolean };
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
@@ -18,10 +18,7 @@ function fakeChain(b: Behaviour = {}) {
     simulateContract: async () => ({ result: undefined }),
     estimateGas: async () => 100_000n,
     estimateFeesPerGas: async () => ({ maxFeePerGas: b.fee ?? 1_000n, maxPriorityFeePerGas: (b.fee ?? 1_000n) / 10n }),
-    getTransactionCount: async ({ blockTag }: { blockTag: string }) => {
-      assert.equal(blockTag, "latest");
-      return b.nonce ?? 7;
-    },
+    getTransactionCount: async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7)),
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
     sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
@@ -31,10 +28,11 @@ function fakeChain(b: Behaviour = {}) {
     waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
       assert.ok(timeout >= 1 && timeout <= 60_000);
       if (b.receipt === "timeout") throw new WaitForTransactionReceiptTimeoutError({ hash });
-      return { status: b.receipt ?? "success", blockNumber: 42n };
+      return { status: b.receipt ?? "success", blockNumber: 42n, transactionHash: b.minedHash ?? hash };
     },
     multicall: async ({ contracts, blockNumber }: { contracts: { functionName: string }[]; blockNumber?: bigint }) => {
       assert.equal(blockNumber, 42n, "verification reads the receipt's block");
+      if (b.verifyFails) throw new Error("header not found");
       return contracts.map((c) => (c.functionName === "poolVote" ? (b.recorded ?? POOL) : 1n));
     },
   } as unknown as Client;
@@ -86,4 +84,26 @@ test("a dry run signs but never sends", async () => {
   const { chain, sent } = fakeChain();
   await castVote(chain, signer, vote, true, far);
   assert.equal(sent.length, 0);
+});
+
+test("a pending vote of unknown fees is queued behind; one this process sent is replaced", async () => {
+  const queued = fakeChain({ nonce: 3, pending: 4 });
+  await castVote(queued.chain, signer, vote, false, far);
+  assert.equal(parseTransaction(queued.sent[0]!).nonce, 4);
+  const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
+  await castVote(own.chain, signer, vote, false, far);
+  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? 4 : 3)) as never;
+  await castVote(own.chain, signer, vote, false, far);
+  const tx = parseTransaction(own.sent[1]!);
+  assert.equal(tx.nonce, 3);
+  assert.equal(tx.maxFeePerGas, 1_250n);
+});
+
+test("a receipt of an earlier vote under the same nonce means this one must be sent again", async () => {
+  const { chain } = fakeChain({ minedHash: `0x${"cd".repeat(32)}` });
+  await assert.rejects(castVote(chain, signer, vote, false, far), (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /replaced/.test(e.message));
+});
+
+test("a failed verification after mining is reported as sent", async () => {
+  await assert.rejects(castVote(fakeChain({ verifyFails: true }).chain, signer, vote, false, far), VoteSent);
 });

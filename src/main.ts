@@ -49,14 +49,14 @@ type Run = {
   chain: Chain;
   whitelist: Whitelist;
   static?: Static;
-  prices: (tokens: Address[]) => Promise<Map<Address, number>>;
+  prices: (tokens: Address[], until?: number) => Promise<Map<Address, number>>;
   account: LocalAccount | undefined;
   dryRun: boolean;
 };
 
 async function pass(run: Run, until: bigint): Promise<void> {
   const { chain, whitelist, prices, account, dryRun } = run;
-  const epoch = await readEpoch(chain);
+  const epoch = await readEpoch(chain, whitelist.length + 2);
   assertFresh(epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
@@ -70,7 +70,8 @@ async function pass(run: Run, until: bigint): Promise<void> {
     run.static = await readStatic(chain, whitelist.map((w) => w.pool));
     rewards = await readRewards(chain, run.static, epoch);
   }
-  const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)));
+  const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)), Number(until));
+  if (priced.size === 0 && rewards.some((p) => p.rewards.length > 0)) throw new Error("no reward token could be priced");
   const candidates: Candidate[] = [];
   const nameOf = (pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
   for (const [i, p] of rewards.entries()) {

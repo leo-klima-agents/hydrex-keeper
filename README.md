@@ -135,26 +135,30 @@ left for the next pass to observe on the Voter. Each pass retries up to three ti
 next one. A pass that fails for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed
 job up to three times, and the restart recomputes the remaining passes from the clock: a pass missed within the past
 hour runs right away, a restart within an hour after the flip exits cleanly. A vote is sent with the account's
-confirmed nonce; if the previous vote is still pending under that nonce, the new one pays a quarter more and replaces
-it. Nothing is broadcast once the pass's deadline has passed, and a vote that was mined but reverted or recorded
-differently is not re-sent by the retry loop. A Voter whose epoch lags the calendar by more than an hour (minter not
+confirmed nonce; if the previous vote is still pending under that nonce and this process sent it, the new one pays a
+quarter more and replaces it, and if it came from an earlier process the new one queues behind it. Nothing is
+broadcast once the pass's deadline has passed. After a send, the retry loop re-sends only when the receipt shows an
+earlier vote won the nonce; a vote that was mined but reverted or recorded differently, or whose outcome could not be
+read, is left to the next pass. A Voter whose epoch lags the calendar by more than an hour (minter not
 updated) fails the execution at startup and at every pass. "Already voted" means the Voter holds the desired pools
 with the weights it would derive, so a strategy that splits weights is compared correctly too.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution
 reads gauges, bribe contracts and reward tokens once (re-reading them if a bribe contract gains a token), reuses
-prices younger than thirty minutes (and keeps serving them if DefiLlama fails), and then needs one round trip for the
-epoch state and one for the pools before signing; a pass measures under a second, and Base blocks are two seconds
-apart, so the last offset of five seconds leaves the transaction a block of margin. After a vote the Voter is read at
+prices younger than thirty minutes (keeps serving them if DefiLlama fails or fewer than twenty seconds remain, and
+never retries past the pass deadline), and then needs two round trips for the epoch state and one for the pools
+before signing; a pass measures under a second, and Base blocks are two seconds apart, so the last offset of five
+seconds leaves the transaction a block of margin. The primary RPC gets three seconds per call before the public
+fallback is tried. After a vote the Voter is read at
 the receipt's block, so a lagging fallback node cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
-| Base RPC (`BASE_RPC_URL`, then `https://mainnet.base.org`) | All reads, simulation, sending | Falls back to the public endpoint; if both fail the pass fails and is retried |
-| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts, then prices from the last half hour are reused, else the pass fails. A token it does not price counts as zero and is logged. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
+| Base RPC (`BASE_RPC_URL`, then `https://mainnet.base.org`) | All reads, simulation, sending | Falls back to the public endpoint after three seconds; if both fail the pass fails and is retried |
+| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts within the pass deadline, then prices from the last half hour are reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so |

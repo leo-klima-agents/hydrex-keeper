@@ -6,7 +6,9 @@ import { conduitAbi, moduleAbi } from "./abi.ts";
 export const WEEK = 7n * 24n * 60n * 60n;
 
 function makeClient(rpcUrls: string[]) {
-  return createPublicClient({ chain: base, transport: fallback(rpcUrls.map((url) => http(url))), pollingInterval: 1_000 }).extend(publicActionsL2());
+  // A hanging primary costs one short timeout per call before the next URL answers.
+  const transports = rpcUrls.map((url, i) => http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000 }) }));
+  return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 
 export type Client = ReturnType<typeof makeClient>;
@@ -44,7 +46,8 @@ export async function readMany<T>(client: Client, calls: readonly Call[], { bloc
     const contracts = calls.slice(i, i + chunk) as never;
     const at = blockNumber === undefined ? {} : { blockNumber };
     if (lenient) {
-      const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown }[];
+      const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown; error?: unknown }[];
+      if (results.length && results.every((r) => r.status === "failure")) throw results[0]!.error;
       out.push(...(results.map((r) => (r.status === "success" ? r.result : undefined)) as T[]));
     } else {
       out.push(...((await client.multicall({ contracts, allowFailure: false, ...at })) as T[]));

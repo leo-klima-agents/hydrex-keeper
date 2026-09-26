@@ -71,3 +71,26 @@ test("priceFeed reuses fresh prices, refreshes on age or new tokens, serves stal
   assert.equal(urls.length, 6);
   await assert.rejects(feed([JUNK]), /DefiLlama unavailable/);
 });
+
+test("a malformed 200 response is retried", async () => {
+  const { fetchFn, urls } = fakeFetch([() => Response.json({ message: "rate limited" }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 4 } } })]);
+  assert.equal((await prices([WETH], fetchFn)).get(WETH), 4);
+  assert.equal(urls.length, 2);
+});
+
+test("priceFeed serves an expired cache instead of refreshing when the deadline is near", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const { fetchFn, urls } = fakeFetch([() => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } })]);
+  const feed = priceFeed(1_000, fetchFn);
+  assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
+  t.mock.timers.tick(5_000);
+  assert.equal((await feed([WETH], Date.now() + 10_000)).get(WETH), 1, "10 s left: no refresh");
+  assert.equal(urls.length, 1);
+});
+
+test("prices stops retrying when a retry cannot finish before the deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
+  const { fetchFn, urls } = fakeFetch([() => new Response("", { status: 503 }), () => new Response("", { status: 503 })]);
+  await assert.rejects(prices([WETH], fetchFn, Date.now() + 1_500), /DefiLlama unavailable/);
+  assert.equal(urls.length, 1);
+});

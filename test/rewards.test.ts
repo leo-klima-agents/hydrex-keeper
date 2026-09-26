@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroAddress, type Address } from "viem";
 import type { Chain, Client } from "../src/chain.ts";
-import { readRewards, readStatic, StaticChanged } from "../src/rewards.ts";
+import { readEpoch, readRewards, readStatic, StaticChanged } from "../src/rewards.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [VOTER, CONDUIT, POOL_A, POOL_B, POOL_C, GAUGE_A, GAUGE_B] = [addr(1), addr(2), addr(3), addr(4), addr(5), addr(6), addr(7)] as const;
@@ -28,10 +28,20 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
 }
 
 const rewardTokens: Record<string, Address[]> = { [EXT_A]: [TOK_1, TOK_2], [INT_A]: [], [EXT_B]: [TOK_3], [INT_B]: [TOK_1] };
+const voterState = { start: 1000n, lastVoted: 1000n, poolVote: [POOL_A, POOL_B] as Address[] };
 const table = (call: Call): unknown => {
   const { address, functionName, args = [] } = call;
+  if (address === addr(97) && functionName === "getPastVotes") return 10n;
   if (address === VOTER) {
     switch (functionName) {
+      case "_epochTimestamp": return voterState.start;
+      case "lastVoted": return voterState.lastVoted;
+      case "poolVoteLength": return BigInt(voterState.poolVote.length);
+      case "poolVote": {
+        const pool = voterState.poolVote[Number(args[1])];
+        if (!pool) throw new Error("index out of range");
+        return pool;
+      }
       case "gauges": return ({ [POOL_A]: GAUGE_A, [POOL_B]: GAUGE_B, [POOL_C]: zeroAddress } as Record<string, Address>)[args[0] as string];
       case "external_bribes": return ({ [GAUGE_A]: EXT_A, [GAUGE_B]: EXT_B } as Record<string, Address>)[args[0] as string];
       case "internal_bribes": return ({ [GAUGE_A]: INT_A, [GAUGE_B]: INT_B } as Record<string, Address>)[args[0] as string];
@@ -92,4 +102,17 @@ test("readRewards reports a grown reward token list", async () => {
   } finally {
     rewardTokens[INT_A] = [];
   }
+});
+
+test("readEpoch reads the epoch and the current vote in two round trips, ignoring last epoch's vote", async () => {
+  const chain = fakeChain(table);
+  const epoch = await readEpoch(chain, 3);
+  assert.deepEqual(epoch, { start: 1000n, flip: 1000n + 604800n, power: 10n, votedThisEpoch: true, currentVote: { pools: [POOL_A, POOL_B], votes: [100n, 0n] } });
+  voterState.lastVoted = 999n;
+  try {
+    assert.deepEqual((await readEpoch(chain, 3)).currentVote, { pools: [], votes: [] });
+  } finally {
+    voterState.lastVoted = 1000n;
+  }
+  assert.deepEqual((await readEpoch(chain, 1)).currentVote.pools, [POOL_A], "capped at maxPools");
 });
