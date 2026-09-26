@@ -7,7 +7,7 @@ export const WEEK = 7n * 24n * 60n * 60n;
 
 function makeClient(rpcUrls: string[]) {
   // A hanging primary costs one short timeout per call before the next URL answers.
-  const transports = rpcUrls.map((url, i) => http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000 }) }));
+  const transports = rpcUrls.map((url, i) => http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }) }));
   return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 

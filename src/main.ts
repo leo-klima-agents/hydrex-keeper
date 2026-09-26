@@ -117,11 +117,11 @@ async function main(): Promise<number> {
   );
   if (whitelist.length === 0) throw new Error("pools.json is empty");
 
-  const chain = await connect(module, [required("BASE_RPC_URL"), process.env.FALLBACK_RPC_URL ?? PUBLIC_RPC]);
+  const chain = await connect(module, [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()));
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 
-  const epoch = await readEpoch(chain);
+  const epoch = await readEpoch(chain, whitelist.length + 2);
   if (!immediately && epoch.flip <= now() && now() - epoch.flip < HORIZON) {
     log.warning("restarted after the flip; nothing to do", { flip: epoch.flip });
     return 0;

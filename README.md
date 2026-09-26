@@ -64,7 +64,9 @@ In hydrex-keeper-key, set `KEEPER_SA` to that email and run `sh/grant.sh`. That 
 printf '%s' 'https://…' | gcloud secrets versions add base-rpc-url --project=KEEPER_PROJECT --data-file=-
 ```
 
-The job falls back to `https://mainnet.base.org` when this URL fails.
+Several URLs separated by commas are tried in order; the public `https://mainnet.base.org` is always the last resort.
+The public node throttles the job's bursts of calls for tens of seconds at a time, so a second paid provider in the
+secret is what makes the final passes robust to a primary outage.
 
 ## 5. Fund the keeper
 
@@ -150,14 +152,14 @@ prices younger than thirty minutes (keeps serving them if DefiLlama fails or few
 never retries past the pass deadline), and then needs two round trips for the epoch state and one for the pools
 before signing; a pass measures under a second, and Base blocks are two seconds apart, so the last offset of five
 seconds leaves the transaction a block of margin. The primary RPC gets three seconds per call before the public
-fallback is tried. After a vote the Voter is read at
+fallback is tried; the public node throttles bursts of calls, so its retries back off by seconds. After a vote the Voter is read at
 the receipt's block, so a lagging fallback node cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
-| Base RPC (`BASE_RPC_URL`, then `https://mainnet.base.org`) | All reads, simulation, sending | Falls back to the public endpoint after three seconds; if both fail the pass fails and is retried |
+| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | Each URL gets three seconds per call before the next; the public node throttles bursts for tens of seconds, so it only reliably covers the day-before pass. If all fail the pass fails and is retried |
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts within the pass deadline, then prices from the last half hour are reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
