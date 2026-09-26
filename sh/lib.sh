@@ -200,6 +200,7 @@ schedule_start() {
   minute=$(printf '%s' "$1" | sed 's/^0*\([0-9]\)/\1/')
   hour=$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')
   weekday=$(printf '%s' "$5" | sed 's/^0*\([0-9]\)/\1/')
+  [ "$minute" -le 59 ] && [ "$hour" -le 23 ] && [ "$weekday" -le 7 ] || die "SCHEDULES entry out of range: $*"
   schedule_start_seconds=$(((FLIP_WEEKDAY - weekday + 7) % 7 * 86400 - hour * 3600 - minute * 60))
   [ "$schedule_start_seconds" -gt 0 ] || schedule_start_seconds=$((schedule_start_seconds + 604800))
   printf '%s\n' "$schedule_start_seconds"

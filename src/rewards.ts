@@ -4,7 +4,7 @@ import { readMany, WEEK, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
 /** `currentVote` is empty unless the conduit voted in this epoch: votes do not carry over. */
-export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean; currentVote: Address[] };
+export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean; currentVote: { pools: Address[]; votes: bigint[] } };
 
 export type Reward = { token: Address; amount: bigint; decimals: number };
 
@@ -27,7 +27,7 @@ export async function readEpoch(chain: Chain): Promise<Epoch> {
     { address: voter, abi: voterAbi, functionName: "poolVoteLength", args: [conduit] },
   ])) as [bigint, bigint, bigint];
   const votedThisEpoch = lastVoted >= start;
-  const [power, ...currentVote] = await readMany<bigint | Address>(client, [
+  const [power, ...pools] = await readMany<bigint | Address>(client, [
     { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, start] },
     ...Array.from({ length: votedThisEpoch ? Number(poolVoteLength) : 0 }, (_, i) => ({
       address: voter,
@@ -36,7 +36,11 @@ export async function readEpoch(chain: Chain): Promise<Epoch> {
       args: [conduit, BigInt(i)],
     })),
   ]);
-  return { start, flip: start + WEEK, power: power as bigint, votedThisEpoch, currentVote: currentVote as Address[] };
+  const votes = await readMany<bigint>(
+    client,
+    pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
+  );
+  return { start, flip: start + WEEK, power: power as bigint, votedThisEpoch, currentVote: { pools: pools as Address[], votes } };
 }
 
 export async function readStatic(chain: Chain, whitelist: Address[]): Promise<Static> {

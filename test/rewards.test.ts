@@ -73,13 +73,13 @@ test("readStatic drops pools without a gauge and defaults missing decimals", asy
 test("readRewards maps rewards, liveness and other votes per pool", async () => {
   const chain = fakeChain(table);
   const s = await readStatic(chain, [POOL_A, POOL_B]);
-  const epoch = { start: 1000n, flip: 1000n + 604800n, power: 10n, votedThisEpoch: true, currentVote: [POOL_A] };
+  const epoch = { start: 1000n, flip: 1000n + 604800n, power: 10n, votedThisEpoch: true, currentVote: { pools: [POOL_A], votes: [100n] } };
   const r = await readRewards(chain, s, epoch);
   assert.deepEqual(r, [
     { pool: POOL_A, alive: true, otherVotes: 900n, rewards: [{ token: TOK_1, amount: 7n, decimals: 6 }] },
     { pool: POOL_B, alive: false, otherVotes: 500n, rewards: [{ token: TOK_3, amount: 5n, decimals: 18 }, { token: TOK_1, amount: 3n, decimals: 6 }] },
   ]);
-  const stale = await readRewards(chain, s, { ...epoch, votedThisEpoch: false, currentVote: [] });
+  const stale = await readRewards(chain, s, { ...epoch, votedThisEpoch: false, currentVote: { pools: [], votes: [] } });
   assert.equal(stale[0]!.otherVotes, 1000n, "last epoch's own votes are not subtracted");
 });
 
@@ -88,7 +88,7 @@ test("readRewards reports a grown reward token list", async () => {
   const s = await readStatic(chain, [POOL_A]);
   rewardTokens[INT_A] = [TOK_2];
   try {
-    await assert.rejects(readRewards(chain, s, { start: 1000n, flip: 0n, power: 1n, votedThisEpoch: false, currentVote: [] }), StaticChanged);
+    await assert.rejects(readRewards(chain, s, { start: 1000n, flip: 0n, power: 1n, votedThisEpoch: false, currentVote: { pools: [], votes: [] } }), StaticChanged);
   } finally {
     rewardTokens[INT_A] = [];
   }

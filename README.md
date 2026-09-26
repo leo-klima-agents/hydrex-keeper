@@ -134,9 +134,12 @@ is skipped; the receipt wait itself is bounded by the next pass, and a vote whos
 left for the next pass to observe on the Voter. Each pass retries up to three times while there is time before the
 next one. A pass that fails for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed
 job up to three times, and the restart recomputes the remaining passes from the clock: a pass missed within the past
-hour runs right away, a restart after the flip exits cleanly. A vote is sent with the account's confirmed nonce and
-fees a quarter above the estimate, so a re-vote replaces a transaction still pending rather than queueing behind it.
-A Voter whose epoch lags the calendar (minter not updated) fails the execution at startup and at every pass.
+hour runs right away, a restart within an hour after the flip exits cleanly. A vote is sent with the account's
+confirmed nonce; if the previous vote is still pending under that nonce, the new one pays a quarter more and replaces
+it. Nothing is broadcast once the pass's deadline has passed, and a vote that was mined but reverted or recorded
+differently is not re-sent by the retry loop. A Voter whose epoch lags the calendar by more than an hour (minter not
+updated) fails the execution at startup and at every pass. "Already voted" means the Voter holds the desired pools
+with the weights it would derive, so a strategy that splits weights is compared correctly too.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution

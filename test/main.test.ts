@@ -17,10 +17,12 @@ test("pass times are the offsets due within the horizon, earliest first, dedupli
   assert.deepEqual(passTimes(flip, [86400n, 600n], flip - 86400n - 600n, 100_000n), [flip - 86400n, flip - 600n]);
 });
 
-test("sameVote compares pools case-insensitively and in order", () => {
-  assert.equal(sameVote([A], { pools: [A.toUpperCase() as typeof A], weights: [100n] }), true);
-  assert.equal(sameVote([A, B], { pools: [B, A], weights: [1n, 1n] }), false);
-  assert.equal(sameVote([], { pools: [A], weights: [100n] }), false);
+test("sameVote compares pools case-insensitively, in order, with the Voter's derived weights", () => {
+  assert.equal(sameVote({ pools: [A], votes: [1000n] }, { pools: [A.toUpperCase() as typeof A], weights: [100n] }, 1000n), true);
+  assert.equal(sameVote({ pools: [A, B], votes: [500n, 500n] }, { pools: [B, A], weights: [1n, 1n] }, 1000n), false);
+  assert.equal(sameVote({ pools: [], votes: [] }, { pools: [A], weights: [100n] }, 1000n), false);
+  assert.equal(sameVote({ pools: [A, B], votes: [900n, 100n] }, { pools: [A, B], weights: [50n, 50n] }, 1000n), false, "same pools, other split");
+  assert.equal(sameVote({ pools: [A, B], votes: [333n, 666n] }, { pools: [A, B], weights: [1n, 2n] }, 1000n), true, "integer division as in the Voter");
 });
 
 test("missed tells a late start from a restart after the flip", () => {

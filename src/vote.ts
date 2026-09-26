@@ -1,19 +1,29 @@
 import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
-import { readMany, type Chain } from "./chain.ts";
+import { readMany, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 const RECEIPT_TIMEOUT = 60_000;
 
-export function sameVote(current: Address[], desired: Vote): boolean {
+/** Failed after the transaction was sent: retrying would send another one. */
+export class VoteSent extends Error {}
+
+/** Whether the Voter already holds `desired` for `power`, pool by pool and with the weights the Voter would derive. */
+export function sameVote(current: { pools: Address[]; votes: bigint[] }, desired: Vote, power: bigint): boolean {
+  const total = desired.weights.reduce((a, b) => a + b, 0n);
   return (
-    current.length === desired.pools.length &&
-    current.every((pool, i) => pool.toLowerCase() === desired.pools[i]!.toLowerCase())
+    current.pools.length === desired.pools.length &&
+    current.pools.every(
+      (pool, i) =>
+        pool.toLowerCase() === desired.pools[i]!.toLowerCase() && current.votes[i] === (desired.weights[i]! * power) / total,
+    )
   );
 }
+
+const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
 export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: bigint): Promise<void> {
@@ -28,14 +38,17 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
+  // A vote still pending under the same nonce is replaced by paying a quarter more than it did.
+  const lastSent = lastSentBy.get(client);
+  const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
+  const max = (a: bigint, b: bigint) => (a > b ? a : b);
   const tx: TransactionSerializableEIP1559 = {
     chainId: base.id,
     to: module,
     data,
     gas: (gas * 12n) / 10n,
-    // A quarter above the estimate replaces a vote still pending under the same nonce.
-    maxFeePerGas: (fees.maxFeePerGas * 5n) / 4n,
-    maxPriorityFeePerGas: (fees.maxPriorityFeePerGas * 5n) / 4n,
+    maxFeePerGas: max(fees.maxFeePerGas, (floor.maxFeePerGas * 5n) / 4n),
+    maxPriorityFeePerGas: max(fees.maxPriorityFeePerGas, (floor.maxPriorityFeePerGas * 5n) / 4n),
     nonce,
   };
   const cost = tx.gas! * tx.maxFeePerGas! + l1Fee;
@@ -61,7 +74,9 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     return;
   }
 
+  if (BigInt(Date.now()) >= until) throw new Error("out of time before sending");
   const hash = await client.sendRawTransaction({ serializedTransaction: signed });
+  lastSentBy.set(client, { nonce, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas! });
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
   let receipt;
@@ -72,7 +87,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
     return;
   }
-  if (receipt.status !== "success") throw new Error(`vote ${hash} reverted`);
+  if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
   const recorded = await readMany<Address | bigint>(
     client,
     [
@@ -82,7 +97,9 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     { blockNumber: receipt.blockNumber },
   );
   const pools = recorded.slice(0, vote.pools.length) as Address[];
-  if (!sameVote(pools, vote)) throw new Error(`Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);
+  if (pools.some((pool, i) => pool.toLowerCase() !== vote.pools[i]!.toLowerCase())) {
+    throw new VoteSent(`vote ${hash}: Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);
+  }
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
 }
 

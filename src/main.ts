@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
 import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
@@ -6,7 +6,7 @@ import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
 import { readEpoch, readRewards, readStatic, StaticChanged, type Epoch, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
-import { castVote, sameVote } from "./vote.ts";
+import { castVote, sameVote, VoteSent } from "./vote.ts";
 
 const PUBLIC_RPC = "https://mainnet.base.org";
 const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
@@ -94,7 +94,7 @@ async function pass(run: Run, until: bigint): Promise<void> {
     return;
   }
   const names = vote.pools.map(nameOf);
-  if (sameVote(epoch.currentVote, vote)) {
+  if (sameVote(epoch.currentVote, vote, epoch.power)) {
     log.info("already voted for the best pool this epoch", { pools: names });
     return;
   }
@@ -121,6 +121,10 @@ async function main(): Promise<number> {
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 
   const epoch = await readEpoch(chain);
+  if (!immediately && epoch.flip <= now() && now() - epoch.flip < HORIZON) {
+    log.warning("restarted after the flip; nothing to do", { flip: epoch.flip });
+    return 0;
+  }
   assertFresh(epoch);
   const { flip } = epoch;
   const { times, note } = schedule(flip, offsets, now(), immediately);
@@ -150,7 +154,7 @@ async function main(): Promise<number> {
         log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
         break;
       } catch (error) {
-        const retry = attempt < ATTEMPTS && BigInt(Date.now() + RETRY_DELAY) < until;
+        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && BigInt(Date.now() + RETRY_DELAY) < until;
         log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms: Date.now() - started, error: describe(error) });
         if (!retry) {
           failed++;
@@ -169,7 +173,7 @@ function required(name: string): string {
   return value;
 }
 
-if (process.argv[1] && import.meta.filename === process.argv[1]) {
+if (process.argv[1] && import.meta.filename === realpathSync(process.argv[1])) {
   main().then(
     (code) => process.exit(code),
     (error: unknown) => {

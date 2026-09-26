@@ -6,7 +6,7 @@ import { conduitAbi, moduleAbi } from "./abi.ts";
 export const WEEK = 7n * 24n * 60n * 60n;
 
 function makeClient(rpcUrls: string[]) {
-  return createPublicClient({ chain: base, transport: fallback(rpcUrls.map((url) => http(url))) }).extend(publicActionsL2());
+  return createPublicClient({ chain: base, transport: fallback(rpcUrls.map((url) => http(url))), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 
 export type Client = ReturnType<typeof makeClient>;
