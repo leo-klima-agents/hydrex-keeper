@@ -11,7 +11,7 @@ import { castVote, sameVote, VoteSent } from "./vote.ts";
 const PUBLIC_RPC = "https://mainnet.base.org";
 const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
 const HORIZON = 3600n; // an execution runs the passes due within this many seconds
-const PRICE_MAX_AGE = 30 * 60_000;
+const PRICE_MAX_AGE = 0; // refresh at every pass that has time for it
 const ATTEMPTS = 3;
 const RETRY_DELAY = 5_000;
 const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted

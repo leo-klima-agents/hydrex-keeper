@@ -94,3 +94,14 @@ test("prices stops retrying when a retry cannot finish before the deadline", asy
   await assert.rejects(prices([WETH], fetchFn, Date.now() + 1_500), /DefiLlama unavailable/);
   assert.equal(urls.length, 1);
 });
+
+test("priceFeed with max age zero refetches at every call that has time", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const { fetchFn, urls } = fakeFetch([() => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 } } })]);
+  const feed = priceFeed(0, fetchFn);
+  assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
+  t.mock.timers.tick(1);
+  assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 2);
+  assert.equal((await feed([WETH], Date.now() + 5_000)).get(WETH), 2, "no time left: last set");
+  assert.equal(urls.length, 2);
+});

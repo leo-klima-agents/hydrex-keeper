@@ -147,10 +147,10 @@ with the weights it would derive, so a strategy that splits weights is compared 
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution
-reads gauges, bribe contracts and reward tokens once (re-reading them if a bribe contract gains a token), reuses
-prices younger than thirty minutes (keeps serving them if DefiLlama fails or fewer than twenty seconds remain, and
-never retries past the pass deadline), and then needs two round trips for the epoch state and one for the pools
-before signing; a pass measures under a second, and Base blocks are two seconds apart, so the last offset of five
+reads gauges, bribe contracts and reward tokens once (re-reading them if a bribe contract gains a token), refreshes
+prices at every pass that has at least twenty seconds left (otherwise, or if DefiLlama fails, it reuses the last
+set, and it never retries past the pass deadline), re-reads every pool's votes and rewards, and then needs two round
+trips for the epoch state and one for the pools before signing; a pass measures under a second, and Base blocks are two seconds apart, so the last offset of five
 seconds leaves the transaction a block of margin. The primary RPC gets three seconds per call before the public
 fallback is tried; the public node throttles bursts of calls, so its retries back off by seconds. After a vote the Voter is read at
 the receipt's block, so a lagging fallback node cannot report it missing.
@@ -160,7 +160,7 @@ the receipt's block, so a lagging fallback node cannot report it missing.
 | Dependency | Used for | On failure |
 |---|---|---|
 | Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | Each URL gets three seconds per call before the next; the public node throttles bursts for tens of seconds, so it only reliably covers the day-before pass. If all fail the pass fails and is retried |
-| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens | Three attempts within the pass deadline, then prices from the last half hour are reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
+| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so |
