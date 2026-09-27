@@ -17,8 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-      - run: for f in sh/*.sh test/sh/fake-gcloud test/sh/run.sh; do sh -n "$f"; done
-      - run: shellcheck -s sh -x sh/*.sh test/sh/fake-gcloud test/sh/run.sh
+      - run: for f in sh/*.sh test/sh/fake-gcloud test/sh/fake-curl test/sh/run.sh; do sh -n "$f"; done
+      - run: shellcheck -s sh -x sh/*.sh test/sh/fake-gcloud test/sh/fake-curl test/sh/run.sh
       - uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
   node:

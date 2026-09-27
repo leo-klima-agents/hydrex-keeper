@@ -9,6 +9,9 @@ ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600 # seconds; same as HORIZON in src/main.ts
 FLIP_WEEKDAY=4 # Thursday 00:00 UTC
 TAB=$(printf '\t')
+# check.sh fails below this: about four weeks of worst-case votes (a vote costs up to 1.5e13 wei, at most 8 a week).
+MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH
+CHECK_RPC=${CHECK_RPC_URL:-https://mainnet.base.org} # read-only, weekly: the public node is enough
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -243,6 +246,13 @@ find_stale_schedulers() {
     while IFS= read -r stale_name; do
       printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
     done)
+}
+
+# rpc METHOD PARAMS: the JSON-RPC result from CHECK_RPC, as a string.
+rpc() {
+  rpc_reply=$(curl -sS --max-time 15 -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$CHECK_RPC") || die "$1 failed on $CHECK_RPC"
+  printf '%s\n' "$rpc_reply" | jq -er '.result' 2>/dev/null || die "$1 on $CHECK_RPC: $rpc_reply"
 }
 
 secret_versions() {

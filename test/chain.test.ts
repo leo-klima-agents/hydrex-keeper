@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { keccak256, type Hex } from "viem";
 import { base } from "viem/chains";
-import { broadcaster, HEDGE_DELAY, hedged, hostOf } from "../src/chain.ts";
+import { broadcaster, clockLag, HEDGE_DELAY, hedged, hostOf, type Client } from "../src/chain.ts";
 
 type Reply = "accept" | "known" | "reject" | "hang";
 
@@ -133,4 +133,21 @@ test("hedged: a failure asks the next URL at once; a revert is final; all failin
   await assert.rejects(timed(reverting), /execution reverted/);
   assert.equal(reverting[1]!.counter.requests, 0);
   await assert.rejects(timed(down), /HTTP request failed/);
+});
+
+/** A client whose chain runs `aheadMs` ahead of the local clock, with a block every 2 s seen 100 ms after its timestamp. */
+const chainAhead = (aheadMs: number) =>
+  ({
+    getBlock: async () => {
+      const n = Math.floor((Date.now() + aheadMs - 100) / 2_000);
+      return { number: BigInt(n), timestamp: BigInt(n * 2) };
+    },
+  }) as unknown as Client;
+
+test("clockLag measures a slow local clock to within a few hundred ms, and a correct one as about zero", async () => {
+  const slow = await clockLag(chainAhead(1_500), 2_500);
+  assert.ok(slow > 1_000 && slow <= 1_500, `${slow} ms`);
+  const right = await clockLag(chainAhead(0), 2_500);
+  assert.ok(right > -500 && right <= 0, `${right} ms`);
+  assert.ok(Number.isNaN(await clockLag({ getBlock: async () => ({ number: 1n, timestamp: 0n }) } as unknown as Client, 500)), "no new block");
 });

@@ -35,8 +35,9 @@ implemented yet.
 
 ## Prerequisites
 
-`gcloud`, `jq`. Node 24 for development. `sh/setup.sh` and `sh/deploy.sh` need `roles/owner` on the keeper project;
-`sh/check.sh` needs `roles/viewer` plus `roles/iam.securityReviewer` and `roles/secretmanager.viewer`.
+`gcloud`, `jq`, and `curl` for `sh/check.sh`. Node 24 for development. `sh/setup.sh` and `sh/deploy.sh` need
+`roles/owner` on the keeper project; `sh/check.sh` needs `roles/viewer` plus `roles/iam.securityReviewer` and
+`roles/secretmanager.viewer`.
 
 ## 1. Configure
 
@@ -115,8 +116,9 @@ sh/check.sh
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
 `config.env` and `policy/`; if a schedule, its target, its service account or its state differ, or a stale scheduler
 job remains; if the secret has no enabled version or extra readers; if the keeper's service account has a
-user-managed key, any IAM binding on itself (impersonation) or any project-level role; or if the alert is missing,
-disabled, or not pointed at `ALERT_EMAIL`.
+user-managed key, any IAM binding on itself (impersonation) or any project-level role; if `KEEPER` holds under
+0.0005 ETH on Base, about four weeks of worst-case votes (read through `https://mainnet.base.org`, or
+`CHECK_RPC_URL`); or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
 
 CI runs it every Friday after the vote, and on demand from the Actions tab, exactly like the key repo: a viewer-only
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
@@ -143,21 +145,23 @@ the same data, so most passes end without a transaction. `src/select.ts` is this
 
 Re-voting is safe: Hydrex's `VOTE_DELAY` is zero and `vote` resets before recasting, so each pass just recomputes.
 The Voter keeps last epoch's `votes` until that reset, so the job treats them as absent unless `lastVoted` falls in
-the current epoch.
-Voting at or after the flip reverts (`EpochFlipInProgress`, `EpochStale`), so a late pass fails instead of voting
-into the wrong epoch. A pass that is already overdue when its turn comes (an earlier pass waited on a slow receipt)
-is skipped; the receipt wait itself is bounded by the next pass, and a vote whose receipt has not arrived by then is
-left for the next pass to observe on the Voter. Each pass retries up to three times while there is time before the
-next one. A pass that fails for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed
-job up to three times, and the restart recomputes the remaining passes from the clock: a pass missed within the past
-hour runs right away, a restart within an hour after the flip exits cleanly. A vote is always sent with the
-account's confirmed nonce, so it replaces a vote still pending under that nonce instead of queueing behind it: it
-pays a quarter more than a pending vote this process sent (its fees are recorded before sending, so a send that
-errors after broadcasting still counts), and twice the estimate over one from an earlier process. Nothing is
-broadcast once the pass's deadline has passed. After a send, the retry loop re-sends only when the receipt shows an
-earlier vote won the nonce; a vote that was mined but reverted or recorded differently, or whose outcome could not be
-read, is left to the next pass. A Voter whose epoch lags the calendar by more than an hour (minter not
-updated) fails the execution at startup and at every pass.
+the current epoch. Voting at or after the flip reverts (`EpochFlipInProgress`, `EpochStale`), so a late pass fails
+instead of voting into the wrong epoch. Pass times and deadlines use chain time: at startup the job watches the
+chain for about four seconds, and a new block, first seen within about 0.2 s of its timestamp, shows how far the
+local clock is behind; a slow clock is corrected by that much, and one that looks fast is only logged, since a
+lagging node looks the same and running early is the safe side. A pass that is already overdue when its turn comes
+(an earlier pass waited on a slow receipt) is skipped; the receipt wait itself is bounded by the next pass, and a
+vote whose receipt has not arrived by then is left for the next pass to observe on the Voter. Each pass retries up
+to three times while there is time before the next one. A pass that fails for good makes the job exit non-zero,
+which fires the alert; Cloud Run restarts a crashed job up to three times, and the restart recomputes the remaining
+passes from the clock: a pass missed within the past hour runs right away, a restart within an hour after the flip
+exits cleanly. A vote is always sent with the account's confirmed nonce, so it replaces a vote still pending under
+that nonce instead of queueing behind it: it pays a quarter more than a pending vote this process sent (its fees are
+recorded before sending, so a send that errors after broadcasting still counts), and twice the estimate over one
+from an earlier process. Nothing is broadcast once the pass's deadline has passed. After a send, the retry loop
+re-sends only when the receipt shows an earlier vote won the nonce; a vote that was mined but reverted or recorded
+differently, or whose outcome could not be read, is left to the next pass. A Voter whose epoch lags the calendar by
+more than an hour (minter not updated) fails the execution at startup and at every pass.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent. To keep the last passes short, an execution reads gauges, bribe contracts and reward
@@ -184,7 +188,7 @@ receipt's block, so a lagging fallback node cannot report it missing.
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
-| ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so |
+| ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so; the weekly `check.sh` fails below 0.0005 ETH, days before that |
 | Hydrex's minter | Epoch timestamp | If `_epochTimestamp()` lags the calendar epoch, the job refuses to vote |
 
 ## Outside the scripts
@@ -192,7 +196,7 @@ receipt's block, so a lagging fallback node cannot report it missing.
 1. Enforce `iam.managed.disableServiceAccountKeyCreation` on the keeper project. `check.sh` only detects a key.
 2. The alert covers failed executions. Add one for absent executions (`run.googleapis.com/job/completed_execution_count`
    absent for eight days) if a missed schedule must be noticed.
-3. Keep the keeper's ETH balance topped up; the dry run reports the cost of a vote.
+3. Keep the keeper's ETH balance topped up: `check.sh` fails under 0.0005 ETH, and the dry run reports the cost of a vote.
 4. `pools.json` is the policy, at most 50 pools, each once (`npm test` checks). Change it by pull request and redeploy.
 
 ## Development

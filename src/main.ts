@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, hostOf, WEEK, type Chain } from "./chain.ts";
+import { clockLag, connect, hostOf, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
@@ -23,7 +23,12 @@ export const MAX_POOLS = 50;
 
 type Whitelist = { pool: Address; name: string }[];
 
-const now = () => BigInt(Math.floor(Date.now() / 1000));
+// Chain time: the local clock plus how far it measured behind the chain at startup (`clockLag`), so that a slow
+// clock does not push the last passes past the flip. A clock that looks fast is not corrected: a lagging node looks
+// the same, and running early is the safe side.
+let behindMs = 0;
+const nowMs = () => Date.now() + behindMs;
+const now = () => BigInt(Math.floor(nowMs() / 1000));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Times (unix seconds) of the passes due within the horizon, earliest first. */
@@ -136,6 +141,11 @@ async function main(): Promise<number> {
   const chain = await connect(module, rpcUrls);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, rpcs: rpcUrls.map(hostOf), dryRun });
+  const lag = await clockLag(chain.client);
+  behindMs = Number.isNaN(lag) ? 0 : Math.max(0, Math.round(lag));
+  if (Number.isNaN(lag)) log.warning("no new block seen; clock not checked");
+  else if (lag < -2_000) log.warning("latest block looks old: local clock fast or RPC lagging; not corrected", { ms: Math.round(-lag) });
+  log.info("clock", { chainAheadMs: Number.isNaN(lag) ? null : Math.round(lag), correctionMs: behindMs });
 
   const { start, flip } = await readEpoch(chain);
   if (!immediately && flip <= now() && now() - flip < HORIZON) {
@@ -156,9 +166,9 @@ async function main(): Promise<number> {
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
-    await sleep(Number(time * 1000n - BigInt(Date.now())));
+    await sleep(Number(time * 1000n) - nowMs());
     const until = i + 1 < times.length ? times[i + 1]! * 1000n : deadline;
-    if (BigInt(Date.now()) >= until) {
+    if (BigInt(nowMs()) >= until) {
       log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
       continue;
     }
@@ -166,11 +176,11 @@ async function main(): Promise<number> {
     for (let attempt = 1; ; attempt++) {
       const started = Date.now();
       try {
-        await pass(run, until);
+        await pass(run, until - BigInt(behindMs)); // deadlines below compare with the local clock
         log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
         break;
       } catch (error) {
-        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && BigInt(Date.now() + RETRY_DELAY) < until;
+        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && BigInt(nowMs() + RETRY_DELAY) < until;
         log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms: Date.now() - started, error: describe(error) });
         if (!retry) {
           failed++;

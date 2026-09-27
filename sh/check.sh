@@ -8,6 +8,7 @@ script_dir=$(dirname -- "$0")
 
 [ $# -eq 0 ] || die "usage: ${0##*/}"
 require_tools
+command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 load_config
 make_tmp
 
@@ -88,6 +89,19 @@ for sa in "$KEEPER_SA" "$SCHEDULER_SA"; do
   roles=$(json_field "$project_policy" "[.bindings[]? | select(.members | index(\"serviceAccount:$sa\")) | .role] | join(\" \")")
   if [ -z "$roles" ]; then ok "$sa has no project-level role"; else fail "$sa has project-level roles: $roles"; fi
 done
+
+# Keeper balance: KEEPER() on the module, then its ETH.
+keeper_word=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
+keeper=0x$(printf '%s' "$keeper_word" | tail -c 40)
+balance_hex=$(rpc eth_getBalance "[\"$keeper\",\"latest\"]")
+balance_digits=$(printf '%s' "${balance_hex#0x}" | sed 's/^0*//')
+if [ "${#balance_digits}" -gt 15 ]; then
+  ok "keeper $keeper holds over 1 ETH"
+else
+  balance_wei=$(printf '%d' "0x${balance_digits:-0}")
+  balance_eth=$(awk "BEGIN { printf \"%.6f\", $balance_wei / 1e18 }")
+  if [ "$balance_wei" -ge "$MIN_KEEPER_WEI" ]; then ok "keeper $keeper holds $balance_eth ETH"; else fail "keeper $keeper holds $balance_eth ETH, under 0.0005; fund it"; fi
+fi
 
 # Alert
 channel=$(find_channel)

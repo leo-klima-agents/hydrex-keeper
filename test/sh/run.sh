@@ -1,6 +1,6 @@
 #!/bin/sh
 # run.sh [--update]: every script under $TEST_SH (default dash) against
-# test/sh/fake-gcloud, diffed against test/sh/golden/<case>.txt.
+# test/sh/fake-gcloud and test/sh/fake-curl, diffed against test/sh/golden/<case>.txt.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -18,6 +18,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$tmp/bin"
 ln -s "$root/test/sh/fake-gcloud" "$tmp/bin/gcloud"
+ln -s "$root/test/sh/fake-curl" "$tmp/bin/curl"
 PATH=$tmp/bin:$PATH
 export PATH
 failures=0

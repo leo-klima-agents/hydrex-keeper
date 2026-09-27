@@ -124,6 +124,27 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
   return { client, module, conduit, keeper, voter, ve, broadcast };
 }
 
+/**
+ * How far the chain's clock is ahead of the local one, in ms, measured over `sampleMs` (at least one new 2 s block).
+ * A new block is first seen 60 to 165 ms after its timestamp (measured against a local clock 36 ms off Google's), so
+ * its timestamp at first sighting is real time to within about 0.2 s. Positive means the local clock is slow; NaN if
+ * no new block was seen.
+ */
+export async function clockLag(client: Client, sampleMs = 4_000): Promise<number> {
+  let last: bigint | undefined;
+  let lag = Number.NaN;
+  const end = Date.now() + sampleMs;
+  while (Date.now() < end) {
+    const t0 = Date.now();
+    const block = await client.getBlock({ blockTag: "latest" });
+    const at = (t0 + Date.now()) / 2;
+    if (last !== undefined && block.number !== last) lag = Math.max(Number.isNaN(lag) ? -Infinity : lag, Number(block.timestamp) * 1000 - at);
+    last = block.number;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return lag;
+}
+
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };
 
 type ReadOptions = { blockNumber?: bigint; lenient?: boolean };

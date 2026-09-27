@@ -1,0 +1,25 @@
+#!/bin/sh
+# curl stub for the golden tests: answers check.sh's two JSON-RPC calls from canned state per $FAKE_GCLOUD_SCENARIO
+# (drift: an underfunded keeper) and logs each call to $FAKE_GCLOUD_LOG.
+set -eu
+
+: "${FAKE_GCLOUD_LOG:?}" "${FAKE_GCLOUD_SCENARIO:?}"
+
+body='' url=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d | --data) body=$2; shift ;;
+    -H | --max-time) shift ;;
+    -*) ;;
+    *) url=$1 ;;
+  esac
+  shift
+done
+method=$(printf '%s' "$body" | jq -r .method)
+printf 'curl %s %s %s\n' "$url" "$method" "$(printf '%s' "$body" | jq -c .params)" >>"$FAKE_GCLOUD_LOG"
+case "$method" in
+  eth_call) result=0x000000000000000000000000625cf6663d9d090535fbd57680bffe6fa0262434 ;;
+  eth_getBalance) if [ "$FAKE_GCLOUD_SCENARIO" = drift ]; then result=0x5af3107a4000; else result=0x11c37937e08000; fi ;;
+  *) printf 'fake-curl: unexpected method %s\n' "$method" >&2; exit 99 ;;
+esac
+printf '{"jsonrpc":"2.0","id":1,"result":"%s"}\n' "$result"
