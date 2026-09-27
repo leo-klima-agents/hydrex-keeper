@@ -17,6 +17,8 @@ gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=
 gcloud beta monitoring channels create --project=hydrex-keeper-test --display-name=hydrex-keeper alerts --type=email --channel-labels=email_address=hydrex-admin@example.com --format=value(name)
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
 gcloud monitoring policies create --project=hydrex-keeper-test --display-name=hydrex-keeper failed --condition-display-name=failed task attempts --condition-filter=metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed" --if=> 0 --aggregation={"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"} --notification-channels=projects/hydrex-keeper-test/notificationChannels/1234567890 --documentation=A hydrex-keeper execution failed. Read its logs in Cloud Run before the epoch flips.
+gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
+gcloud monitoring policies create --project=hydrex-keeper-test {"alertStrategy":{"notificationRateLimit":{"period":"300s"}},"combiner":"OR","conditions":[{"conditionMatchedLog":{"filter":"resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^hydrex-keeper-[0-9]+$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"},"displayName":"failed start attempt"}],"displayName":"hydrex-keeper start failed","documentation":{"content":"Cloud Scheduler failed to start hydrex-keeper. It retries three times; if every attempt failed, start it by hand with sh/run.sh before the epoch flips.","mimeType":"text/markdown"},"notificationChannels":["projects/hydrex-keeper-test/notificationChannels/1234567890"]}
 exit=0
 --- output ---
 == 1/4 APIs
@@ -30,8 +32,9 @@ add the RPC URL: printf '%s' VALUE | gcloud secrets versions add base-rpc-url --
 creating alchemy-api-key
 iam: writing alchemy-api-key
 add the Alchemy API key: printf '%s' VALUE | gcloud secrets versions add alchemy-api-key --project=hydrex-keeper-test --data-file=-
-== 4/4 failure alert
+== 4/4 alerts
 creating email channel for hydrex-admin@example.com
 creating alert policy: hydrex-keeper failed
+creating alert policy: hydrex-keeper start failed
 set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:
 hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com

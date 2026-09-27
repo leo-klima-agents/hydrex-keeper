@@ -107,22 +107,27 @@ else
   if [ "$balance_wei" -ge "$MIN_KEEPER_WEI" ]; then ok "keeper $keeper holds $balance_eth ETH"; else fail "keeper $keeper holds $balance_eth ETH, under 0.0005; fund it"; fi
 fi
 
-# Alert
+# Alerts: a failed execution, and a failed start.
 channel=$(find_channel)
-alert=$(find_alert)
-if [ -z "$channel" ]; then
-  fail "no email channel for $ALERT_EMAIL"
-elif [ -z "$alert" ]; then
-  fail "alert policy \"$ALERT_NAME\" missing"
-else
-  expect "alert enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
-  if [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
-    ok "alert notifies $ALERT_EMAIL"
+# expect_alert NAME FILTER
+expect_alert() {
+  alert=$(find_alert "$1")
+  if [ -z "$channel" ]; then
+    fail "no email channel for $ALERT_EMAIL"
+  elif [ -z "$alert" ]; then
+    fail "alert policy \"$1\" missing"
   else
-    fail "alert does not notify $ALERT_EMAIL"
+    expect "\"$1\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
+    if [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
+      ok "\"$1\" notifies $ALERT_EMAIL"
+    else
+      fail "\"$1\" does not notify $ALERT_EMAIL"
+    fi
+    expect "\"$1\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$2"
   fi
-  expect "alert filter" "$(json_field "$alert" '.conditions[0].conditionThreshold.filter')" "$ALERT_FILTER"
-fi
+}
+expect_alert "$ALERT_NAME" "$ALERT_FILTER"
+expect_alert "$START_ALERT_NAME" "$START_ALERT_FILTER"
 
 [ "$failed" -ne 0 ] || log "all checks passed"
 exit "$failed"

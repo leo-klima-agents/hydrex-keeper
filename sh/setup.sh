@@ -43,7 +43,7 @@ ensure_secret "$RPC_SECRET" "RPC URL"
 ensure_secret "$ALCHEMY_SECRET" "Alchemy API key"
 [ -z "$COINGECKO_SECRET" ] || ensure_secret "$COINGECKO_SECRET" "CoinGecko demo API key"
 
-log "== 4/4 failure alert"
+log "== 4/4 alerts"
 channel=$(find_channel)
 if [ -n "$channel" ]; then
   log "exists: $channel"
@@ -52,7 +52,7 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-alert=$(find_alert)
+alert=$(find_alert "$ALERT_NAME")
 if [ -n "$alert" ]; then
   log "exists: $ALERT_NAME"
 else
@@ -62,6 +62,14 @@ else
     --aggregation='{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}' \
     --notification-channels="$channel" \
     --documentation="A $JOB execution failed. Read its logs in Cloud Run before the epoch flips." >/dev/null
+fi
+alert=$(find_alert "$START_ALERT_NAME")
+if [ -n "$alert" ]; then
+  log "exists: $START_ALERT_NAME"
+else
+  log "creating alert policy: $START_ALERT_NAME"
+  start_alert_policy "$channel" >"$TMP/start-alert.json"
+  gcloud monitoring policies create --project="$KEEPER_PROJECT" --policy-from-file="$TMP/start-alert.json" >/dev/null
 fi
 
 log "set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:"

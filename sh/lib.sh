@@ -100,6 +100,9 @@ load_config() {
     KEEPER_SECRETS="$KEEPER_SECRETS $COINGECKO_SECRET"
   fi
   ALERT_NAME="$JOB failed"
+  # Cloud Scheduler logs an AttemptFinished entry for every start attempt; a failed one is ERROR, with the HTTP status.
+  START_ALERT_NAME="$JOB start failed"
+  START_ALERT_FILTER="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^$JOB-[0-9]+\$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
 }
 
@@ -183,12 +186,24 @@ find_channel() {
   printf '%s\n' "$channels" | jq -r 'first(.[] | .name) // ""'
 }
 
-# find_alert: the alert policy named ALERT_NAME as JSON, or "".
+# find_alert NAME: the alert policy named NAME as JSON, or "".
 find_alert() {
   alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" \
-    --filter="displayName=\"$ALERT_NAME\"" --format=json) || die "cannot list alert policies"
+    --filter="displayName=\"$1\"" --format=json) || die "cannot list alert policies"
   require_json "$alerts" "alert policy list"
   printf '%s\n' "$alerts" | jq -c 'first(.[]) // empty'
+}
+
+# start_alert_policy CHANNEL: the alert on a failed scheduler start, as a policy file for `policies create`.
+start_alert_policy() {
+  jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$1" --arg job "$JOB" '{
+    displayName: $name,
+    combiner: "OR",
+    conditions: [{ displayName: "failed start attempt", conditionMatchedLog: { filter: $filter } }],
+    alertStrategy: { notificationRateLimit: { period: "300s" } }, # required for a log-based condition
+    notificationChannels: [$channel],
+    documentation: { mimeType: "text/markdown", content: "Cloud Scheduler failed to start \($job). It retries three times; if every attempt failed, start it by hand with sh/run.sh before the epoch flips." }
+  }'
 }
 
 job_exists() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
@@ -249,14 +264,14 @@ schedules() {
 
 scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
-# find_stale_schedulers: sets STALE to the scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists, one
+# find_stale_schedulers: sets STALE to the scheduler jobs named $JOB-* that SCHEDULES no longer lists, one
 # per line. Call it as a command, not in $(...), so that a failed listing stops the script.
 find_stale_schedulers() {
   stale_configured=$(schedules | cut -f1)
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
   STALE=$(printf '%s\n' "$stale_list" |
-    jq -r --arg job "$JOB" '.[].name | split("/") | last | select(. == $job or startswith($job + "-"))' |
+    jq -r --arg job "$JOB" '.[].name | split("/") | last | select(startswith($job + "-"))' |
     while IFS= read -r stale_name; do
       printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
     done)

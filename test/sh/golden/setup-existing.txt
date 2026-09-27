@@ -9,6 +9,7 @@ gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --for
 gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
 exit=0
 --- output ---
 == 1/4 APIs
@@ -20,8 +21,9 @@ exists: base-rpc-url
 iam: base-rpc-url unchanged
 exists: alchemy-api-key
 iam: alchemy-api-key unchanged
-== 4/4 failure alert
+== 4/4 alerts
 exists: projects/hydrex-keeper-test/notificationChannels/1234567890
 exists: hydrex-keeper failed
+exists: hydrex-keeper start failed
 set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:
 hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com

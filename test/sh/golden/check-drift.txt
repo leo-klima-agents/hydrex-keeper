@@ -14,6 +14,7 @@ curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235a
 curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
 exit=1
 --- output ---
 FAIL: job service account is 123456789-compute@developer.gserviceaccount.com, expected hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
@@ -50,7 +51,7 @@ ok: hydrex-keeper-2 method is POST
 ok: hydrex-keeper-2 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 FAIL: hydrex-keeper-2 state is PAUSED, expected ENABLED
 ok: hydrex-keeper-2 retries is 3 15s 60s 2 300s
-FAIL: stale scheduler jobs: hydrex-keeper
+FAIL: stale scheduler jobs: hydrex-keeper-3
 ok: base-rpc-url has an enabled version
 FAIL: base-rpc-url secret IAM policy differs from template
 @@ -2,7 +2,8 @@
@@ -80,6 +81,9 @@ FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has IAM bindings:
 FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has project-level roles: roles/editor
 ok: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
 FAIL: keeper 0x625cf6663d9d090535fbd57680bffe6fa0262434 holds 0.000100 ETH, under 0.0005; fund it
-FAIL: alert enabled is false, expected true
-FAIL: alert does not notify hydrex-admin@example.com
-ok: alert filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"
+FAIL: "hydrex-keeper failed" enabled is false, expected true
+FAIL: "hydrex-keeper failed" does not notify hydrex-admin@example.com
+ok: "hydrex-keeper failed" filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"
+ok: "hydrex-keeper start failed" enabled is true
+ok: "hydrex-keeper start failed" notifies hydrex-admin@example.com
+FAIL: "hydrex-keeper start failed" filter is resource.type="cloud_scheduler_job", expected resource.type="cloud_scheduler_job" AND resource.labels.job_id=~"^hydrex-keeper-[0-9]+$" AND jsonPayload.@type="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished" AND (severity>=ERROR OR httpRequest.status>=400)
