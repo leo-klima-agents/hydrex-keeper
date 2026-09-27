@@ -4,6 +4,9 @@ gcloud iam service-accounts describe hydrex-keeper-scheduler@hydrex-keeper-test.
 gcloud secrets describe base-rpc-url --project=hydrex-keeper-test --format=value(name)
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets describe alchemy-api-key --project=hydrex-keeper-test --format=value(name)
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
 exit=0
@@ -12,9 +15,11 @@ exit=0
 == 2/4 service accounts
 exists: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
 exists: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
-== 3/4 RPC secret
+== 3/4 secrets
 exists: base-rpc-url
 iam: base-rpc-url unchanged
+exists: alchemy-api-key
+iam: alchemy-api-key unchanged
 == 4/4 failure alert
 exists: projects/hydrex-keeper-test/notificationChannels/1234567890
 exists: hydrex-keeper failed

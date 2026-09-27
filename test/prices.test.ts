@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { priceFeed, prices } from "../src/prices.ts";
+import { alchemy, coingecko, combined, defillama, priceFeed, type PriceSource } from "../src/prices.ts";
+
+const prices = (tokens: string[], fetchFn: typeof fetch, until = Infinity) => defillama(fetchFn).get(tokens as `0x${string}`[], until);
 
 const WETH = "0x4200000000000000000000000000000000000006";
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -57,13 +59,13 @@ test("priceFeed refreshes at every call and serves the last set when a refresh f
     () => new Response("", { status: 503 }),
   ];
   const { fetchFn, urls } = fakeFetch(responses);
-  const feed = priceFeed(fetchFn);
+  const feed = priceFeed(defillama(fetchFn));
   assert.equal((await feed([WETH])).get(WETH), 1);
   assert.equal((await feed([WETH, USDC])).get(WETH), 2, "refreshed");
   assert.equal((await feed([WETH])).get(WETH), 2, "the last set is served when the refresh fails");
   assert.equal(urls.length, 5);
   assert.equal((await feed([JUNK])).has(JUNK), false, "a new token is unpriced, not a failure");
-  await assert.rejects(priceFeed(fakeFetch([]).fetchFn)([WETH]), /DefiLlama unavailable/, "nothing to fall back on");
+  await assert.rejects(priceFeed(defillama(fakeFetch([]).fetchFn))([WETH]), /DefiLlama unavailable/, "nothing to fall back on");
 });
 
 test("a malformed 200 response is retried", async () => {
@@ -81,10 +83,69 @@ test("prices stops retrying when a retry cannot finish before the deadline", asy
 
 test("priceFeed serves the last set instead of refreshing when the deadline is near", async () => {
   const { fetchFn, urls } = fakeFetch([() => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 } } })]);
-  const feed = priceFeed(fetchFn);
+  const feed = priceFeed(defillama(fetchFn));
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 2);
   assert.equal((await feed([WETH], Date.now() + 10_000)).get(WETH), 2, "10 s left: no refresh");
   assert.equal((await feed([WETH, USDC], Date.now() + 10_000)).has(USDC), false, "not even for a new token");
   assert.equal(urls.length, 2);
+});
+
+/** A source answering from a table, or failing. */
+const table = (name: string, quotes: Record<string, number> | Error): PriceSource & { asked: string[][] } => {
+  const asked: string[][] = [];
+  return {
+    name,
+    asked,
+    get: async (tokens) => {
+      asked.push(tokens);
+      if (quotes instanceof Error) throw quotes;
+      return new Map(tokens.filter((t) => t in quotes).map((t) => [t, quotes[t]!]));
+    },
+  };
+};
+const [T1, T2, T3, T4] = ["0x01", "0x02", "0x03", "0x04"].map((p) => `${p}${"0".repeat(38)}` as `0x${string}`) as [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`];
+
+test("combined takes the lower of two quotes, the median of three, and sends only doubtful tokens to the tie-breaker", async () => {
+  const a = table("A", { [T1]: 1, [T2]: 2, [T3]: 10 });
+  const b = table("B", { [T1]: 1.01, [T2]: 3, [T4]: 5 });
+  const tie = table("tie", { [T2]: 2.5, [T3]: 11 });
+  const out = await combined([a, b], tie).get([T1, T2, T3, T4], Infinity);
+  assert.deepEqual(Object.fromEntries(out), { [T1]: 1, [T2]: 2.5, [T3]: 10, [T4]: 5 });
+  assert.deepEqual(tie.asked, [[T2, T3, T4]], "disagreeing first, then single-source; T1 agrees");
+});
+
+test("combined survives a failed source and fails only when every source does", async () => {
+  const out = await combined([table("A", new Error("down")), table("B", { [T1]: 4 })]).get([T1], Infinity);
+  assert.equal(out.get(T1), 4);
+  await assert.rejects(combined([table("A", new Error("down")), table("B", new Error("down"))]).get([T1], Infinity), /no price source answered/);
+});
+
+test("alchemy posts 25 addresses per request and reads USD values; the key never reaches an error", async () => {
+  const bodies: { addresses: { network: string; address: string }[] }[] = [];
+  const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(url), "https://api.g.alchemy.com/prices/v1/KEY/tokens/by-address");
+    const body = JSON.parse(String(init?.body)) as (typeof bodies)[number];
+    bodies.push(body);
+    return Response.json({ data: body.addresses.map((a, i) => ({ network: a.network, address: a.address, prices: i === 0 ? [{ currency: "usd", value: "2.5" }] : [], error: i === 0 ? null : "Price not found" })) });
+  }) as typeof fetch;
+  const tokens = Array.from({ length: 30 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`);
+  const out = await alchemy("KEY", fetchFn).get(tokens, Infinity);
+  assert.deepEqual(bodies.map((b) => b.addresses.length), [25, 5]);
+  assert.equal(bodies[0]!.addresses[0]!.network, "base-mainnet");
+  assert.deepEqual([...out.values()], [2.5, 2.5]);
+  const failing = (async () => new Response("", { status: 401 })) as unknown as typeof fetch;
+  await assert.rejects(alchemy("SECRET-KEY", failing).get([T1], Date.now() + 1_500), (e: Error) => /Alchemy unavailable: HTTP 401/.test(e.message) && !e.message.includes("SECRET-KEY"));
+});
+
+test("coingecko asks one token per request, at most `max`, and treats a 429 as no quote", async () => {
+  const urls: string[] = [];
+  const fetchFn = (async (url: string | URL | Request) => {
+    urls.push(String(url));
+    const token = new URL(String(url)).searchParams.get("contract_addresses")!;
+    return token === T2 ? new Response("", { status: 429 }) : Response.json({ [token]: { usd: 7 } });
+  }) as typeof fetch;
+  const out = await coingecko(fetchFn, 2).get([T1, T2, T3], Infinity);
+  assert.equal(urls.length, 2);
+  assert.deepEqual(Object.fromEntries(out), { [T1]: 7 });
 });

@@ -73,6 +73,7 @@ jobs:
           VOTE_OFFSETS: ${{ vars.VOTE_OFFSETS }}
           SCHEDULES: ${{ vars.SCHEDULES }}
           RPC_SECRET: ${{ vars.RPC_SECRET }}
+          ALCHEMY_SECRET: ${{ vars.ALCHEMY_SECRET }}
           ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
         run: |
           cat >config.env <<CFG
@@ -86,6 +87,7 @@ jobs:
           VOTE_OFFSETS='$VOTE_OFFSETS'
           SCHEDULES='$SCHEDULES'
           RPC_SECRET='$RPC_SECRET'
+          ALCHEMY_SECRET='$ALCHEMY_SECRET'
           ALERT_EMAIL='$ALERT_EMAIL'
           CFG
       - run: sh/check.sh

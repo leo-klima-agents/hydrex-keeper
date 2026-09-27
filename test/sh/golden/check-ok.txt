@@ -5,6 +5,8 @@ gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
 gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --managed-by=user --format=json
 gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --format=json
 gcloud projects get-iam-policy hydrex-keeper-test --format=json
@@ -20,7 +22,7 @@ ok: job max retries is 3
 ok: job task count is 1
 ok: job containers is 1
 ok: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=86400,600,200,70,25,10,5
-ok: job secrets is BASE_RPC_URL=base-rpc-url:latest
+ok: job secrets is ALCHEMY_API_KEY=alchemy-api-key:latest|BASE_RPC_URL=base-rpc-url:latest
 ok: job IAM policy matches template
 ok: hydrex-keeper-1 schedule is 50 23 * * 2
 ok: hydrex-keeper-1 time zone is Etc/UTC
@@ -36,7 +38,9 @@ ok: hydrex-keeper-2 service account is hydrex-keeper-scheduler@hydrex-keeper-tes
 ok: hydrex-keeper-2 state is ENABLED
 ok: no stale scheduler job
 ok: base-rpc-url has an enabled version
-ok: secret IAM policy matches template
+ok: base-rpc-url secret IAM policy matches template
+ok: alchemy-api-key has an enabled version
+ok: alchemy-api-key secret IAM policy matches template
 ok: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has no user-managed keys
 ok: nobody can act as hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role

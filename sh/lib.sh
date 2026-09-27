@@ -40,7 +40,7 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALCHEMY_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -51,6 +51,7 @@ load_config() {
   VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
+  ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
 
   for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
     eval "value=\${$required:-}"
@@ -84,7 +85,8 @@ load_config() {
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
   # `|` separates the variables because VOTE_OFFSETS contains commas.
   ENV_VARS="^|^MODULE=$MODULE|KMS_KEY_VERSION=$KMS_KEY_VERSION|VOTE_OFFSETS=$VOTE_OFFSETS"
-  SECRETS="BASE_RPC_URL=$RPC_SECRET:latest"
+  SECRETS="BASE_RPC_URL=$RPC_SECRET:latest,ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest"
+  KEEPER_SECRETS="$RPC_SECRET $ALCHEMY_SECRET" # the Secret Manager secrets the job reads
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
 }
@@ -255,9 +257,10 @@ rpc() {
   printf '%s\n' "$rpc_reply" | jq -er '.result' 2>/dev/null || die "$1 on $CHECK_RPC: $rpc_reply"
 }
 
+# secret_versions SECRET: the number of enabled versions.
 secret_versions() {
-  versions=$(gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
-    die "cannot list versions of $RPC_SECRET"
+  versions=$(gcloud secrets versions list "$1" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
+    die "cannot list versions of $1"
   require_json "$versions" "secret version list"
   printf '%s\n' "$versions" | jq 'length'
 }

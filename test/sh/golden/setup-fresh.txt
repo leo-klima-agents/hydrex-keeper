@@ -8,6 +8,11 @@ gcloud secrets create base-rpc-url --project=hydrex-keeper-test --replication-po
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
 gcloud secrets set-iam-policy --project=hydrex-keeper-test base-rpc-url {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"BwSecretEmpty"}
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets describe alchemy-api-key --project=hydrex-keeper-test --format=value(name)
+gcloud secrets create alchemy-api-key --project=hydrex-keeper-test --replication-policy=automatic
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
+gcloud secrets set-iam-policy --project=hydrex-keeper-test alchemy-api-key {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"BwSecretEmpty"}
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud beta monitoring channels create --project=hydrex-keeper-test --display-name=hydrex-keeper alerts --type=email --channel-labels=email_address=hydrex-admin@example.com --format=value(name)
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
@@ -18,10 +23,13 @@ exit=0
 == 2/4 service accounts
 creating hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
 creating hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
-== 3/4 RPC secret
+== 3/4 secrets
 creating base-rpc-url
 iam: writing base-rpc-url
-add the RPC URL: printf '%s' URL | gcloud secrets versions add base-rpc-url --project=hydrex-keeper-test --data-file=-
+add the RPC URL: printf '%s' VALUE | gcloud secrets versions add base-rpc-url --project=hydrex-keeper-test --data-file=-
+creating alchemy-api-key
+iam: writing alchemy-api-key
+add the Alchemy API key: printf '%s' VALUE | gcloud secrets versions add alchemy-api-key --project=hydrex-keeper-test --data-file=-
 == 4/4 failure alert
 creating email channel for hydrex-admin@example.com
 creating alert policy: hydrex-keeper failed

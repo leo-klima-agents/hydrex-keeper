@@ -10,8 +10,10 @@ require_tools
 load_config
 make_tmp
 
-versions=$(secret_versions)
-[ "$versions" -gt 0 ] || die "$RPC_SECRET has no enabled version; see setup.sh"
+for secret in $KEEPER_SECRETS; do
+  versions=$(secret_versions "$secret")
+  [ "$versions" -gt 0 ] || die "$secret has no enabled version; see setup.sh"
+done
 
 log "== 1/3 job"
 gcloud run jobs deploy "$JOB" --source="$REPO_ROOT" --region="$REGION" --project="$KEEPER_PROJECT" \

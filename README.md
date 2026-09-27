@@ -56,19 +56,20 @@ must be of the form `M H * * D`), since an execution only runs the passes due wi
 sh/setup.sh
 ```
 
-Enables the APIs, creates the two service accounts (`hydrex-keeper` runs the job and is the only principal allowed to
-sign; `hydrex-keeper-scheduler` may only start the job), creates the RPC secret with the keeper as its only reader, and
-creates the email channel and the alert that fires when an execution fails. Safe to re-run. It prints the keeper's
-service account email for the next step.
+Enables the APIs, creates the two service accounts (`hydrex-keeper` runs the job and is the only principal allowed
+to sign; `hydrex-keeper-scheduler` may only start the job), creates the RPC and Alchemy secrets with the keeper as
+their only reader, and creates the email channel and the alert that fires when an execution fails. Safe to re-run.
+It prints the keeper's service account email for the next step.
 
 ## 3. Grant the keeper
 
 In hydrex-keeper-key, set `KEEPER_SA` to that email and run `sh/grant.sh`. That is the one cross-project binding.
 
-## 4. Add the RPC URL
+## 4. Add the RPC URL and the Alchemy key
 
 ```sh
 printf '%s' 'https://…' | gcloud secrets versions add base-rpc-url --project=KEEPER_PROJECT --data-file=-
+printf '%s' 'KEY' | gcloud secrets versions add alchemy-api-key --project=KEEPER_PROJECT --data-file=-
 ```
 
 Several URLs separated by commas are tried in order, then three free public nodes: `https://mainnet.base.org`,
@@ -77,6 +78,8 @@ also sent to the next one, and the first answer wins; the first URL should be a 
 pass's read in about 125 ms). The public nodes are rate-limited and Base calls its own "not suitable for production
 apps", so they are only asked when every URL in the secret is slow or down, and a second paid provider in the secret
 is what makes the final passes robust to a primary outage. The signed vote itself is sent to every URL at once.
+
+The Alchemy key is for token prices (its Prices API), one of three price sources with DefiLlama and CoinGecko.
 
 ## 5. Fund the keeper
 
@@ -91,7 +94,7 @@ sh/deploy.sh
 ```
 
 Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both
-images pinned by digest), deploys the job with the RPC secret and the config as environment, sets the job's IAM so
+images pinned by digest), deploys the job with both secrets and the config as environment, sets the job's IAM so
 only the scheduler account can start it, and creates or updates one Cloud Scheduler job per entry of `SCHEDULES`
 (`hydrex-keeper-1`, `hydrex-keeper-2`), deleting any `hydrex-keeper*` scheduler job no longer listed. Safe to re-run;
 re-run it after any change to `src/` or `pools.json`.
@@ -115,7 +118,7 @@ sh/check.sh
 
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
 `config.env` and `policy/`; if a schedule, its target, its service account or its state differ, or a stale scheduler
-job remains; if the secret has no enabled version or extra readers; if the keeper's service account has a
+job remains; if a secret has no enabled version or extra readers; if the keeper's service account has a
 user-managed key, any IAM binding on itself (impersonation) or any project-level role; if `KEEPER` holds under
 0.0005 ETH on Base, about four weeks of worst-case votes (read through `https://mainnet.base.org`, or
 `CHECK_RPC_URL`); or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
@@ -123,8 +126,9 @@ user-managed key, any IAM binding on itself (impersonation) or any project-level
 CI runs it every Friday after the vote, and on demand from the Actions tab, exactly like the key repo: a viewer-only
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
 a Workload Identity Federation pool and GitHub OIDC provider restricted to this repository, and repository variables
-`KEEPER_PROJECT`, `REGION`, `JOB`, `KEEPER_SA_NAME`, `SCHEDULER_SA_NAME`, `KMS_KEY_VERSION`, `MODULE`, `VOTE_OFFSETS`,
-`SCHEDULES`, `RPC_SECRET`, `ALERT_EMAIL`, `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`. All public material.
+`KEEPER_PROJECT`, `REGION`, `JOB`, `KEEPER_SA_NAME`, `SCHEDULER_SA_NAME`, `KMS_KEY_VERSION`, `MODULE`,
+`VOTE_OFFSETS`, `SCHEDULES`, `RPC_SECRET`, `ALCHEMY_SECRET`, `ALERT_EMAIL`, `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`.
+All public material.
 
 ## How it votes
 
@@ -169,23 +173,27 @@ tokens once. Each pass then reads the Voter's epoch, the conduit's power and vot
 a token (re-reading them if so), and every pool's liveness, votes and this epoch's reward of every token, in one
 `eth_call` of about 800 calls: votes and bribes both still move in the last ten minutes (over four past epochs, 4 to
 9% of all weight moved and fees kept landing), so every pass reads everything. Prices are refreshed at every pass
-that has at least twenty seconds left; otherwise, or if DefiLlama fails, the last set is reused and a token it lacks
-counts as zero. The read measures about 0.2 s and a pass about half a second including prices, and Base blocks are
-two seconds apart, so the last offset of five seconds leaves the transaction a block of margin. The calls are
-hedged: one the primary has not answered within 250 ms also goes to the next URL, and whichever answers first wins,
-the primary's late answer included. A URL that missed the delay is asked together with the next until it answers
-within it again, so a hung primary costs 250 ms once per execution (a dry-run pass takes 0.4 to 0.7 s either way).
-Calls are not retried at the transport level (the pass retry above is bounded by the deadline; a transport retry
-would honour a `Retry-After` of tens of seconds). The signed vote is sent to every URL in parallel and counts as
-sent once one accepts it, so its inclusion does not depend on one node. After a vote the Voter is read at the
-receipt's block, so a lagging fallback node cannot report it missing.
+that has at least twenty seconds left, from DefiLlama and Alchemy in parallel; the tokens they leave in doubt
+(unpriced, priced by one only, or more than 20% apart) go to keyless CoinGecko, which allows one token per request
+and about six requests a minute, so at most five per refresh. A token's price is the median of three quotes or the
+lower of two, since overpricing a bribe would draw votes to it, and quotes more than 20% apart are logged. With less
+than twenty seconds left, or if every source fails, the last set is reused and a token it lacks counts as zero. The
+read measures about 0.2 s and a pass about half a second including prices, and Base blocks are two seconds apart, so
+the last offset of five seconds leaves the transaction a block of margin. The calls are hedged: one the primary has
+not answered within 250 ms also goes to the next URL, and whichever answers first wins, the primary's late answer
+included. A URL that missed the delay is asked together with the next until it answers within it again, so a hung
+primary costs 250 ms once per execution (a dry-run pass takes 0.4 to 0.7 s either way). Calls are not retried at the
+transport level (the pass retry above is bounded by the deadline; a transport retry would honour a `Retry-After` of
+tens of seconds). The signed vote is sent to every URL in parallel and counts as sent once one accepts it, so its
+inclusion does not depend on one node. After a vote the Voter is read at the receipt's block, so a lagging fallback
+node cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
 | Base RPC (`BASE_RPC_URL`, one or more URLs, then `mainnet.base.org`, `base.drpc.org` and `base-rpc.publicnode.com`) | All reads, simulation, sending | A call unanswered after 250 ms also goes to the next URL; the first answer wins, and a request is abandoned after 5 s. The vote is sent to every URL; it fails only if none accepts it. The public nodes are rate-limited, so a paid provider is what makes the final passes robust. If all fail the pass fails and is retried |
-| [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
+| Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (keyless, tie-breaks only) | USD prices of reward tokens, refreshed at every pass with time for it | A failed source is logged and left out; DefiLlama and Alchemy each get three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so; the weekly `check.sh` fails below 0.0005 ETH, days before that |
@@ -196,7 +204,8 @@ receipt's block, so a lagging fallback node cannot report it missing.
 1. Enforce `iam.managed.disableServiceAccountKeyCreation` on the keeper project. `check.sh` only detects a key.
 2. The alert covers failed executions. Add one for absent executions (`run.googleapis.com/job/completed_execution_count`
    absent for eight days) if a missed schedule must be noticed.
-3. Keep the keeper's ETH balance topped up: `check.sh` fails under 0.0005 ETH, and the dry run reports the cost of a vote.
+3. Keep the keeper's ETH balance topped up: `check.sh` fails under 0.0005 ETH, and the dry run reports the cost of
+   a vote.
 4. `pools.json` is the policy, at most 50 pools, each once (`npm test` checks). Change it by pull request and redeploy.
 
 ## Development
@@ -224,7 +233,8 @@ by Dependabot, as are npm packages and base images.
 
 - The expected reward assumes other voters stay put; the late passes are what corrects for them moving.
 - No claiming or swapping of rewards yet.
-- Prices come from one source and are trusted for ranking only.
+- Prices are trusted for ranking only. Keyless CoinGecko breaks at most five ties per refresh; a free demo key would
+  lift that.
 - The last pass is five seconds before the flip. Pre-signing one transaction per candidate and broadcasting the
   chosen one after a final read would allow a later one.
 

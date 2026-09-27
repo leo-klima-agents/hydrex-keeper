@@ -3,7 +3,7 @@ import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
 import { clockLag, connect, hostOf, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
-import { priceFeed } from "./prices.ts";
+import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { readEpoch, readState, readStatic, StaticChanged, type State, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
@@ -157,7 +157,10 @@ async function main(): Promise<number> {
   if (note) log.warning(note, { flip });
   if (times.length === 0) return 0;
   const deadline = flip * 1000n - BigInt(LAST_MARGIN);
-  const run: Run = { chain, whitelist, prices: priceFeed(), account, dryRun };
+  const alchemyKey = process.env.ALCHEMY_API_KEY;
+  if (!alchemyKey) log.warning("ALCHEMY_API_KEY is not set: prices from DefiLlama, CoinGecko breaking ties");
+  const prices = priceFeed(combined([defillama(), ...(alchemyKey ? [alchemy(alchemyKey)] : [])], coingecko()));
+  const run: Run = { chain, whitelist, prices, account, dryRun };
   try {
     run.static = await readStatic(chain, whitelist.map((w) => w.pool));
   } catch (error) {

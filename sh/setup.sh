@@ -26,16 +26,21 @@ ensure_sa() {
 ensure_sa "$KEEPER_SA_NAME" "$KEEPER_SA" "runs the job and signs with the key"
 ensure_sa "$SCHEDULER_SA_NAME" "$SCHEDULER_SA" "starts the job on schedule"
 
-log "== 3/4 RPC secret"
-if gcloud secrets describe "$RPC_SECRET" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
-  log "exists: $RPC_SECRET"
-else
-  log "creating $RPC_SECRET"
-  gcloud secrets create "$RPC_SECRET" --project="$KEEPER_PROJECT" --replication-policy=automatic
-fi
-set_iam_authoritative "$RPC_SECRET" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
-versions=$(secret_versions)
-[ "$versions" -gt 0 ] || log "add the RPC URL: printf '%s' URL | gcloud secrets versions add $RPC_SECRET --project=$KEEPER_PROJECT --data-file=-"
+log "== 3/4 secrets"
+# ensure_secret NAME WHAT: the secret with the keeper as its only reader; says how to add WHAT if it has no version.
+ensure_secret() {
+  if gcloud secrets describe "$1" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
+    log "exists: $1"
+  else
+    log "creating $1"
+    gcloud secrets create "$1" --project="$KEEPER_PROJECT" --replication-policy=automatic
+  fi
+  set_iam_authoritative "$1" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
+  versions=$(secret_versions "$1")
+  [ "$versions" -gt 0 ] || log "add the $2: printf '%s' VALUE | gcloud secrets versions add $1 --project=$KEEPER_PROJECT --data-file=-"
+}
+ensure_secret "$RPC_SECRET" "RPC URL"
+ensure_secret "$ALCHEMY_SECRET" "Alchemy API key"
 
 log "== 4/4 failure alert"
 channel=$(find_channel)

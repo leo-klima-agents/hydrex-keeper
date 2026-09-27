@@ -43,8 +43,8 @@ expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | to
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
 expect "job env" "$(json_field "$job" "[$task.containers[0].env[]? | select(.value != null) | \"\(.name)=\(.value)\"] | sort | join(\"|\")")" \
   "KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
-expect "job secrets" "$(json_field "$job" "[$task.containers[0].env[]? | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | join(\"|\")")" \
-  "$SECRETS"
+expect "job secrets" "$(json_field "$job" "[$task.containers[0].env[]? | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | sort | join(\"|\")")" \
+  "$(printf '%s\n' "$SECRETS" | tr ',' '\n' | sort | paste -sd '|' -)"
 
 live_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
 expect_policy job "$live_policy" job.iam.json.tmpl
@@ -69,11 +69,13 @@ find_stale_schedulers
 stale=$(printf '%s\n' "$STALE" | paste -sd ' ' -)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
-# Secret
-versions=$(secret_versions)
-if [ "$versions" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
-live_policy=$(get_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" secrets)
-expect_policy secret "$live_policy" secret.iam.json.tmpl
+# Secrets
+for secret in $KEEPER_SECRETS; do
+  versions=$(secret_versions "$secret")
+  if [ "$versions" -gt 0 ]; then ok "$secret has an enabled version"; else fail "$secret has no enabled version"; fi
+  live_policy=$(get_iam "$secret" "--project=$KEEPER_PROJECT" secrets)
+  expect_policy "$secret secret" "$live_policy" secret.iam.json.tmpl
+done
 
 # Service accounts: no downloadable key, nobody can impersonate the keeper, no project-level role.
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||
