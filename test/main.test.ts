@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { missed, parseWhitelist, passTimes, schedule } from "../src/main.ts";
+import { MAX_POOLS, missed, parseWhitelist, passTimes, schedule } from "../src/main.ts";
 
 test("pass times are the offsets due within the horizon, earliest first, deduplicated", () => {
   const flip = 1_790_812_800n;
@@ -32,9 +32,12 @@ test("schedule runs what is due, a missed pass right away, or nothing", () => {
   assert.equal(schedule(flip, offsets, flip - 7200n, false).times.length, 0, "nothing due within the hour");
 });
 
-test("the whitelist names each pool once", () => {
+test("the whitelist names each pool once, and at most MAX_POOLS of them", () => {
   assert.ok(parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8")).length > 0, "pools.json is valid");
   const pool = "0x82dbe18346a8656dBB5E76F74bf3AE279cC16B29";
   assert.throws(() => parseWhitelist(JSON.stringify([{ pool, name: "a" }, { pool: pool.toLowerCase(), name: "b" }])), /more than once/);
   assert.throws(() => parseWhitelist("[]"), /empty/);
+  const tooMany = Array.from({ length: MAX_POOLS + 1 }, (_, i) => ({ pool: `0x${(i + 1).toString(16).padStart(40, "0")}`, name: `p${i}` }));
+  assert.throws(() => parseWhitelist(JSON.stringify(tooMany)), /at most 50/);
+  assert.equal(parseWhitelist(JSON.stringify(tooMany.slice(1))).length, MAX_POOLS);
 });

@@ -13,11 +13,10 @@ export type Slot = { pool: number; bribe: Address; token: Address; decimals: num
 export type Static = { pools: Address[]; gauges: Address[]; bribes: Address[]; lengths: bigint[]; slots: Slot[] };
 
 /**
- * What a pass reads, all from one block. `voterStart` is the Voter's epoch, for the caller to check against the
- * calendar epoch the reads used. `currentVote` is empty unless the conduit voted in this epoch: votes do not carry
- * over. `paying` is the slots with rewards this epoch.
+ * What a pass reads. `voterStart` is the Voter's epoch, for the caller to check against the calendar epoch the reads
+ * used. `currentVote` is empty unless the conduit voted in this epoch: votes do not carry over.
  */
-export type State = { voterStart: bigint; power: bigint; currentVote: { pools: Address[]; votes: bigint[] }; pools: PoolRewards[]; paying: Slot[] };
+export type State = { voterStart: bigint; power: bigint; currentVote: { pools: Address[]; votes: bigint[] }; pools: PoolRewards[] };
 
 /** A bribe contract gained a reward token since `readStatic`. */
 export class StaticChanged extends Error {}
@@ -70,26 +69,25 @@ export async function readStatic(chain: Chain, whitelist: Address[]): Promise<St
 }
 
 /**
- * One multicall for a pass: the Voter's epoch, the conduit's power and votes, and per pool its liveness, weight and
- * the rewards of `s.slots` for the epoch starting at `start`. With `checkTokens`, a bribe contract that gained a
- * reward token since `readStatic` throws StaticChanged; without, only the given slots are known.
+ * A pass's reads: the Voter's epoch, the conduit's power and votes, whether a bribe contract gained a reward token
+ * since `readStatic` (StaticChanged), and per pool its liveness, weight and this epoch's rewards (`start` is the
+ * calendar epoch). Everything but the rewards comes first, within one eth_call and so one block (see MAX_POOLS).
  */
-export async function readState(chain: Chain, s: Static, start: bigint, checkTokens: boolean): Promise<State> {
+export async function readState(chain: Chain, s: Static, start: bigint): Promise<State> {
   const { client, voter, ve, conduit } = chain;
   const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
-  const counted = checkTokens ? s.bribes : [];
   const results = await readMany<bigint | boolean | [bigint, bigint, bigint]>(client, [
     v("_epochTimestamp", []),
     v("lastVoted", [conduit]),
     { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, start] },
-    ...counted.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
+    ...s.bribes.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
     ...s.gauges.flatMap((gauge, i) => [v("isAlive", [gauge]), v("weights", [s.pools[i]]), v("votes", [conduit, s.pools[i]])]),
     ...s.slots.map((slot) => ({ address: slot.bribe, abi: bribeAbi, functionName: "rewardData", args: [slot.token, start] })),
   ]);
   const [voterStart, lastVoted, power] = results as bigint[];
-  if (counted.some((_, b) => results[3 + b] !== s.lengths[b])) throw new StaticChanged("reward tokens changed");
-  const perPool = results.slice(3 + counted.length, 3 + counted.length + 3 * s.pools.length);
-  const amounts = (results.slice(3 + counted.length + 3 * s.pools.length) as [bigint, bigint, bigint][]).map((d) => d[1]);
+  if (s.bribes.some((_, b) => results[3 + b] !== s.lengths[b])) throw new StaticChanged("reward tokens changed");
+  const perPool = results.slice(3 + s.bribes.length, 3 + s.bribes.length + 3 * s.pools.length);
+  const amounts = (results.slice(3 + s.bribes.length + 3 * s.pools.length) as [bigint, bigint, bigint][]).map((d) => d[1]);
   // Voter.votes keeps last epoch's figure until the next vote resets it.
   const own = s.pools.map((_, i) => (lastVoted! >= voterStart! ? (perPool[3 * i + 2] as bigint) : 0n));
   const voted = s.pools.flatMap((pool, i) => (own[i]! > 0n ? [i] : []));
@@ -103,6 +101,5 @@ export async function readState(chain: Chain, s: Static, start: bigint, checkTok
       otherVotes: (perPool[3 * i + 1] as bigint) - own[i]!,
       rewards: s.slots.flatMap((slot, k) => (slot.pool === i && amounts[k]! > 0n ? [{ token: slot.token, amount: amounts[k]!, decimals: slot.decimals }] : [])),
     })),
-    paying: s.slots.filter((_, k) => amounts[k]! > 0n),
   };
 }

@@ -4,7 +4,7 @@ import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
-import { readEpoch, readState, readStatic, StaticChanged, type Slot, type State, type Static } from "./rewards.ts";
+import { readEpoch, readState, readStatic, StaticChanged, type State, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
 
@@ -14,6 +14,10 @@ const HORIZON = 3600n; // an execution runs the passes due within this many seco
 const ATTEMPTS = 3;
 const RETRY_DELAY = 5_000;
 const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted
+// A pass reads 3 calls, then 5 per pool, then one per reward token (about 12 per pool today). At 50 pools that is about
+// 850 calls, one eth_call; and the epoch and votes, which are compared and subtracted, always fit in the first
+// CHUNK (chain.ts) and so come from one block. Reward tokens beyond it go to a second call; they are only summed.
+export const MAX_POOLS = 50;
 
 type Whitelist = { pool: Address; name: string }[];
 
@@ -39,10 +43,11 @@ export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediatel
   return { times: [], note: `no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}` };
 }
 
-/** pools.json: named pool addresses, at least one, none twice. */
+/** pools.json: named pool addresses, at least one and at most MAX_POOLS, none twice. */
 export function parseWhitelist(json: string): Whitelist {
   const whitelist = (JSON.parse(json) as Whitelist).map((w) => ({ pool: getAddress(w.pool), name: String(w.name) }));
   if (whitelist.length === 0) throw new Error("pools.json is empty");
+  if (whitelist.length > MAX_POOLS) throw new Error(`pools.json lists ${whitelist.length} pools; at most ${MAX_POOLS} fit one read (see MAX_POOLS)`);
   const repeated = whitelist.filter((w, i) => whitelist.findIndex((x) => x.pool === w.pool) !== i);
   if (repeated.length) throw new Error(`pools.json lists ${repeated.map((w) => w.pool).join(", ")} more than once`);
   return whitelist;
@@ -58,8 +63,6 @@ type Run = {
   chain: Chain;
   whitelist: Whitelist;
   static?: Static;
-  /** Slots that paid at this execution's first full read; later passes read only these. */
-  watched?: Slot[];
   prices: ReturnType<typeof priceFeed>;
   account: LocalAccount | undefined;
   dryRun: boolean;
@@ -71,19 +74,13 @@ async function pass(run: Run, until: bigint): Promise<void> {
   const readPools = () => readStatic(chain, whitelist.map((w) => w.pool));
   run.static ??= await readPools();
   let state: State;
-  if (run.watched) {
-    state = await readState(chain, { ...run.static, slots: run.watched }, start, false);
-  } else {
-    try {
-      state = await readState(chain, run.static, start, true);
-    } catch (error) {
-      if (!(error instanceof StaticChanged)) throw error;
-      log.info("reward tokens changed, re-reading");
-      run.static = await readPools();
-      state = await readState(chain, run.static, start, true);
-    }
-    run.watched = state.paying;
-    log.info("full read", { slots: run.static.slots.length, paying: state.paying.length });
+  try {
+    state = await readState(chain, run.static, start);
+  } catch (error) {
+    if (!(error instanceof StaticChanged)) throw error;
+    log.info("reward tokens changed, re-reading");
+    run.static = await readPools();
+    state = await readState(chain, run.static, start);
   }
   assertFresh(state.voterStart, start);
   if (state.power === 0n) throw new Error("conduit has no voting power this epoch");

@@ -4,7 +4,9 @@ import { publicActionsL2 } from "viem/op-stack";
 import { conduitAbi, moduleAbi } from "./abi.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
-const CHUNK = 1_000; // calls per eth_call; keeps one call well under node gas caps
+// Calls per eth_call. Gas is not the limit (4,500 reads, about 57M gas, pass on mainnet.base.org); request size is:
+// publicnode rejects a call of 2,264 reads and takes 1,132.
+export const CHUNK = 1_000;
 
 function makeClient(rpcUrls: string[]) {
   // A hanging primary costs one short timeout per call before the next URL answers. No transport-level
@@ -45,16 +47,14 @@ type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
  */
 export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}): Promise<T[]> {
   const at = blockNumber === undefined ? {} : { blockNumber };
-  const out: T[] = [];
-  for (let i = 0; i < calls.length; i += CHUNK) {
-    const contracts = calls.slice(i, i + CHUNK) as never;
-    if (lenient) {
-      const results = (await client.multicall({ contracts, allowFailure: true, batchSize: 0, ...at })) as { status: string; result?: unknown; error?: unknown }[];
-      if (results.every((r) => r.status === "failure")) throw results[0]!.error;
-      out.push(...(results.map((r) => (r.status === "success" ? r.result : undefined)) as T[]));
-    } else {
-      out.push(...((await client.multicall({ contracts, allowFailure: false, batchSize: 0, ...at })) as T[]));
-    }
-  }
-  return out;
+  const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) => calls.slice(i * CHUNK, (i + 1) * CHUNK) as never);
+  const results = await Promise.all(
+    chunks.map(async (contracts) => {
+      if (!lenient) return (await client.multicall({ contracts, allowFailure: false, batchSize: 0, ...at })) as T[];
+      const settled = (await client.multicall({ contracts, allowFailure: true, batchSize: 0, ...at })) as { status: string; result?: unknown; error?: unknown }[];
+      if (settled.every((r) => r.status === "failure")) throw settled[0]!.error;
+      return settled.map((r) => (r.status === "success" ? r.result : undefined)) as T[];
+    }),
+  );
+  return results.flat() as T[];
 }

@@ -22,10 +22,11 @@ implemented yet.
 ## What it can and cannot do
 
 - **Can:** call `vote` on the module with pools from `pools.json`, at the times in `VOTE_OFFSETS`. That is the entire
-  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address, each once; it
-  currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC, BNKR, VVV and the ST0x tokenized
-  stocks and ETFs (`wt…`), plus the HYDX/USDC pool. The module, the conduit and the Voter enforce
-  everything else (single caller, gauge liveness, voting power, epoch timing).
+  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address, each
+  once, and holds at most 50 (`MAX_POOLS` in `src/main.ts`) so that a pass's read stays one `eth_call` and its votes
+  and epoch come from one block. It currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC,
+  BNKR, VVV and the ST0x tokenized stocks and ETFs (`wt…`), plus the HYDX/USDC pool: 47 pools. The module, the
+  conduit and the Voter enforce everything else (single caller, gauge liveness, voting power, epoch timing).
 - **Cannot:** claim, swap, move funds, call any other contract, or read the private key. It asks Cloud KMS to sign
   one hash per vote; the key never leaves the HSM. The job's service account has no role in its own project beyond
   reading the RPC URL, and nothing in the project can impersonate it.
@@ -155,18 +156,16 @@ updated) fails the execution at startup and at every pass.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent. To keep the last passes short, an execution reads gauges, bribe contracts and reward
-tokens once. Each pass then reads the Voter's epoch, the conduit's power and votes, and every pool's liveness, votes
-and rewards in a single `eth_call`, so every figure comes from the same block. The first pass of an execution reads
-every reward token (about 570, of which about 80 pay in a given week) and checks the bribe contracts for new ones,
-re-reading them if one appeared; later passes read only the tokens that paid in that first read, about 220 calls
-instead of 800. Over four past epochs, votes kept moving in the last ten minutes (4 to 9% of all weight), bribes
-already paying kept growing, and no new token started paying, which is what the later passes still see. Prices are
-refreshed at every pass that has at least twenty seconds left; otherwise, or if DefiLlama fails, the last set is
-reused and a token it lacks counts as zero. A full read measures about 0.2 s and a later pass about half a second
-including prices, and Base blocks are two seconds apart, so the last offset of five seconds leaves the transaction
-a block of margin. The primary RPC gets three seconds per call before the next URL is tried, and calls are not
-retried at the transport level (the pass retry above is bounded by the deadline; a transport retry would honour a
-`Retry-After` of tens of seconds). After a vote the Voter is read at the receipt's block, so a lagging fallback node
+tokens once. Each pass then reads the Voter's epoch, the conduit's power and votes, whether a bribe contract gained a
+token (re-reading them if so), and every pool's liveness, votes and this epoch's reward of every token, in one
+`eth_call` of about 800 calls: votes and bribes both still move in the last ten minutes (over four past epochs,
+4 to 9% of all weight moved and fees kept landing), so every pass reads everything. Prices are refreshed at every
+pass that has at least twenty seconds left; otherwise, or if DefiLlama fails, the last set is reused and a token it
+lacks counts as zero. The read measures about 0.2 s and a pass about half a second including prices, and Base
+blocks are two seconds apart, so the last offset of five seconds leaves the transaction a block of margin. The
+primary RPC gets three seconds per call before the next URL is tried, and calls are not retried at the transport
+level (the pass retry above is bounded by the deadline; a transport retry would honour a `Retry-After` of tens of
+seconds). After a vote the Voter is read at the receipt's block, so a lagging fallback node
 cannot report it missing.
 
 ## External dependencies and failure modes
@@ -186,7 +185,7 @@ cannot report it missing.
 2. The alert covers failed executions. Add one for absent executions (`run.googleapis.com/job/completed_execution_count`
    absent for eight days) if a missed schedule must be noticed.
 3. Keep the keeper's ETH balance topped up; the dry run reports the cost of a vote.
-4. `pools.json` is the policy. Change it by pull request and redeploy.
+4. `pools.json` is the policy, at most 50 pools, each once (`npm test` checks). Change it by pull request and redeploy.
 
 ## Development
 
