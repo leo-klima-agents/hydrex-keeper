@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: MODULE must be a 20-byte hex address

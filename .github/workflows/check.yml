@@ -1,0 +1,27 @@
+name: check
+
+on:
+  schedule:
+    - cron: "0 12 * * 5" # Friday 12:00 UTC, after the weekly vote
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.CI_SERVICE_ACCOUNT }}
+      # config.env from the repository variables named in config.env.example.
+      - env:
+          VARS: ${{ toJSON(vars) }}
+        run: |
+          sed -n 's/^\([A-Z_]*\)=.*/\1/p' config.env.example |
+            jq -Rr --argjson vars "$VARS" '. as $name | $vars[$name] // empty | "\($name)=\(@sh)"' >config.env
+      - run: sh/check.sh
