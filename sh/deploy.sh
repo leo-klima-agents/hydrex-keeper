@@ -10,7 +10,8 @@ require_tools
 load_config
 make_tmp
 
-[ "$(secret_versions)" -gt 0 ] || die "$RPC_SECRET has no enabled version; see setup.sh"
+versions=$(secret_versions)
+[ "$versions" -gt 0 ] || die "$RPC_SECRET has no enabled version; see setup.sh"
 
 log "== 1/3 job"
 gcloud run jobs deploy "$JOB" --source="$REPO_ROOT" --region="$REGION" --project="$KEEPER_PROJECT" \
@@ -29,7 +30,8 @@ while IFS="$TAB" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
-for name in $(stale_schedulers); do
+find_stale_schedulers
+for name in $STALE; do
   log "deleting stale scheduler job $name"
   gcloud scheduler jobs delete "$name" --location="$REGION" --project="$KEEPER_PROJECT" --quiet
 done

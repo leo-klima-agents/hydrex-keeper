@@ -27,19 +27,21 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
-  // A vote still pending under `latest` is replaced by paying a quarter more than it did when its fees are
-  // known (sent by this process); a pending vote of unknown fees is queued behind instead.
+  // Always the confirmed nonce, so a stuck vote is replaced rather than queued behind: at a quarter more than a
+  // vote this process sent under it, or at twice the estimate over one of unknown fees (an earlier execution's;
+  // if that one paid more, it is about to be mined and the next pass sees it).
   const lastSent = lastSentBy.get(client);
-  const nonce = pending > latest && lastSent?.nonce !== latest ? pending : latest;
-  const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
-  const max = (a: bigint, b: bigint) => (a > b ? a : b);
+  const nonce = latest;
+  const bump = (fee: bigint, sent: bigint | undefined) =>
+    sent !== undefined ? max(fee, (sent * 5n) / 4n) : pending > latest ? fee * 2n : fee;
+  const own = lastSent?.nonce === nonce ? lastSent : undefined;
   const tx = {
     chainId: base.id,
     to: module,
     data,
     gas: (gas * 12n) / 10n,
-    maxFeePerGas: max(fees.maxFeePerGas, (floor.maxFeePerGas * 5n) / 4n),
-    maxPriorityFeePerGas: max(fees.maxPriorityFeePerGas, (floor.maxPriorityFeePerGas * 5n) / 4n),
+    maxFeePerGas: bump(fees.maxFeePerGas, own?.maxFeePerGas),
+    maxPriorityFeePerGas: bump(fees.maxPriorityFeePerGas, own?.maxPriorityFeePerGas),
     nonce,
   } satisfies TransactionSerializableEIP1559;
   const cost = tx.gas * tx.maxFeePerGas + l1Fee;
@@ -66,8 +68,9 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   }
 
   if (BigInt(Date.now()) >= until) throw new Error("out of time before sending");
-  const hash = await client.sendRawTransaction({ serializedTransaction: signed });
+  // Recorded first: a send that errors may still have broadcast it.
   lastSentBy.set(client, tx);
+  const hash = await client.sendRawTransaction({ serializedTransaction: signed });
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
   let receipt;
@@ -99,6 +102,8 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   }
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
 }
+
+const max = (a: bigint, b: bigint) => (a > b ? a : b);
 
 /** Like Promise.all, but the rejection reported is the earliest in the list, not the earliest in time. */
 async function allOrFirstFailure<T extends readonly unknown[]>(promises: { [K in keyof T]: Promise<T[K]> }): Promise<T> {

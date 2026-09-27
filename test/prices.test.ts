@@ -48,7 +48,7 @@ test("retries on failure, then gives up", async () => {
   assert.equal(failing.urls.length, 3);
 });
 
-test("priceFeed refreshes at every call and serves the last set when a refresh fails, unless a token is new", async () => {
+test("priceFeed refreshes at every call and serves the last set when a refresh fails, new tokens unpriced", async () => {
   const responses = [
     () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }),
     () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 }, [`base:${USDC.toLowerCase()}`]: { price: 1 } } }),
@@ -62,7 +62,8 @@ test("priceFeed refreshes at every call and serves the last set when a refresh f
   assert.equal((await feed([WETH, USDC])).get(WETH), 2, "refreshed");
   assert.equal((await feed([WETH])).get(WETH), 2, "the last set is served when the refresh fails");
   assert.equal(urls.length, 5);
-  await assert.rejects(feed([JUNK]), /DefiLlama unavailable/);
+  assert.equal((await feed([JUNK])).has(JUNK), false, "a new token is unpriced, not a failure");
+  await assert.rejects(priceFeed(fakeFetch([]).fetchFn)([WETH]), /DefiLlama unavailable/, "nothing to fall back on");
 });
 
 test("a malformed 200 response is retried", async () => {
@@ -84,5 +85,6 @@ test("priceFeed serves the last set instead of refreshing when the deadline is n
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 2);
   assert.equal((await feed([WETH], Date.now() + 10_000)).get(WETH), 2, "10 s left: no refresh");
+  assert.equal((await feed([WETH, USDC], Date.now() + 10_000)).has(USDC), false, "not even for a new token");
   assert.equal(urls.length, 2);
 });

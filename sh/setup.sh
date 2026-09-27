@@ -34,7 +34,8 @@ else
   gcloud secrets create "$RPC_SECRET" --project="$KEEPER_PROJECT" --replication-policy=automatic
 fi
 set_iam_authoritative "$RPC_SECRET" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
-[ "$(secret_versions)" -gt 0 ] || log "add the RPC URL: printf '%s' URL | gcloud secrets versions add $RPC_SECRET --project=$KEEPER_PROJECT --data-file=-"
+versions=$(secret_versions)
+[ "$versions" -gt 0 ] || log "add the RPC URL: printf '%s' URL | gcloud secrets versions add $RPC_SECRET --project=$KEEPER_PROJECT --data-file=-"
 
 log "== 4/4 failure alert"
 channel=$(find_channel)
@@ -45,7 +46,8 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-if [ -n "$(find_alert)" ]; then
+alert=$(find_alert)
+if [ -n "$alert" ]; then
   log "exists: $ALERT_NAME"
 else
   log "creating alert policy: $ALERT_NAME"

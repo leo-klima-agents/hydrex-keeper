@@ -9,7 +9,7 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
 const signer = privateKeyToAccount(generatePrivateKey());
 
-type Behaviour = { nonce?: number; pending?: number; receipt?: "success" | "reverted" | "timeout"; recorded?: Address; fee?: bigint; minedHash?: Hex; verifyFails?: boolean };
+type Behaviour = { nonce?: number; pending?: number; receipt?: "success" | "reverted" | "timeout"; recorded?: Address; fee?: bigint; minedHash?: Hex; verifyFails?: boolean; sendFails?: boolean };
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
@@ -23,6 +23,7 @@ function fakeChain(b: Behaviour = {}) {
     estimateL1Fee: async () => 5_000n,
     sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
       sent.push(serializedTransaction);
+      if (b.sendFails) throw new Error("timeout after broadcast");
       return `0x${"ab".repeat(32)}` as Hex;
     },
     waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
@@ -86,10 +87,11 @@ test("a dry run signs but never sends", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a pending vote of unknown fees is queued behind; one this process sent is replaced", async () => {
-  const queued = fakeChain({ nonce: 3, pending: 4 });
-  await castVote(queued.chain, signer, vote, false, far);
-  assert.equal(parseTransaction(queued.sent[0]!).nonce, 4);
+test("a pending vote of unknown fees is replaced at twice the estimate; one this process sent at a quarter more", async () => {
+  const unknown = fakeChain({ nonce: 3, pending: 4 });
+  await castVote(unknown.chain, signer, vote, false, far);
+  assert.equal(parseTransaction(unknown.sent[0]!).nonce, 3, "replaced, not queued behind");
+  assert.equal(parseTransaction(unknown.sent[0]!).maxFeePerGas, 2_000n);
   const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
   await castVote(own.chain, signer, vote, false, far);
   own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? 4 : 3)) as never;
@@ -97,6 +99,16 @@ test("a pending vote of unknown fees is queued behind; one this process sent is 
   const tx = parseTransaction(own.sent[1]!);
   assert.equal(tx.nonce, 3);
   assert.equal(tx.maxFeePerGas, 1_250n);
+});
+
+test("a send that fails after broadcasting still counts as this process's vote", async () => {
+  const { chain, sent } = fakeChain({ nonce: 3, sendFails: true });
+  await assert.rejects(castVote(chain, signer, vote, false, far), /after broadcast/);
+  chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? 4 : 3)) as never;
+  await assert.rejects(castVote(chain, signer, vote, false, far));
+  const tx = parseTransaction(sent[1]!);
+  assert.equal(tx.nonce, 3);
+  assert.equal(tx.maxFeePerGas, 1_250n, "a quarter more than the recorded fees, not twice the estimate");
 });
 
 test("a receipt of an earlier vote under the same nonce means this one must be sent again", async () => {

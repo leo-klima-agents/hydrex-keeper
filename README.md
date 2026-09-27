@@ -22,7 +22,7 @@ implemented yet.
 ## What it can and cannot do
 
 - **Can:** call `vote` on the module with pools from `pools.json`, at the times in `VOTE_OFFSETS`. That is the entire
-  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address; it
+  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address, each once; it
   currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC, BNKR, VVV and the ST0x tokenized
   stocks and ETFs (`wt…`), plus the HYDX/USDC pool. The module, the conduit and the Voter enforce
   everything else (single caller, gauge liveness, voting power, epoch timing).
@@ -68,8 +68,8 @@ printf '%s' 'https://…' | gcloud secrets versions add base-rpc-url --project=K
 ```
 
 Several URLs separated by commas are tried in order; the public `https://mainnet.base.org` is always the last resort.
-The public node throttles the job's bursts of calls for tens of seconds at a time, so a second paid provider in the
-secret is what makes the final passes robust to a primary outage.
+Each pass reads in one call, but public nodes still throttle busy clients, so a second paid provider in the secret is
+what makes the final passes robust to a primary outage.
 
 ## 5. Fund the keeper
 
@@ -136,17 +136,18 @@ the new allocation is expected to pay at least one percent more than what the cu
 the same data, so most passes end without a transaction. `src/select.ts` is this strategy and nothing else.
 
 Re-voting is safe: Hydrex's `VOTE_DELAY` is zero and `vote` resets before recasting, so each pass just recomputes.
-The Voter keeps last epoch's `poolVote` and `votes` until that reset, so the job treats them as absent unless
-`lastVoted` falls in the current epoch.
+The Voter keeps last epoch's `votes` until that reset, so the job treats them as absent unless `lastVoted` falls in
+the current epoch.
 Voting at or after the flip reverts (`EpochFlipInProgress`, `EpochStale`), so a late pass fails instead of voting
 into the wrong epoch. A pass that is already overdue when its turn comes (an earlier pass waited on a slow receipt)
 is skipped; the receipt wait itself is bounded by the next pass, and a vote whose receipt has not arrived by then is
 left for the next pass to observe on the Voter. Each pass retries up to three times while there is time before the
 next one. A pass that fails for good makes the job exit non-zero, which fires the alert; Cloud Run restarts a crashed
 job up to three times, and the restart recomputes the remaining passes from the clock: a pass missed within the past
-hour runs right away, a restart within an hour after the flip exits cleanly. A vote is sent with the account's
-confirmed nonce; if the previous vote is still pending under that nonce and this process sent it, the new one pays a
-quarter more and replaces it, and if it came from an earlier process the new one queues behind it. Nothing is
+hour runs right away, a restart within an hour after the flip exits cleanly. A vote is always sent with the
+account's confirmed nonce, so it replaces a vote still pending under that nonce instead of queueing behind it: it
+pays a quarter more than a pending vote this process sent (its fees are recorded before sending, so a send that
+errors after broadcasting still counts), and twice the estimate over one from an earlier process. Nothing is
 broadcast once the pass's deadline has passed. After a send, the retry loop re-sends only when the receipt shows an
 earlier vote won the nonce; a vote that was mined but reverted or recorded differently, or whose outcome could not be
 read, is left to the next pass. A Voter whose epoch lags the calendar by more than an hour (minter not
@@ -154,18 +155,25 @@ updated) fails the execution at startup and at every pass.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
 few transactions are sent. To keep the last passes short, an execution reads gauges, bribe contracts and reward
-tokens once (re-reading them if a bribe contract gains a token), refreshes prices at every pass that has at least
-twenty seconds left (otherwise, or if DefiLlama fails, it reuses the last set, and it never retries past the pass
-deadline), and re-reads the epoch state and every pool's votes and rewards in a few multicalls before signing; a pass
-measures under a second, and Base blocks are two seconds apart, so the last offset of five seconds leaves the
-transaction a block of margin. The primary RPC gets three seconds per call before the next URL is tried. After a vote
-the Voter is read at the receipt's block, so a lagging fallback node cannot report it missing.
+tokens once. Each pass then reads the Voter's epoch, the conduit's power and votes, and every pool's liveness, votes
+and rewards in a single `eth_call`, so every figure comes from the same block. The first pass of an execution reads
+every reward token (about 570, of which about 80 pay in a given week) and checks the bribe contracts for new ones,
+re-reading them if one appeared; later passes read only the tokens that paid in that first read, about 220 calls
+instead of 800. Over four past epochs, votes kept moving in the last ten minutes (4 to 9% of all weight), bribes
+already paying kept growing, and no new token started paying, which is what the later passes still see. Prices are
+refreshed at every pass that has at least twenty seconds left; otherwise, or if DefiLlama fails, the last set is
+reused and a token it lacks counts as zero. A full read measures about 0.2 s and a later pass about half a second
+including prices, and Base blocks are two seconds apart, so the last offset of five seconds leaves the transaction
+a block of margin. The primary RPC gets three seconds per call before the next URL is tried, and calls are not
+retried at the transport level (the pass retry above is bounded by the deadline; a transport retry would honour a
+`Retry-After` of tens of seconds). After a vote the Voter is read at the receipt's block, so a lagging fallback node
+cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
-| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | The primary gets three seconds per call, the others five, before the next URL is tried; the public node throttles bursts for tens of seconds, so it only reliably covers the day-before pass. If all fail the pass fails and is retried |
+| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | The primary gets three seconds per call, the others five, before the next URL is tried. Each read is one `eth_call`, which public nodes throttle less than bursts, but a paid provider is still what makes the final passes robust. If all fail the pass fails and is retried |
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |

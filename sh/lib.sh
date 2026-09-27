@@ -221,22 +221,28 @@ schedules() {
       *";"*) schedules_cron=${schedules_rest%%;*} schedules_rest=${schedules_rest#*;} ;;
       *) schedules_cron=$schedules_rest schedules_rest='' ;;
     esac
-    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$schedules_cron"
+    # Word splitting collapses whitespace around and between the fields, so what is deployed is what is checked.
+    set -f
+    # shellcheck disable=SC2086
+    set -- $schedules_cron
+    set +f
+    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$*"
   done
 }
 
 scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
-# stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists.
-stale_schedulers() {
+# find_stale_schedulers: sets STALE to the scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists, one
+# per line. Call it as a command, not in $(...), so that a failed listing stops the script.
+find_stale_schedulers() {
   stale_configured=$(schedules | cut -f1)
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
-  printf '%s\n' "$stale_list" |
+  STALE=$(printf '%s\n' "$stale_list" |
     jq -r --arg job "$JOB" '.[].name | split("/") | last | select(. == $job or startswith($job + "-"))' |
     while IFS= read -r stale_name; do
       printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
-    done
+    done)
 }
 
 secret_versions() {

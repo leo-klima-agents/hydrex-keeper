@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { missed, passTimes, schedule } from "../src/main.ts";
+import { missed, parseWhitelist, passTimes, schedule } from "../src/main.ts";
 
 test("pass times are the offsets due within the horizon, earliest first, deduplicated", () => {
   const flip = 1_790_812_800n;
@@ -29,4 +30,11 @@ test("schedule runs what is due, a missed pass right away, or nothing", () => {
   assert.deepEqual(schedule(flip, offsets, flip - 86400n + 40n, false), { times: [flip - 86400n + 40n], note: "running the missed pass now" }, "a restart 40 s after the day-before pass");
   assert.equal(schedule(flip, offsets, flip + 100n, false).times.length, 0, "a restart after the flip does nothing");
   assert.equal(schedule(flip, offsets, flip - 7200n, false).times.length, 0, "nothing due within the hour");
+});
+
+test("the whitelist names each pool once", () => {
+  assert.ok(parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8")).length > 0, "pools.json is valid");
+  const pool = "0x82dbe18346a8656dBB5E76F74bf3AE279cC16B29";
+  assert.throws(() => parseWhitelist(JSON.stringify([{ pool, name: "a" }, { pool: pool.toLowerCase(), name: "b" }])), /more than once/);
+  assert.throws(() => parseWhitelist("[]"), /empty/);
 });

@@ -3,49 +3,29 @@ import { bribeAbi, erc20Abi, veAbi, voterAbi } from "./abi.ts";
 import { readMany, WEEK, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
-/** `currentVote` is empty unless the conduit voted in this epoch: votes do not carry over. */
-export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean; currentVote: { pools: Address[]; votes: bigint[] } };
-
 export type Reward = { token: Address; amount: bigint; decimals: number };
 
 export type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; rewards: Reward[] };
 
-type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
+export type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
 
 /** What rarely changes within an epoch: gauges, bribe contracts, their reward tokens. */
 export type Static = { pools: Address[]; gauges: Address[]; bribes: Address[]; lengths: bigint[]; slots: Slot[] };
 
+/**
+ * What a pass reads, all from one block. `voterStart` is the Voter's epoch, for the caller to check against the
+ * calendar epoch the reads used. `currentVote` is empty unless the conduit voted in this epoch: votes do not carry
+ * over. `paying` is the slots with rewards this epoch.
+ */
+export type State = { voterStart: bigint; power: bigint; currentVote: { pools: Address[]; votes: bigint[] }; pools: PoolRewards[]; paying: Slot[] };
+
 /** A bribe contract gained a reward token since `readStatic`. */
 export class StaticChanged extends Error {}
 
-/**
- * Current epoch, the conduit's power in it and the pools it currently votes for, at most `maxPools` of them
- * (a longer list reads as a different vote). Power is read at the calendar epoch; `assertFresh` in main.ts
- * makes that the Voter's epoch before it is used.
- */
-export async function readEpoch(chain: Chain, maxPools: number): Promise<Epoch> {
-  const { client, voter, ve, conduit } = chain;
-  const calendar = (BigInt(Math.floor(Date.now() / 1000)) / WEEK) * WEEK;
-  const [start, lastVoted, poolVoteLength, power, ...listed] = await readMany<bigint | Address | undefined>(
-    client,
-    [
-      { address: voter, abi: voterAbi, functionName: "_epochTimestamp" },
-      { address: voter, abi: voterAbi, functionName: "lastVoted", args: [conduit] },
-      { address: voter, abi: voterAbi, functionName: "poolVoteLength", args: [conduit] },
-      { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendar] },
-      ...Array.from({ length: maxPools }, (_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
-    ],
-    { lenient: true },
-  );
-  if (start === undefined || lastVoted === undefined || poolVoteLength === undefined || power === undefined) throw new Error("cannot read the epoch");
-  const votedThisEpoch = (lastVoted as bigint) >= (start as bigint);
-  const pools = (votedThisEpoch ? listed.slice(0, Number(poolVoteLength)) : []) as Address[];
-  if (pools.some((pool) => pool === undefined)) throw new Error("cannot read the current vote");
-  const votes = await readMany<bigint>(
-    client,
-    pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
-  );
-  return { start: start as bigint, flip: (start as bigint) + WEEK, power: power as bigint, votedThisEpoch, currentVote: { pools, votes } };
+/** The Voter's epoch start and the flip that ends it. */
+export async function readEpoch(chain: Chain): Promise<{ start: bigint; flip: bigint }> {
+  const [start] = await readMany<bigint>(chain.client, [{ address: chain.voter, abi: voterAbi, functionName: "_epochTimestamp" }]);
+  return { start: start!, flip: start! + WEEK };
 }
 
 export async function readStatic(chain: Chain, whitelist: Address[]): Promise<Static> {
@@ -89,25 +69,40 @@ export async function readStatic(chain: Chain, whitelist: Address[]): Promise<St
   };
 }
 
-/** This epoch's bribes and fees per pool, and the votes each pool has from others. */
-export async function readRewards(chain: Chain, { pools, gauges, bribes, lengths, slots }: Static, epoch: Epoch): Promise<PoolRewards[]> {
-  const { client, voter, conduit } = chain;
+/**
+ * One multicall for a pass: the Voter's epoch, the conduit's power and votes, and per pool its liveness, weight and
+ * the rewards of `s.slots` for the epoch starting at `start`. With `checkTokens`, a bribe contract that gained a
+ * reward token since `readStatic` throws StaticChanged; without, only the given slots are known.
+ */
+export async function readState(chain: Chain, s: Static, start: bigint, checkTokens: boolean): Promise<State> {
+  const { client, voter, ve, conduit } = chain;
   const v = (functionName: string, args: readonly unknown[]) => ({ address: voter, abi: voterAbi, functionName, args });
-
-  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(client, [
-    ...bribes.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
-    ...gauges.flatMap((gauge, i) => [v("isAlive", [gauge]), v("weights", [pools[i]]), v("votes", [conduit, pools[i]])]),
-    ...slots.map((s) => ({ address: s.bribe, abi: bribeAbi, functionName: "rewardData", args: [s.token, epoch.start] })),
+  const counted = checkTokens ? s.bribes : [];
+  const results = await readMany<bigint | boolean | [bigint, bigint, bigint]>(client, [
+    v("_epochTimestamp", []),
+    v("lastVoted", [conduit]),
+    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, start] },
+    ...counted.map((address) => ({ address, abi: bribeAbi, functionName: "rewardsListLength" })),
+    ...s.gauges.flatMap((gauge, i) => [v("isAlive", [gauge]), v("weights", [s.pools[i]]), v("votes", [conduit, s.pools[i]])]),
+    ...s.slots.map((slot) => ({ address: slot.bribe, abi: bribeAbi, functionName: "rewardData", args: [slot.token, start] })),
   ]);
-  if (lengths.some((length, b) => results[b] !== length)) throw new StaticChanged("reward tokens changed");
-  const perPool = results.slice(bribes.length, bribes.length + 3 * pools.length);
-  const data = results.slice(bribes.length + 3 * pools.length) as [bigint, bigint, bigint][];
-
-  return pools.map((pool, i) => ({
-    pool,
-    alive: perPool[3 * i] as boolean,
-    // Voter.votes keeps last epoch's figure until the next vote resets it.
-    otherVotes: (perPool[3 * i + 1] as bigint) - (epoch.votedThisEpoch ? (perPool[3 * i + 2] as bigint) : 0n),
-    rewards: slots.flatMap((s, k) => (s.pool === i && data[k]![1] > 0n ? [{ token: s.token, amount: data[k]![1], decimals: s.decimals }] : [])),
-  }));
+  const [voterStart, lastVoted, power] = results as bigint[];
+  if (counted.some((_, b) => results[3 + b] !== s.lengths[b])) throw new StaticChanged("reward tokens changed");
+  const perPool = results.slice(3 + counted.length, 3 + counted.length + 3 * s.pools.length);
+  const amounts = (results.slice(3 + counted.length + 3 * s.pools.length) as [bigint, bigint, bigint][]).map((d) => d[1]);
+  // Voter.votes keeps last epoch's figure until the next vote resets it.
+  const own = s.pools.map((_, i) => (lastVoted! >= voterStart! ? (perPool[3 * i + 2] as bigint) : 0n));
+  const voted = s.pools.flatMap((pool, i) => (own[i]! > 0n ? [i] : []));
+  return {
+    voterStart: voterStart!,
+    power: power!,
+    currentVote: { pools: voted.map((i) => s.pools[i]!), votes: voted.map((i) => own[i]!) },
+    pools: s.pools.map((pool, i) => ({
+      pool,
+      alive: perPool[3 * i] as boolean,
+      otherVotes: (perPool[3 * i + 1] as bigint) - own[i]!,
+      rewards: s.slots.flatMap((slot, k) => (slot.pool === i && amounts[k]! > 0n ? [{ token: slot.token, amount: amounts[k]!, decimals: slot.decimals }] : [])),
+    })),
+    paying: s.slots.filter((_, k) => amounts[k]! > 0n),
+  };
 }

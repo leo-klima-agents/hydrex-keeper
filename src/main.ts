@@ -4,7 +4,7 @@ import { connect, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
-import { readEpoch, readRewards, readStatic, StaticChanged, type Epoch, type Static } from "./rewards.ts";
+import { readEpoch, readState, readStatic, StaticChanged, type Slot, type State, type Static } from "./rewards.ts";
 import { select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
 
@@ -39,15 +39,27 @@ export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediatel
   return { times: [], note: `no pass due within ${HORIZON} s: the epoch flips at ${flip}, offsets ${offsets.join(",")}` };
 }
 
-function assertFresh(epoch: Epoch): void {
-  const t = now();
-  if (epoch.start !== (t / WEEK) * WEEK) throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
+/** pools.json: named pool addresses, at least one, none twice. */
+export function parseWhitelist(json: string): Whitelist {
+  const whitelist = (JSON.parse(json) as Whitelist).map((w) => ({ pool: getAddress(w.pool), name: String(w.name) }));
+  if (whitelist.length === 0) throw new Error("pools.json is empty");
+  const repeated = whitelist.filter((w, i) => whitelist.findIndex((x) => x.pool === w.pool) !== i);
+  if (repeated.length) throw new Error(`pools.json lists ${repeated.map((w) => w.pool).join(", ")} more than once`);
+  return whitelist;
+}
+
+const calendarEpoch = () => (now() / WEEK) * WEEK;
+
+function assertFresh(voterStart: bigint, calendar = calendarEpoch()): void {
+  if (voterStart !== calendar) throw new Error(`Voter epoch ${voterStart} is stale at ${now()}; minter not updated`);
 }
 
 type Run = {
   chain: Chain;
   whitelist: Whitelist;
   static?: Static;
+  /** Slots that paid at this execution's first full read; later passes read only these. */
+  watched?: Slot[];
   prices: ReturnType<typeof priceFeed>;
   account: LocalAccount | undefined;
   dryRun: boolean;
@@ -55,20 +67,27 @@ type Run = {
 
 async function pass(run: Run, until: bigint): Promise<void> {
   const { chain, whitelist, prices, account, dryRun } = run;
-  const epoch = await readEpoch(chain, whitelist.length + 2);
-  assertFresh(epoch);
-  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
-
-  run.static ??= await readStatic(chain, whitelist.map((w) => w.pool));
-  let rewards;
-  try {
-    rewards = await readRewards(chain, run.static, epoch);
-  } catch (error) {
-    if (!(error instanceof StaticChanged)) throw error;
-    log.info("reward tokens changed, re-reading");
-    run.static = await readStatic(chain, whitelist.map((w) => w.pool));
-    rewards = await readRewards(chain, run.static, epoch);
+  const start = calendarEpoch();
+  const readPools = () => readStatic(chain, whitelist.map((w) => w.pool));
+  run.static ??= await readPools();
+  let state: State;
+  if (run.watched) {
+    state = await readState(chain, { ...run.static, slots: run.watched }, start, false);
+  } else {
+    try {
+      state = await readState(chain, run.static, start, true);
+    } catch (error) {
+      if (!(error instanceof StaticChanged)) throw error;
+      log.info("reward tokens changed, re-reading");
+      run.static = await readPools();
+      state = await readState(chain, run.static, start, true);
+    }
+    run.watched = state.paying;
+    log.info("full read", { slots: run.static.slots.length, paying: state.paying.length });
   }
+  assertFresh(state.voterStart, start);
+  if (state.power === 0n) throw new Error("conduit has no voting power this epoch");
+  const rewards = state.pools;
   const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)), Number(until));
   if (priced.size === 0 && rewards.some((p) => p.rewards.length > 0)) throw new Error("no reward token could be priced");
   const candidates: Candidate[] = [];
@@ -88,18 +107,18 @@ async function pass(run: Run, until: bigint): Promise<void> {
   }
 
   if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
-  const choice = select(candidates, epoch.power, epoch.currentVote);
+  const choice = select(candidates, state.power, state.currentVote);
   if (!choice) {
-    log.info("no pool pays anything; keeping the current vote", { currentVote: epoch.currentVote });
+    log.info("no pool pays anything; keeping the current vote", { currentVote: state.currentVote });
     return;
   }
   const { vote, expectedUsd, better } = choice;
   const plan = vote.pools.map((pool, i) => ({ pool: nameOf(pool), share: Number(vote.weights[i]) / 100 }));
   if (!better) {
-    log.info("keeping the current vote", { plan, expectedUsd, currentVote: epoch.currentVote });
+    log.info("keeping the current vote", { plan, expectedUsd, currentVote: state.currentVote });
     return;
   }
-  log.info("voting", { plan, expectedUsd, currentVote: epoch.currentVote, power: epoch.power });
+  log.info("voting", { plan, expectedUsd, currentVote: state.currentVote, power: state.power });
   await castVote(chain, account, vote, dryRun, until);
 }
 
@@ -112,22 +131,18 @@ async function main(): Promise<number> {
   const offsetFields = (process.env.VOTE_OFFSETS ?? DEFAULT_OFFSETS).split(",");
   if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
   const offsets = offsetFields.map(BigInt);
-  const whitelist = (JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist).map(
-    (w) => ({ pool: getAddress(w.pool), name: String(w.name) }),
-  );
-  if (whitelist.length === 0) throw new Error("pools.json is empty");
+  const whitelist = parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8"));
 
   const chain = await connect(module, [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()));
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 
-  const epoch = await readEpoch(chain, whitelist.length + 2);
-  if (!immediately && epoch.flip <= now() && now() - epoch.flip < HORIZON) {
-    log.warning("restarted after the flip; nothing to do", { flip: epoch.flip });
+  const { start, flip } = await readEpoch(chain);
+  if (!immediately && flip <= now() && now() - flip < HORIZON) {
+    log.warning("restarted after the flip; nothing to do", { flip });
     return 0;
   }
-  assertFresh(epoch);
-  const { flip } = epoch;
+  assertFresh(start);
   const { times, note } = schedule(flip, offsets, now(), immediately);
   if (note) log.warning(note, { flip });
   if (times.length === 0) return 0;

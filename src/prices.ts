@@ -12,14 +12,14 @@ type Response = { coins: Record<string, { price: number }> };
 
 /** `until` (ms) bounds the time spent on retries and timeouts. */
 export async function prices(tokens: Address[], fetchFn: typeof fetch = fetch, until = Infinity): Promise<Map<Address, number>> {
-  const out = new Map<Address, number>();
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
-  for (let i = 0; i < distinct.length; i += CHUNK) {
-    const chunk = distinct.slice(i, i + CHUNK);
-    const body = await getJson(ENDPOINT + chunk.map((t) => `base:${t}`).join(","), fetchFn, until);
+  const chunks = Array.from({ length: Math.ceil(distinct.length / CHUNK) }, (_, i) => distinct.slice(i * CHUNK, (i + 1) * CHUNK));
+  const bodies = await Promise.all(chunks.map((chunk) => getJson(ENDPOINT + chunk.map((t) => `base:${t}`).join(","), fetchFn, until)));
+  const out = new Map<Address, number>();
+  for (const [i, body] of bodies.entries()) {
     for (const [key, coin] of Object.entries(body.coins)) {
       const token = key.slice("base:".length).toLowerCase() as Address;
-      if (chunk.includes(token) && Number.isFinite(coin.price) && coin.price > 0) out.set(token, coin.price);
+      if (chunks[i]!.includes(token) && Number.isFinite(coin.price) && coin.price > 0) out.set(token, coin.price);
     }
   }
   return out;
@@ -46,19 +46,20 @@ async function getJson(url: string, fetchFn: typeof fetch, until: number): Promi
   throw new Error(`DefiLlama unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-/** Fresh prices at every call, except that the last set stands in for tokens it covers when time is short or DefiLlama fails. */
+/**
+ * Fresh prices at every call, except that the last set stands in when time is short or DefiLlama fails. Tokens
+ * that set lacks are then unpriced, which the caller counts as zero, rather than failing the pass.
+ */
 export function priceFeed(fetchFn: typeof fetch = fetch) {
-  let cached: { at: number; requested: Set<Address>; map: Map<Address, number> } | undefined;
+  let cached: { at: number; map: Map<Address, number> } | undefined;
   return async (tokens: Address[], until = Infinity): Promise<Map<Address, number>> => {
-    const requested = tokens.map((t) => t.toLowerCase() as Address);
-    const covered = cached !== undefined && requested.every((t) => cached!.requested.has(t));
-    if (covered && until - Date.now() < REFRESH_BUDGET) return cached!.map;
+    if (cached && until - Date.now() < REFRESH_BUDGET) return cached.map;
     try {
-      cached = { at: Date.now(), requested: new Set(requested), map: await prices(tokens, fetchFn, until) };
+      cached = { at: Date.now(), map: await prices(tokens, fetchFn, until) };
     } catch (error) {
-      if (!covered) throw error;
-      log.warning("using cached prices", { ageMs: Date.now() - cached!.at, reason: describe(error) });
+      if (!cached) throw error;
+      log.warning("using cached prices", { ageMs: Date.now() - cached.at, reason: describe(error) });
     }
-    return cached!.map;
+    return cached.map;
   };
 }

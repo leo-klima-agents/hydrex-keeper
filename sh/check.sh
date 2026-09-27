@@ -64,11 +64,13 @@ while IFS="$TAB" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
-stale=$(stale_schedulers | paste -sd ' ' -)
+find_stale_schedulers
+stale=$(printf '%s\n' "$STALE" | paste -sd ' ' -)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
 # Secret
-if [ "$(secret_versions)" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
+versions=$(secret_versions)
+if [ "$versions" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
 live_policy=$(get_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" secrets)
 expect_policy secret "$live_policy" secret.iam.json.tmpl
 

@@ -25,7 +25,6 @@ export const voterAbi = parseAbi([
   "function external_bribes(address gauge) view returns (address)",
   "function internal_bribes(address gauge) view returns (address)",
   "function votes(address voter, address pool) view returns (uint256)",
-  "function poolVoteLength(address voter) view returns (uint256)",
   "function poolVote(address voter, uint256 index) view returns (address)",
   "function lastVoted(address voter) view returns (uint256)",
   "error EpochFlipInProgress()",
