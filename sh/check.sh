@@ -61,7 +61,7 @@ while IFS="$tab" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
-stale=$(stale_schedulers | paste -sd ' ' -)
+stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
 # Secret

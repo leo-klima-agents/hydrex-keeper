@@ -6,8 +6,6 @@ export const moduleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
   "function vote(address[] pools, uint256[] weights)",
-  "error ZeroAddress()",
-  "error NotAContract()",
   "error NotKeeper()",
   "error ExecutionFailed()",
 ]);

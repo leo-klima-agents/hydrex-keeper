@@ -39,19 +39,12 @@ export type Call = { address: Address; abi: readonly unknown[]; functionName: st
 
 type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
 
-/** Multicall in chunks; every call must succeed unless `lenient`, which yields `undefined` for failures. */
-export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}, chunk = 150): Promise<T[]> {
-  const out: T[] = [];
-  for (let i = 0; i < calls.length; i += chunk) {
-    const contracts = calls.slice(i, i + chunk) as never;
-    const at = blockNumber === undefined ? {} : { blockNumber };
-    if (lenient) {
-      const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown; error?: unknown }[];
-      if (results.length && results.every((r) => r.status === "failure")) throw results[0]!.error;
-      out.push(...(results.map((r) => (r.status === "success" ? r.result : undefined)) as T[]));
-    } else {
-      out.push(...((await client.multicall({ contracts, allowFailure: false, ...at })) as T[]));
-    }
-  }
-  return out;
+/** One multicall; every call must succeed unless `lenient`, which yields `undefined` for failures. */
+export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}): Promise<T[]> {
+  const contracts = calls as never;
+  const at = blockNumber === undefined ? {} : { blockNumber };
+  if (!lenient) return (await client.multicall({ contracts, allowFailure: false, ...at })) as T[];
+  const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown; error?: unknown }[];
+  if (results.length && results.every((r) => r.status === "failure")) throw results[0]!.error;
+  return results.map((r) => (r.status === "success" ? r.result : undefined)) as T[];
 }

@@ -115,4 +115,5 @@ test("readEpoch reads the epoch and the current vote in two round trips, ignorin
     voterState.lastVoted = 1000n;
   }
   assert.deepEqual((await readEpoch(chain, 1)).currentVote.pools, [POOL_A], "capped at maxPools");
+  assert.deepEqual((await readEpoch(chain, 200)).currentVote.pools, [POOL_A, POOL_B], "a long whitelist");
 });

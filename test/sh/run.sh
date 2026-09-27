@@ -22,16 +22,17 @@ PATH=$tmp/bin:$PATH
 export PATH
 failures=0
 
-# golden_case NAME SCENARIO SCRIPT [ARGS...]: runs with $CONFIG (default keeper), appends the exit code, compares.
+# golden_case NAME CONFIG SCENARIO SCRIPT [ARGS...]: runs, appends the exit code, compares.
 golden_case() {
   name=$1
-  scenario=$2
-  script=$3
-  shift 3
+  config=$2
+  scenario=$3
+  script=$4
+  shift 4
   log=$tmp/$name.log
   : >"$log"
   rc=0
-  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/${CONFIG:-keeper}.env \
+  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/$config.env \
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   { printf 'exit=%s\n--- output ---\n' "$rc"; cat "$tmp/$name.out"; } >>"$log"
   golden=$root/test/sh/golden/$name.txt
@@ -51,19 +52,21 @@ golden_case() {
   fi
 }
 
-golden_case setup-fresh fresh setup.sh
-golden_case setup-existing existing setup.sh
-golden_case deploy-no-secret fresh deploy.sh
-golden_case deploy-first first-deploy deploy.sh
-golden_case deploy-existing existing deploy.sh
-golden_case deploy-stale drift deploy.sh
-golden_case run-dry existing run.sh --dry-run --now
-golden_case run-bad-arg existing run.sh --later
-CONFIG=uncovered golden_case config-uncovered existing run.sh --now
-CONFIG=zeros golden_case config-zeros existing run.sh --now
-golden_case check-ok existing check.sh
-golden_case check-drift drift check.sh
-golden_case check-fresh fresh check.sh
+golden_case setup-fresh keeper fresh setup.sh
+golden_case setup-existing keeper existing setup.sh
+golden_case deploy-no-secret keeper fresh deploy.sh
+golden_case deploy-first keeper first-deploy deploy.sh
+golden_case deploy-existing keeper existing deploy.sh
+golden_case deploy-stale keeper drift deploy.sh
+golden_case deploy-no-list keeper no-list deploy.sh
+golden_case run-dry keeper existing run.sh --dry-run --now
+golden_case run-bad-arg keeper existing run.sh --later
+golden_case config-uncovered uncovered existing run.sh --now
+golden_case config-zeros zeros existing run.sh --now
+golden_case check-ok keeper existing check.sh
+golden_case check-drift keeper drift check.sh
+golden_case check-fresh keeper fresh check.sh
+golden_case check-no-list keeper no-list check.sh
 
 [ "$failures" -eq 0 ] || { printf '%s golden case(s) failed\n' "$failures"; exit 1; }
 printf 'all golden cases passed\n'

@@ -23,14 +23,19 @@ set_iam_authoritative "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$(ren
 log "== 3/3 schedules"
 tab=$(printf '\t')
 while IFS="$tab" read -r name cron; do
-  if [ -n "$(scheduler_exists "$name")" ]; then verb=update; else verb=create; fi
+  if scheduler=$(scheduler_exists "$name"); then verb=update; else verb=create; fi
   gcloud scheduler jobs "$verb" http "$name" --location="$REGION" --project="$KEEPER_PROJECT" \
     --schedule="$cron" --time-zone=Etc/UTC --uri="$RUN_URI" --http-method=POST \
     --oauth-service-account-email="$SCHEDULER_SA" --description="starts $JOB before the Hydrex epoch flip"
+  if [ "$(json_field "$scheduler" .state)" = PAUSED ]; then
+    log "resuming $name"
+    gcloud scheduler jobs resume "$name" --location="$REGION" --project="$KEEPER_PROJECT"
+  fi
 done <<LIST
 $(schedules)
 LIST
-for name in $(stale_schedulers); do
+stale=$(stale_schedulers)
+for name in $stale; do
   log "deleting stale scheduler job $name"
   gcloud scheduler jobs delete "$name" --location="$REGION" --project="$KEEPER_PROJECT" --quiet
 done

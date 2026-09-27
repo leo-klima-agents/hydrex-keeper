@@ -19,7 +19,8 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
+    // The module bubbles up the Voter's revert data.
+    client.simulateContract({ address: module, abi: [...moduleAbi, ...voterAbi], functionName: "vote", args, account: keeper }),
     client.estimateGas({ account: keeper, to: module, data }),
     client.estimateFeesPerGas(),
     client.getTransactionCount({ address: keeper, blockTag: "latest" }),
