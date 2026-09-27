@@ -1,4 +1,4 @@
-import { createPublicClient, fallback, http, keccak256, type Address, type Hex } from "viem";
+import { createPublicClient, createTransport, http, keccak256, shouldThrow, type Address, type Hex, type Transport } from "viem";
 import { base } from "viem/chains";
 import { publicActionsL2 } from "viem/op-stack";
 import { conduitAbi, moduleAbi } from "./abi.ts";
@@ -9,16 +9,58 @@ export const WEEK = 7n * 24n * 60n * 60n;
 // publicnode rejects a call of 2,264 reads and takes 1,132.
 export const CHUNK = 1_000;
 
-// The primary answers a pass's read in about 125 ms (370 ms at worst, over 15 reads on QuickNode), so a hanging
-// primary costs half a second per call before the next URL answers, well inside the last pass's three seconds.
-const PRIMARY_TIMEOUT = 500;
-const TIMEOUT = 5_000;
+// The primary answers a pass's read in about 125 ms (370 ms at worst, over 15 reads on QuickNode): past this, the
+// next URL is asked too.
+export const HEDGE_DELAY = 250;
+const TIMEOUT = 5_000; // a request still unanswered is abandoned
+
+/**
+ * The URLs in order, hedged: a request goes to the first; if it has not answered within HEDGE_DELAY, or failed, the
+ * next is asked too, and so on, and the first answer wins, the earlier URLs' included. A URL that missed the delay is
+ * asked together with the next until it answers within it again, so a hung primary costs HEDGE_DELAY once, not on
+ * every call. A deterministic error (a revert) is returned as is. No retries: main.ts retries whole passes within
+ * the pass deadline, where a transport retry would re-ask the primary and honour a Retry-After of tens of seconds.
+ */
+export function hedged(rpcUrls: string[]): Transport {
+  return ({ chain }) => {
+    const children = rpcUrls.map((url) => http(url, { batch: true, timeout: TIMEOUT })({ chain, retryCount: 0 }));
+    const slow = new Set<number>();
+    const request = ({ method, params }: { method: string; params?: unknown }) =>
+      new Promise((resolve, reject) => {
+        const errors: unknown[] = [];
+        let started = 0;
+        let settled = 0;
+        let done = false;
+        const ask = () => {
+          if (done || started === children.length) return;
+          const i = started++;
+          const t0 = Date.now();
+          const hedge = setTimeout(() => (slow.add(i), ask()), slow.has(i) ? 0 : HEDGE_DELAY);
+          children[i]!.request({ method, params }).then(
+            (result) => {
+              clearTimeout(hedge);
+              if (Date.now() - t0 < HEDGE_DELAY) slow.delete(i);
+              if (!done) (done = true), resolve(result);
+            },
+            (error: Error) => {
+              clearTimeout(hedge);
+              errors[i] = error;
+              settled++;
+              if (done) return;
+              if (shouldThrow(error)) return (done = true), reject(error);
+              if (i === started - 1) ask(); // failed before the next was asked: ask it now
+              if (settled === started && started === children.length) (done = true), reject(errors[0]);
+            },
+          );
+        };
+        ask();
+      });
+    return createTransport({ key: "hedged", name: "Hedged", type: "hedged", request: request as never, retryCount: 0 });
+  };
+}
 
 function makeClient(rpcUrls: string[]) {
-  // No transport-level retries: they would re-try the primary first and honour Retry-After with no regard for the
-  // pass deadline; main.ts retries whole passes within it instead.
-  const transports = rpcUrls.map((url, i) => http(url, { batch: true, timeout: i === 0 ? PRIMARY_TIMEOUT : TIMEOUT }));
-  return createPublicClient({ chain: base, transport: fallback(transports, { retryCount: 0 }), pollingInterval: 1_000 }).extend(publicActionsL2());
+  return createPublicClient({ chain: base, transport: hedged(rpcUrls), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 
 export type Client = ReturnType<typeof makeClient>;
