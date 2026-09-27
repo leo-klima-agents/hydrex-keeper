@@ -1,6 +1,6 @@
 #!/bin/sh
-# run.sh [--dry-run] [--now]: executes the job outside its schedule and waits.
-# --dry-run signs but does not send; --now evaluates once instead of waiting for the offsets.
+# Executes the job outside its schedule and waits.
+# --dry-run signs but does not send; --now runs one pass now instead of waiting for the offsets.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh

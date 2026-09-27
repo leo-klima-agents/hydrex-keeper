@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroAddress, type Address } from "viem";
 import type { Chain, Client } from "../src/chain.ts";
-import { readEpoch, readRewards, readStatic, StaticChanged } from "../src/rewards.ts";
+import { LayoutChanged, readEpoch, readLayout, readRewards } from "../src/read.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [VOTER, CONDUIT, POOL_A, POOL_B, POOL_C, GAUGE_A, GAUGE_B] = [addr(1), addr(2), addr(3), addr(4), addr(5), addr(6), addr(7)] as const;
@@ -64,8 +64,8 @@ const table = (call: Call): unknown => {
   throw new Error(`unexpected call ${functionName} on ${address}`);
 };
 
-test("readStatic drops pools without a gauge and defaults missing decimals", async () => {
-  const s = await readStatic(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
+test("readLayout drops pools without a gauge and defaults missing decimals", async () => {
+  const s = await readLayout(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
   assert.deepEqual(s.pools, [POOL_A, POOL_B]);
   assert.deepEqual(s.bribes, [EXT_A, INT_A, EXT_B, INT_B]);
   assert.deepEqual(s.lengths, [2n, 0n, 1n, 1n]);
@@ -82,7 +82,7 @@ test("readStatic drops pools without a gauge and defaults missing decimals", asy
 
 test("readRewards maps rewards, liveness and other votes per pool", async () => {
   const chain = fakeChain(table);
-  const s = await readStatic(chain, [POOL_A, POOL_B]);
+  const s = await readLayout(chain, [POOL_A, POOL_B]);
   const epoch = { start: 1000n, flip: 1000n + 604800n, power: 10n, votedThisEpoch: true, currentVote: { pools: [POOL_A], votes: [100n] } };
   const r = await readRewards(chain, s, epoch);
   assert.deepEqual(r, [
@@ -95,10 +95,10 @@ test("readRewards maps rewards, liveness and other votes per pool", async () => 
 
 test("readRewards reports a grown reward token list", async () => {
   const chain = fakeChain(table);
-  const s = await readStatic(chain, [POOL_A]);
+  const s = await readLayout(chain, [POOL_A]);
   rewardTokens[INT_A] = [TOK_2];
   try {
-    await assert.rejects(readRewards(chain, s, { start: 1000n, flip: 0n, power: 1n, votedThisEpoch: false, currentVote: { pools: [], votes: [] } }), StaticChanged);
+    await assert.rejects(readRewards(chain, s, { start: 1000n, flip: 0n, power: 1n, votedThisEpoch: false, currentVote: { pools: [], votes: [] } }), LayoutChanged);
   } finally {
     rewardTokens[INT_A] = [];
   }

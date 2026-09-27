@@ -5,7 +5,7 @@ import { generatePrivateKey, privateKeyToAccount, sign } from "viem/accounts";
 import { base } from "viem/chains";
 import { derToSignature, kmsAccount, NoMetadataServer } from "../src/kms.ts";
 
-const N = hexToBigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 function derInteger(value: bigint): number[] {
   const bytes = [...Buffer.from(numberToHex(value).slice(2).padStart(64, "0"), "hex")];

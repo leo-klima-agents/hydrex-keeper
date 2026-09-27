@@ -5,9 +5,14 @@ import { conduitAbi, moduleAbi } from "./abi.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
 
+/** Unix time in seconds. */
+export const now = () => BigInt(Math.floor(Date.now() / 1000));
+
 function makeClient(rpcUrls: string[]) {
   // A hanging primary costs one short timeout per call before the next URL answers.
-  const transports = rpcUrls.map((url, i) => http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }) }));
+  const transports = rpcUrls.map((url, i) =>
+    http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }) }),
+  );
   return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 
@@ -27,10 +32,7 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
   const client = makeClient(rpcUrls);
   const read = <const abi extends readonly unknown[]>(address: Address, abi: abi, functionName: string) =>
     client.readContract({ address, abi, functionName, args: [] } as never) as Promise<Address>;
-  const [conduit, keeper] = await Promise.all([
-    read(module, moduleAbi, "CONDUIT"),
-    read(module, moduleAbi, "KEEPER"),
-  ]);
+  const [conduit, keeper] = await Promise.all([read(module, moduleAbi, "CONDUIT"), read(module, moduleAbi, "KEEPER")]);
   const [voter, ve] = await Promise.all([read(conduit, conduitAbi, "voter"), read(conduit, conduitAbi, "veToken")]);
   return { client, module, conduit, keeper, voter, ve };
 }

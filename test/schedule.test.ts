@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { missed, passTimes, schedule } from "../src/main.ts";
-
-const A = "0x000000000000000000000000000000000000000a";
-const B = "0x000000000000000000000000000000000000000b";
+import { missed, passTimes, schedule } from "../src/schedule.ts";
 
 test("pass times are the offsets due within the horizon, earliest first, deduplicated", () => {
   const flip = 1_790_812_800n;
@@ -15,7 +12,6 @@ test("pass times are the offsets due within the horizon, earliest first, dedupli
   assert.deepEqual(passTimes(flip, [86400n, 600n, 5n], flip - 1200n), [flip - 600n, flip - 5n]);
   assert.deepEqual(passTimes(flip, [86400n, 600n], flip - 86400n - 600n, 100_000n), [flip - 86400n, flip - 600n]);
 });
-
 
 test("missed tells a late start from a restart after the flip", () => {
   const flip = 1_790_812_800n;

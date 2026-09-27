@@ -1,6 +1,5 @@
 #!/bin/sh
-# check.sh: live state vs config.env and policy/. Read-only.
-# Runs every check; exits 1 if any failed.
+# Compares the live project with config.env and policy/. Read-only; runs every check and exits 1 if any failed.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
@@ -23,16 +22,16 @@ expect() {
 }
 
 # Job
-job=$(job_exists) || die "job $JOB not found; run deploy.sh"
+job=$(describe_job) || die "job $JOB not found; run deploy.sh"
 require_json "$job" "job $JOB"
 task='.spec.template.spec.template.spec'
 expect "job service account" "$(json_field "$job" "$task.serviceAccountName")" "$KEEPER_SA"
-expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT_SECONDS"
+expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT"
 expect "job max retries" "$(json_field "$job" "$task.maxRetries | tostring")" "$MAX_RETRIES"
 expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | tostring")" "1"
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
 expect "job env" "$(json_field "$job" "[$task.containers[0].env[]? | select(.value != null) | \"\(.name)=\(.value)\"] | sort | join(\"|\")")" \
-  "KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
+  "$(jq -nr --arg vars "${ENV_VARS#^|^}" '$vars | split("|") | sort | join("|")')"
 expect "job secrets" "$(json_field "$job" "[$task.containers[0].env[]? | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | join(\"|\")")" \
   "$SECRETS"
 
@@ -45,9 +44,8 @@ else
 fi
 
 # Schedules
-tab=$(printf '\t')
-while IFS="$tab" read -r name cron; do
-  if ! scheduler=$(scheduler_exists "$name"); then
+while IFS="$TAB" read -r name cron; do
+  if ! scheduler=$(describe_scheduler "$name"); then
     fail "scheduler job $name not found; run deploy.sh"
     continue
   fi

@@ -1,12 +1,12 @@
-import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
+import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type Hex, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
 import { readMany, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
-import { describe, log } from "./log.ts";
+import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
-const RECEIPT_TIMEOUT = 60_000;
+const RECEIPT_TIMEOUT_MS = 60_000;
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
@@ -51,7 +51,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     log.warning("signing skipped: no KMS key configured");
     return;
   }
-  let signed: `0x${string}`;
+  let signed: Hex;
   try {
     signed = await account.signTransaction(tx);
   } catch (error) {
@@ -70,12 +70,12 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   const hash = await client.sendRawTransaction({ serializedTransaction: signed });
   lastSentBy.set(client, { nonce, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas! });
   log.info("vote sent", { hash });
-  const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
+  const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, Number(until - BigInt(Date.now()))));
   let receipt;
   try {
     receipt = await client.waitForTransactionReceipt({ hash, timeout });
   } catch (error) {
-    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw new VoteSent(`vote ${hash}: outcome unknown: ${describe(error)}`);
+    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
     log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
     return;
   }
@@ -92,7 +92,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
       { blockNumber: receipt.blockNumber },
     );
   } catch (error) {
-    throw new VoteSent(`vote ${hash} mined in block ${receipt.blockNumber}, verification failed: ${describe(error)}`);
+    throw new VoteSent(`vote ${hash} mined in block ${receipt.blockNumber}, verification failed: ${errorMessage(error)}`);
   }
   const pools = recorded.slice(0, vote.pools.length) as Address[];
   if (pools.some((pool, i) => pool.toLowerCase() !== vote.pools[i]!.toLowerCase())) {

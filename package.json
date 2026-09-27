@@ -9,7 +9,6 @@
     "node": ">=26"
   },
   "scripts": {
-    "start": "node src/main.ts",
     "dry-run": "node src/main.ts --dry-run --now",
     "test": "node --test",
     "typecheck": "tsc"

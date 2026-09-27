@@ -1,6 +1,6 @@
 import type { Address } from "viem";
 
-// The selection algorithm, and nothing else. Replace `select` to change the strategy.
+// The voting strategy, and nothing else. Replace `select` to change it.
 
 export type Candidate = { pool: Address; rewardsUsd: number; otherVotes: bigint };
 
@@ -70,10 +70,10 @@ export function select(candidates: Candidate[], power: bigint, current: Current)
     }
   });
   const rounded = candidates.map((_, i) => weights[i]! / BPS);
-  const now = candidates.map((c) => {
+  const held = candidates.map((c) => {
     const k = current.pools.findIndex((p) => p.toLowerCase() === c.pool.toLowerCase());
     return k < 0 ? 0 : Number(current.votes[k]!) / Number(power);
   });
-  const gain = expected(candidates, rounded, power) - expected(candidates, now, power);
+  const gain = expected(candidates, rounded, power) - expected(candidates, held, power);
   return gain > MIN_GAIN * expected(candidates, rounded, power) ? { pools, weights: bps } : null;
 }

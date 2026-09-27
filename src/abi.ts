@@ -1,7 +1,6 @@
 import { parseAbi } from "viem";
 
-// Only the members the keeper uses. Sources: hydrex-conduit-executor (module),
-// KlimaVeTokenConduit and Hydrex VoterV5 / BribeV2 / VotingEscrow on Base.
+// Only what the keeper uses, from the module, the conduit, and Hydrex's VoterV5, VotingEscrow and BribeV2.
 export const moduleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
@@ -41,5 +40,3 @@ export const bribeAbi = parseAbi([
   "function rewardTokens(uint256 index) view returns (address)",
   "function rewardData(address token, uint256 epoch) view returns (uint256 periodFinish, uint256 rewardsPerEpoch, uint256 lastUpdateTime)",
 ]);
-
-export const erc20Abi = parseAbi(["function decimals() view returns (uint8)"]);

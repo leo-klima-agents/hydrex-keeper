@@ -1,10 +1,11 @@
 #!/bin/sh
-# Keeper project resources that do not depend on the image. Idempotent.
+# Creates the project resources that do not depend on the image. Safe to re-run.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
 . "$script_dir/lib.sh"
 
+[ $# -eq 0 ] || die "usage: ${0##*/}"
 require_tools
 load_config
 make_tmp
@@ -14,19 +15,17 @@ log "== 1/4 APIs"
 gcloud services enable $SERVICES --project="$KEEPER_PROJECT"
 
 log "== 2/4 service accounts"
-for sa in "$KEEPER_SA_NAME:$KEEPER_SA:runs the job and signs with the key" \
-  "$SCHEDULER_SA_NAME:$SCHEDULER_SA:starts the job on schedule"; do
-  name=${sa%%:*}
-  rest=${sa#*:}
-  email=${rest%%:*}
-  description=${rest#*:}
-  if gcloud iam service-accounts describe "$email" --project="$KEEPER_PROJECT" --format="value(email)" >/dev/null 2>&1; then
-    log "exists: $email"
+# ensure_sa NAME EMAIL DESCRIPTION
+ensure_sa() {
+  if gcloud iam service-accounts describe "$2" --project="$KEEPER_PROJECT" --format="value(email)" >/dev/null 2>&1; then
+    log "exists: $2"
   else
-    log "creating $email"
-    gcloud iam service-accounts create "$name" --project="$KEEPER_PROJECT" --display-name="$name" --description="$description"
+    log "creating $2"
+    gcloud iam service-accounts create "$1" --project="$KEEPER_PROJECT" --display-name="$1" --description="$3"
   fi
-done
+}
+ensure_sa "$KEEPER_SA_NAME" "$KEEPER_SA" "runs the job and signs with the key"
+ensure_sa "$SCHEDULER_SA_NAME" "$SCHEDULER_SA" "starts the job on schedule"
 
 log "== 3/4 RPC secret"
 if gcloud secrets describe "$RPC_SECRET" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
@@ -35,7 +34,7 @@ else
   log "creating $RPC_SECRET"
   gcloud secrets create "$RPC_SECRET" --project="$KEEPER_PROJECT" --replication-policy=automatic
 fi
-set_iam_authoritative "$RPC_SECRET" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
+set_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
 [ "$(secret_versions)" -gt 0 ] || log "add the RPC URL: printf '%s' URL | gcloud secrets versions add $RPC_SECRET --project=$KEEPER_PROJECT --data-file=-"
 
 log "== 4/4 failure alert"

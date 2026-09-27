@@ -2,9 +2,7 @@
 type Fields = Record<string, unknown>;
 
 function emit(severity: "INFO" | "WARNING" | "ERROR", message: string, fields: Fields): void {
-  const json = JSON.stringify({ severity, message, ...fields }, (_, v: unknown) =>
-    typeof v === "bigint" ? v.toString() : v,
-  );
+  const json = JSON.stringify({ severity, message, ...fields }, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
   process.stdout.write(json + "\n");
 }
 
@@ -15,7 +13,7 @@ export const log = {
 };
 
 /** One line for an error; viem errors carry a short message and details. */
-export function describe(error: unknown): string {
+export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     const { name, shortMessage, details } = error as Error & { shortMessage?: string; details?: string };
     if (shortMessage) return `${name}: ${shortMessage}${details ? ` (${details})` : ""}`;

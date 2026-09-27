@@ -1,6 +1,6 @@
 #!/bin/sh
-# run.sh [--update]: every script under $TEST_SH (default dash) against
-# test/sh/fake-gcloud, diffed against test/sh/golden/<case>.txt.
+# Runs each script in sh/ under $TEST_SH (default dash) against test/sh/fake-gcloud and diffs the calls and output
+# with test/sh/golden/<case>.txt. --update rewrites the goldens.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -32,7 +32,7 @@ golden_case() {
   log=$tmp/$name.log
   : >"$log"
   rc=0
-  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/$config.env \
+  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario CONFIG_FILE=$root/test/sh/config/$config.env \
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   { printf 'exit=%s\n--- output ---\n' "$rc"; cat "$tmp/$name.out"; } >>"$log"
   golden=$root/test/sh/golden/$name.txt

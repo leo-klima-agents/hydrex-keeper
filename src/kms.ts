@@ -1,5 +1,5 @@
 import {
-  hexToBigInt,
+  bytesToBigInt,
   keccak256,
   numberToHex,
   recoverAddress,
@@ -11,12 +11,10 @@ import {
 } from "viem";
 import { toAccount } from "viem/accounts";
 
-// Signs with a Cloud KMS secp256k1 key through the REST API, authenticated by
-// the Cloud Run service account's metadata-server token.
-const METADATA_URL =
-  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+// Signs with a Cloud KMS secp256k1 key through the REST API, with the Cloud Run service account's token.
+const METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const KMS_URL = "https://cloudkms.googleapis.com/v1/";
-const SECP256K1_N = hexToBigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 export class NoMetadataServer extends Error {}
 
@@ -25,7 +23,7 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
 
   async function accessToken(): Promise<string> {
     if (token && Date.now() < token.expires) return token.value;
-    let response: globalThis.Response;
+    let response: Response;
     try {
       response = await fetchFn(METADATA_URL, { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(5_000) });
     } catch (error) {
@@ -74,8 +72,4 @@ export async function derToSignature(der: Uint8Array, hash: Hex, address: Addres
     if ((await recoverAddress({ hash, signature })).toLowerCase() === address.toLowerCase()) return signature;
   }
   throw new Error(`KMS key does not sign for ${address}`);
-}
-
-function bytesToBigInt(bytes: Uint8Array): bigint {
-  return hexToBigInt(`0x${Buffer.from(bytes).toString("hex") || "0"}`);
 }
