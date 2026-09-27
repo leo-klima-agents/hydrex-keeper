@@ -40,7 +40,7 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALCHEMY_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALCHEMY_SECRET COINGECKO_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -52,6 +52,7 @@ load_config() {
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
+  COINGECKO_SECRET=${COINGECKO_SECRET:-} # optional: empty leaves CoinGecko out
 
   for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
     eval "value=\${$required:-}"
@@ -87,6 +88,10 @@ load_config() {
   ENV_VARS="^|^MODULE=$MODULE|KMS_KEY_VERSION=$KMS_KEY_VERSION|VOTE_OFFSETS=$VOTE_OFFSETS"
   SECRETS="BASE_RPC_URL=$RPC_SECRET:latest,ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest"
   KEEPER_SECRETS="$RPC_SECRET $ALCHEMY_SECRET" # the Secret Manager secrets the job reads
+  if [ -n "$COINGECKO_SECRET" ]; then
+    SECRETS="$SECRETS,COINGECKO_API_KEY=$COINGECKO_SECRET:latest"
+    KEEPER_SECRETS="$KEEPER_SECRETS $COINGECKO_SECRET"
+  fi
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
 }

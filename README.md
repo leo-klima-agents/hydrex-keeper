@@ -79,7 +79,9 @@ pass's read in about 125 ms). The public nodes are rate-limited and Base calls i
 apps", so they are only asked when every URL in the secret is slow or down, and a second paid provider in the secret
 is what makes the final passes robust to a primary outage. The signed vote itself is sent to every URL at once.
 
-The Alchemy key is for token prices (its Prices API), one of three price sources with DefiLlama and CoinGecko.
+The Alchemy key is for token prices (its Prices API), a second price source next to DefiLlama. A CoinGecko Demo API
+key adds a third: set `COINGECKO_SECRET` in `config.env`, re-run `sh/setup.sh`, and add the key to that secret the
+same way.
 
 ## 5. Fund the keeper
 
@@ -127,8 +129,8 @@ CI runs it every Friday after the vote, and on demand from the Actions tab, exac
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
 a Workload Identity Federation pool and GitHub OIDC provider restricted to this repository, and repository variables
 `KEEPER_PROJECT`, `REGION`, `JOB`, `KEEPER_SA_NAME`, `SCHEDULER_SA_NAME`, `KMS_KEY_VERSION`, `MODULE`,
-`VOTE_OFFSETS`, `SCHEDULES`, `RPC_SECRET`, `ALCHEMY_SECRET`, `ALERT_EMAIL`, `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`.
-All public material.
+`VOTE_OFFSETS`, `SCHEDULES`, `RPC_SECRET`, `ALCHEMY_SECRET`, `COINGECKO_SECRET` (may be empty), `ALERT_EMAIL`,
+`WIF_PROVIDER` and `CI_SERVICE_ACCOUNT`. All public material.
 
 ## How it votes
 
@@ -173,27 +175,26 @@ tokens once. Each pass then reads the Voter's epoch, the conduit's power and vot
 a token (re-reading them if so), and every pool's liveness, votes and this epoch's reward of every token, in one
 `eth_call` of about 800 calls: votes and bribes both still move in the last ten minutes (over four past epochs, 4 to
 9% of all weight moved and fees kept landing), so every pass reads everything. Prices are refreshed at every pass
-that has at least twenty seconds left, from DefiLlama and Alchemy in parallel; the tokens they leave in doubt
-(unpriced, priced by one only, or more than 20% apart) go to keyless CoinGecko, which allows one token per request
-and about six requests a minute, so at most five per refresh. A token's price is the median of three quotes or the
-lower of two, since overpricing a bribe would draw votes to it, and quotes more than 20% apart are logged. With less
-than twenty seconds left, or if every source fails, the last set is reused and a token it lacks counts as zero. The
-read measures about 0.2 s and a pass about half a second including prices, and Base blocks are two seconds apart, so
-the last offset of five seconds leaves the transaction a block of margin. The calls are hedged: one the primary has
-not answered within 250 ms also goes to the next URL, and whichever answers first wins, the primary's late answer
-included. A URL that missed the delay is asked together with the next until it answers within it again, so a hung
-primary costs 250 ms once per execution (a dry-run pass takes 0.4 to 0.7 s either way). Calls are not retried at the
-transport level (the pass retry above is bounded by the deadline; a transport retry would honour a `Retry-After` of
-tens of seconds). The signed vote is sent to every URL in parallel and counts as sent once one accepts it, so its
-inclusion does not depend on one node. After a vote the Voter is read at the receipt's block, so a lagging fallback
-node cannot report it missing.
+that has at least twenty seconds left, from DefiLlama, Alchemy and, when its key is set, CoinGecko, all asked for
+every token in parallel. A token's price is the median of three quotes, the lower of two, since overpricing a bribe
+would draw votes to it, and quotes more than 20% apart are logged. With less than twenty seconds left, or if every
+source fails, the last set is reused and a token it lacks counts as zero. The read measures about 0.2 s and a pass
+about half a second including prices, and Base blocks are two seconds apart, so the last offset of five seconds
+leaves the transaction a block of margin. The calls are hedged: one the primary has not answered within 250 ms also
+goes to the next URL, and whichever answers first wins, the primary's late answer included. A URL that missed the
+delay is asked together with the next until it answers within it again, so a hung primary costs 250 ms once per
+execution (a dry-run pass takes 0.4 to 0.7 s either way). Calls are not retried at the transport level (the pass
+retry above is bounded by the deadline; a transport retry would honour a `Retry-After` of tens of seconds). The
+signed vote is sent to every URL in parallel and counts as sent once one accepts it, so its inclusion does not
+depend on one node. After a vote the Voter is read at the receipt's block, so a lagging fallback node cannot report
+it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
 | Base RPC (`BASE_RPC_URL`, one or more URLs, then `mainnet.base.org`, `base.drpc.org` and `base-rpc.publicnode.com`) | All reads, simulation, sending | A call unanswered after 250 ms also goes to the next URL; the first answer wins, and a request is abandoned after 5 s. The vote is sent to every URL; it fails only if none accepts it. The public nodes are rate-limited, so a paid provider is what makes the final passes robust. If all fail the pass fails and is retried |
-| Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (keyless, tie-breaks only) | USD prices of reward tokens, refreshed at every pass with time for it | A failed source is logged and left out; DefiLlama and Alchemy each get three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
+| Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (`COINGECKO_API_KEY`, optional) | USD prices of reward tokens, refreshed at every pass with time for it | A failed source is logged and left out; each gets three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so; the weekly `check.sh` fails below 0.0005 ETH, days before that |
@@ -233,8 +234,8 @@ by Dependabot, as are npm packages and base images.
 
 - The expected reward assumes other voters stay put; the late passes are what corrects for them moving.
 - No claiming or swapping of rewards yet.
-- Prices are trusted for ranking only. Keyless CoinGecko breaks at most five ties per refresh; a free demo key would
-  lift that.
+- Prices are trusted for ranking only. Without a CoinGecko key a token priced by DefiLlama and Alchemy alike has no
+  third opinion, and the lower of the two is used.
 - The last pass is five seconds before the flip. Pre-signing one transaction per candidate and broadcasting the
   chosen one after a final read would allow a later one.
 

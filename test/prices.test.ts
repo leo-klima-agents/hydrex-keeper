@@ -106,13 +106,13 @@ const table = (name: string, quotes: Record<string, number> | Error): PriceSourc
 };
 const [T1, T2, T3, T4] = ["0x01", "0x02", "0x03", "0x04"].map((p) => `${p}${"0".repeat(38)}` as `0x${string}`) as [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`];
 
-test("combined takes the lower of two quotes, the median of three, and sends only doubtful tokens to the tie-breaker", async () => {
+test("combined takes the median of three quotes, the lower of two, or the only one", async () => {
   const a = table("A", { [T1]: 1, [T2]: 2, [T3]: 10 });
   const b = table("B", { [T1]: 1.01, [T2]: 3, [T4]: 5 });
-  const tie = table("tie", { [T2]: 2.5, [T3]: 11 });
-  const out = await combined([a, b], tie).get([T1, T2, T3, T4], Infinity);
+  const c = table("C", { [T2]: 2.5 });
+  const out = await combined([a, b, c]).get([T1, T2, T3, T4], Infinity);
   assert.deepEqual(Object.fromEntries(out), { [T1]: 1, [T2]: 2.5, [T3]: 10, [T4]: 5 });
-  assert.deepEqual(tie.asked, [[T2, T3, T4]], "disagreeing first, then single-source; T1 agrees");
+  assert.deepEqual([a.asked, b.asked, c.asked], [[[T1, T2, T3, T4]], [[T1, T2, T3, T4]], [[T1, T2, T3, T4]]], "every source gets every token");
 });
 
 test("combined survives a failed source and fails only when every source does", async () => {
@@ -138,14 +138,17 @@ test("alchemy posts 25 addresses per request and reads USD values; the key never
   await assert.rejects(alchemy("SECRET-KEY", failing).get([T1], Date.now() + 1_500), (e: Error) => /Alchemy unavailable: HTTP 401/.test(e.message) && !e.message.includes("SECRET-KEY"));
 });
 
-test("coingecko asks one token per request, at most `max`, and treats a 429 as no quote", async () => {
-  const urls: string[] = [];
-  const fetchFn = (async (url: string | URL | Request) => {
-    urls.push(String(url));
-    const token = new URL(String(url)).searchParams.get("contract_addresses")!;
-    return token === T2 ? new Response("", { status: 429 }) : Response.json({ [token]: { usd: 7 } });
+test("coingecko sends its demo key and 100 tokens per request", async () => {
+  const requests: { url: URL; key: string | null }[] = [];
+  const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = new URL(String(url));
+    requests.push({ url: u, key: new Headers(init?.headers).get("x-cg-demo-api-key") });
+    const tokens = u.searchParams.get("contract_addresses")!.split(",");
+    return Response.json(Object.fromEntries(tokens.slice(0, 1).map((t) => [t, { usd: 7 }])));
   }) as typeof fetch;
-  const out = await coingecko(fetchFn, 2).get([T1, T2, T3], Infinity);
-  assert.equal(urls.length, 2);
-  assert.deepEqual(Object.fromEntries(out), { [T1]: 7 });
+  const tokens = Array.from({ length: 150 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`);
+  const out = await coingecko("CG-KEY", fetchFn).get(tokens, Infinity);
+  assert.deepEqual(requests.map((r) => r.url.searchParams.get("contract_addresses")!.split(",").length), [100, 50]);
+  assert.ok(requests.every((r) => r.key === "CG-KEY" && r.url.origin + r.url.pathname === "https://api.coingecko.com/api/v3/simple/token_price/base"));
+  assert.equal(out.size, 2);
 });

@@ -60,6 +60,7 @@ golden_case deploy-existing existing deploy.sh
 golden_case deploy-stale drift deploy.sh
 golden_case deploy-list-fails list-fails deploy.sh
 CONFIG=spaces golden_case deploy-spaces existing deploy.sh
+CONFIG=coingecko golden_case deploy-coingecko existing deploy.sh
 golden_case run-dry existing run.sh --dry-run --now
 golden_case run-bad-arg existing run.sh --later
 CONFIG=uncovered golden_case config-uncovered existing run.sh --now

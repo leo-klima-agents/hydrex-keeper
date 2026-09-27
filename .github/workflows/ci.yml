@@ -74,6 +74,7 @@ jobs:
           SCHEDULES: ${{ vars.SCHEDULES }}
           RPC_SECRET: ${{ vars.RPC_SECRET }}
           ALCHEMY_SECRET: ${{ vars.ALCHEMY_SECRET }}
+          COINGECKO_SECRET: ${{ vars.COINGECKO_SECRET }}
           ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
         run: |
           cat >config.env <<CFG
@@ -88,6 +89,7 @@ jobs:
           SCHEDULES='$SCHEDULES'
           RPC_SECRET='$RPC_SECRET'
           ALCHEMY_SECRET='$ALCHEMY_SECRET'
+          COINGECKO_SECRET='$COINGECKO_SECRET'
           ALERT_EMAIL='$ALERT_EMAIL'
           CFG
       - run: sh/check.sh

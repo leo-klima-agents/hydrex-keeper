@@ -1,12 +1,12 @@
 import type { Address } from "viem";
 import { describe, log } from "./log.ts";
 
-// USD prices of reward tokens on Base from three sources. Tokens a source does not know are absent from its result.
+// USD prices of reward tokens on Base: DefiLlama, and Alchemy and CoinGecko when their keys are set. Tokens a source
+// does not know are absent from its result.
 const ATTEMPTS = 3;
 const TIMEOUT = 15_000;
 const REFRESH_BUDGET = 20_000; // ms left before `until` under which a cached set is served rather than refreshed
-const SPREAD = 1.2; // quotes further apart than this ratio are logged, and sent to the tie-breaker
-const TIE_BREAKS = 5; // keyless CoinGecko: one token per request, and about six requests before a 429 (Retry-After 59)
+const SPREAD = 1.2; // quotes further apart than this ratio are logged
 
 export type Prices = Map<Address, number>;
 
@@ -89,36 +89,34 @@ export function alchemy(apiKey: string, fetchFn: typeof fetch = fetch): PriceSou
   };
 }
 
-/** Keyless CoinGecko: one token per request, one attempt each, at most `max` tokens (the rest are left out). */
-export function coingecko(fetchFn: typeof fetch = fetch, max = TIE_BREAKS): PriceSource {
+/** CoinGecko's Demo API with its key (keyless, it allows one token per request and about six a minute). */
+export function coingecko(apiKey: string, fetchFn: typeof fetch = fetch): PriceSource {
   return {
     name: "CoinGecko",
     async get(tokens, until) {
-      const out: Prices = new Map();
-      await Promise.all(
-        lower(tokens).slice(0, max).map(async (token) => {
-          try {
-            const url = `https://api.coingecko.com/api/v3/simple/token_price/base?contract_addresses=${token}&vs_currencies=usd`;
-            const body = (await getJson("CoinGecko", fetchFn, until, url, {}, (b) => typeof b === "object" && b !== null, 1)) as Record<string, { usd?: unknown }>;
-            const price = positive(body[token]?.usd);
-            if (price !== undefined) out.set(token, price);
-          } catch {
-            // rate-limited or unknown: this token simply has no tie-break
-          }
-        }),
+      const bodies = await Promise.all(
+        chunks(lower(tokens), 100).map((part) =>
+          getJson("CoinGecko", fetchFn, until, `https://api.coingecko.com/api/v3/simple/token_price/base?contract_addresses=${part.join(",")}&vs_currencies=usd`, {
+            headers: { "x-cg-demo-api-key": apiKey },
+          }, (b) => typeof b === "object" && b !== null && !Array.isArray(b)),
+        ),
       );
+      const out: Prices = new Map();
+      for (const [token, quote] of bodies.flatMap((b) => Object.entries(b as Record<string, { usd?: unknown }>))) {
+        const price = positive(quote?.usd);
+        if (price !== undefined) out.set(token.toLowerCase() as Address, price);
+      }
       return out;
     },
   };
 }
 
 /**
- * Every source in `sources` is asked for every token, in parallel; the tokens they leave in doubt (unpriced, priced
- * by one only, or quoted more than SPREAD apart, in that order) go to `tieBreaker`. A token's price is the median of
- * three quotes, the lower of two (overpricing a bribe would draw votes to it), or the only one. Fails only if no
- * source in `sources` answers.
+ * Every source is asked for every token, in parallel. A token's price is the median of three quotes, the lower of two
+ * (overpricing a bribe would draw votes to it), or the only one; quotes more than SPREAD apart are logged. A failed
+ * source is logged and left out; fails only if every source does.
  */
-export function combined(sources: PriceSource[], tieBreaker?: PriceSource): PriceSource {
+export function combined(sources: PriceSource[]): PriceSource {
   return {
     name: "combined",
     async get(tokens, until) {
@@ -128,15 +126,11 @@ export function combined(sources: PriceSource[], tieBreaker?: PriceSource): Pric
       const maps = settled.flatMap((s) => (s.status === "fulfilled" ? [s.value] : []));
       if (maps.length === 0) throw new Error(`no price source answered: ${settled.map((s) => (s.status === "rejected" ? describe(s.reason) : "")).join("; ")}`);
       const quotes = (t: Address) => maps.flatMap((m) => (m.has(t) ? [m.get(t)!] : []));
-      const apart = (q: number[]) => q.length > 1 && Math.max(...q) / Math.min(...q) > SPREAD;
-      const doubt = (t: Address) => (quotes(t).length === 0 ? 0 : apart(quotes(t)) ? 1 : quotes(t).length === 1 ? 2 : 3);
-      const doubtful = distinct.filter((t) => doubt(t) < 3).sort((a, b) => doubt(a) - doubt(b));
-      const extra = tieBreaker && doubtful.length ? await tieBreaker.get(doubtful, until).catch(() => new Map() as Prices) : new Map();
       const out: Prices = new Map();
       for (const t of distinct) {
-        const q = [...quotes(t), ...(extra.has(t) ? [extra.get(t)!] : [])].sort((a, b) => a - b);
+        const q = quotes(t).sort((a, b) => a - b);
         if (q.length === 0) continue;
-        if (apart(q)) log.warning("price sources disagree", { token: t, quotes: q });
+        if (q.length > 1 && q.at(-1)! / q[0]! > SPREAD) log.warning("price sources disagree", { token: t, quotes: q });
         out.set(t, q.length >= 3 ? q[Math.floor(q.length / 2)]! : q[0]!);
       }
       return out;

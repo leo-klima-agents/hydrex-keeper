@@ -41,6 +41,7 @@ ensure_secret() {
 }
 ensure_secret "$RPC_SECRET" "RPC URL"
 ensure_secret "$ALCHEMY_SECRET" "Alchemy API key"
+[ -z "$COINGECKO_SECRET" ] || ensure_secret "$COINGECKO_SECRET" "CoinGecko demo API key"
 
 log "== 4/4 failure alert"
 channel=$(find_channel)

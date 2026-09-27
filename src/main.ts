@@ -157,9 +157,10 @@ async function main(): Promise<number> {
   if (note) log.warning(note, { flip });
   if (times.length === 0) return 0;
   const deadline = flip * 1000n - BigInt(LAST_MARGIN);
-  const alchemyKey = process.env.ALCHEMY_API_KEY;
-  if (!alchemyKey) log.warning("ALCHEMY_API_KEY is not set: prices from DefiLlama, CoinGecko breaking ties");
-  const prices = priceFeed(combined([defillama(), ...(alchemyKey ? [alchemy(alchemyKey)] : [])], coingecko()));
+  const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
+  const sources = [defillama(), ...(alchemyKey ? [alchemy(alchemyKey)] : []), ...(coingeckoKey ? [coingecko(coingeckoKey)] : [])];
+  log.info("price sources", { sources: sources.map((s) => s.name) });
+  const prices = priceFeed(combined(sources));
   const run: Run = { chain, whitelist, prices, account, dryRun };
   try {
     run.static = await readStatic(chain, whitelist.map((w) => w.pool));
