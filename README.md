@@ -25,8 +25,10 @@ implemented yet.
   effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address, each
   once, and holds at most 50 (`MAX_POOLS` in `src/main.ts`) so that a pass's read stays one `eth_call` and its votes
   and epoch come from one block. It currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC,
-  BNKR, VVV and the ST0x tokenized stocks and ETFs (`wt…`), plus the HYDX/USDC pool: 47 pools. The module, the
-  conduit and the Voter enforce everything else (single caller, gauge liveness, voting power, epoch timing).
+  BNKR, VVV and the ST0x tokenized stocks and ETFs (`wt…`), every pool pairing Klima's kVCM with one of those
+  (three kVCM/USDC pools), plus the HYDX/USDC pool: 50 pools, the cap, so adding a pool means removing one. The
+  module, the conduit and the Voter enforce everything else (single caller, gauge liveness, voting power, epoch
+  timing).
 - **Cannot:** claim, swap, move funds, call any other contract, or read the private key. It asks Cloud KMS to sign
   one hash per vote; the key never leaves the HSM. The job's service account has no role in its own project beyond
   reading the RPC URL, and nothing in the project can impersonate it.
