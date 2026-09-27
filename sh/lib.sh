@@ -5,6 +5,13 @@
 SERVICES="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
+# Cloud Scheduler retries a start that fails (it does not by default): after 15, 30 and 60 s, all within 5 minutes,
+# so well before the first pass, 10 minutes after each start. A late start cannot vote after the flip.
+SCHEDULER_RETRIES=3
+SCHEDULER_MIN_BACKOFF=15s
+SCHEDULER_MAX_BACKOFF=60s
+SCHEDULER_MAX_DOUBLINGS=2
+SCHEDULER_MAX_RETRY_DURATION=300s
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600 # seconds; same as HORIZON in src/main.ts
 FLIP_WEEKDAY=4 # Thursday 00:00 UTC

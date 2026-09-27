@@ -62,6 +62,8 @@ while IFS="$TAB" read -r name cron; do
   expect "$name method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
   expect "$name service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
   expect "$name state" "$(json_field "$scheduler" .state)" "ENABLED"
+  expect "$name retries" "$(json_field "$scheduler" '.retryConfig | select(. != null) | "\(.retryCount // 0) \(.minBackoffDuration) \(.maxBackoffDuration) \(.maxDoublings) \(.maxRetryDuration)"')" \
+    "$SCHEDULER_RETRIES $SCHEDULER_MIN_BACKOFF $SCHEDULER_MAX_BACKOFF $SCHEDULER_MAX_DOUBLINGS $SCHEDULER_MAX_RETRY_DURATION"
 done <<LIST
 $(schedules)
 LIST

@@ -98,8 +98,8 @@ sh/deploy.sh
 Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both
 images pinned by digest), deploys the job with both secrets and the config as environment, sets the job's IAM so
 only the scheduler account can start it, and creates or updates one Cloud Scheduler job per entry of `SCHEDULES`
-(`hydrex-keeper-1`, `hydrex-keeper-2`), deleting any `hydrex-keeper*` scheduler job no longer listed. Safe to re-run;
-re-run it after any change to `src/` or `pools.json`.
+(`hydrex-keeper-1`, `hydrex-keeper-2`), each retrying a failed start three times, deleting any `hydrex-keeper*`
+scheduler job no longer listed. Safe to re-run; re-run it after any change to `src/` or `pools.json`.
 
 ## 7. First vote, watched
 
@@ -119,9 +119,9 @@ sh/check.sh
 ```
 
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
-`config.env` and `policy/`; if a schedule, its target, its service account or its state differ, or a stale scheduler
-job remains; if a secret has no enabled version or extra readers; if the keeper's service account has a
-user-managed key, any IAM binding on itself (impersonation) or any project-level role; if `KEEPER` holds under
+`config.env` and `policy/`; if a schedule, its target, its service account, its state or its retries differ, or a
+stale scheduler job remains; if a secret has no enabled version or extra readers; if the keeper's service account
+has a user-managed key, any IAM binding on itself (impersonation) or any project-level role; if `KEEPER` holds under
 0.0005 ETH on Base, about four weeks of worst-case votes (read through `https://mainnet.base.org`, or
 `CHECK_RPC_URL`); or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
 
@@ -196,7 +196,7 @@ it missing.
 | Base RPC (`BASE_RPC_URL`, one or more URLs, then `mainnet.base.org`, `base.drpc.org` and `base-rpc.publicnode.com`) | All reads, simulation, sending | A call unanswered after 250 ms also goes to the next URL; the first answer wins, and a request is abandoned after 5 s. The vote is sent to every URL; it fails only if none accepts it. The public nodes are rate-limited, so a paid provider is what makes the final passes robust. If all fail the pass fails and is retried |
 | Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (`COINGECKO_API_KEY`, optional) | USD prices of reward tokens, refreshed at every pass with time for it | A failed source is logged and left out; each gets three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
-| Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
+| Cloud Scheduler | Starting the two executions | A failed start is retried three times (after 15, 30 and 60 s, within 5 minutes, before the first pass). If it still fails, no pass that day: a missed Tuesday start leaves the Wednesday series, which votes at its first pass; a missed Wednesday start leaves the Tuesday vote in place, unadjusted. The alert covers failed executions, not absent ones (see below) |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so; the weekly `check.sh` fails below 0.0005 ETH, days before that |
 | Hydrex's minter | Epoch timestamp | If `_epochTimestamp()` lags the calendar epoch, the job refuses to vote |
 

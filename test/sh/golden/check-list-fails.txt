@@ -19,11 +19,13 @@ ok: hydrex-keeper-1 target is https://run.googleapis.com/v2/projects/hydrex-keep
 ok: hydrex-keeper-1 method is POST
 ok: hydrex-keeper-1 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper-1 state is ENABLED
+ok: hydrex-keeper-1 retries is 3 15s 60s 2 300s
 ok: hydrex-keeper-2 schedule is 40 23 * * 3
 ok: hydrex-keeper-2 time zone is Etc/UTC
 ok: hydrex-keeper-2 target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
 ok: hydrex-keeper-2 method is POST
 ok: hydrex-keeper-2 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper-2 state is ENABLED
+ok: hydrex-keeper-2 retries is 3 15s 60s 2 300s
 ERROR: (gcloud) PERMISSION_DENIED
 error: cannot list scheduler jobs

@@ -44,8 +44,11 @@ job_json() {
 scheduler_json() { # NAME
   case "$1" in "$job-1") cron='50 23 * * 2' ;; *) cron='40 23 * * 3' ;; esac
   if [ "$drift" = yes ] && [ "$1" = "$job-2" ]; then state=PAUSED; else state=ENABLED; fi
-  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
-    "$scheduler_sa" "$run_uri" "$project" "$region" "$1" "$cron" "$state"
+  # drift: the first job was created before retries, with Cloud Scheduler's default of none.
+  retry='"retryConfig":{"maxBackoffDuration":"60s","maxDoublings":2,"maxRetryDuration":"300s","minBackoffDuration":"15s","retryCount":3},'
+  [ "$drift" = no ] || [ "$1" != "$job-1" ] || retry='"retryConfig":{"maxBackoffDuration":"3600s","maxDoublings":16,"maxRetryDuration":"0s","minBackoffDuration":"5s"},'
+  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s",%s"schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
+    "$scheduler_sa" "$run_uri" "$project" "$region" "$1" "$retry" "$cron" "$state"
 }
 
 job_policy_json() {
