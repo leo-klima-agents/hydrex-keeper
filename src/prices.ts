@@ -12,7 +12,11 @@ const REFRESH_BUDGET_MS = 20_000; // with less time left before `until`, the las
 type LlamaResponse = { coins: Record<string, { price: number }> };
 
 /** `until` (ms) bounds the time spent on retries and timeouts. */
-export async function prices(tokens: Address[], fetchFn: typeof fetch = fetch, until = Infinity): Promise<Map<Address, number>> {
+export async function prices(
+  tokens: Address[],
+  fetchFn: typeof fetch = fetch,
+  until = Infinity,
+): Promise<Map<Address, number>> {
   const out = new Map<Address, number>();
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
   for (let i = 0; i < distinct.length; i += CHUNK) {
@@ -35,7 +39,9 @@ async function getJson(url: string, fetchFn: typeof fetch, until: number): Promi
       await sleep(delay);
     }
     try {
-      const response = await fetchFn(url, { signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, until - Date.now()))) });
+      const response = await fetchFn(url, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, until - Date.now()))),
+      });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = (await response.json()) as Partial<LlamaResponse> | null;
       if (!body || typeof body.coins !== "object" || body.coins === null) throw new Error("malformed response");

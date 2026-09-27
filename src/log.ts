@@ -2,7 +2,9 @@
 type Fields = Record<string, unknown>;
 
 function emit(severity: "INFO" | "WARNING" | "ERROR", message: string, fields: Fields): void {
-  const json = JSON.stringify({ severity, message, ...fields }, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
+  const json = JSON.stringify({ severity, message, ...fields }, (_, v: unknown) =>
+    typeof v === "bigint" ? v.toString() : v,
+  );
   process.stdout.write(json + "\n");
 }
 

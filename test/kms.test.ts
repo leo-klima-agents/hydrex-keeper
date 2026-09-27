@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hexToBigInt, keccak256, numberToHex, parseTransaction, recoverTransactionAddress, serializeTransaction, type Hex, type TransactionSerializedEIP1559 } from "viem";
+import {
+  hexToBigInt,
+  keccak256,
+  numberToHex,
+  parseTransaction,
+  recoverTransactionAddress,
+  serializeTransaction,
+  type Hex,
+  type TransactionSerializedEIP1559,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount, sign } from "viem/accounts";
 import { base } from "viem/chains";
 import { derToSignature, kmsAccount, NoMetadataServer } from "../src/kms.ts";
@@ -22,7 +31,15 @@ function der(r: bigint, s: bigint): Uint8Array {
 
 const privateKey = generatePrivateKey();
 const signer = privateKeyToAccount(privateKey);
-const tx = { chainId: base.id, to: signer.address, nonce: 1, gas: 100_000n, maxFeePerGas: 10n, maxPriorityFeePerGas: 1n, data: "0x1234" as Hex };
+const tx = {
+  chainId: base.id,
+  to: signer.address,
+  nonce: 1,
+  gas: 100_000n,
+  maxFeePerGas: 10n,
+  maxPriorityFeePerGas: 1n,
+  data: "0x1234" as Hex,
+};
 
 /** fetch stub: metadata token, then KMS signing with the local key in DER, high-s when asked. */
 function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
@@ -34,9 +51,15 @@ function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
       assert.equal((init?.headers as Record<string, string>)["Metadata-Flavor"], "Google");
       return Response.json({ access_token: "tok", expires_in: 3600, token_type: "Bearer" });
     }
-    assert.equal(String(url), "https://cloudkms.googleapis.com/v1/projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1:asymmetricSign");
+    assert.equal(
+      String(url),
+      "https://cloudkms.googleapis.com/v1/projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1:asymmetricSign",
+    );
     assert.equal((init?.headers as Record<string, string>).authorization, "Bearer tok");
-    const digest = Buffer.from((JSON.parse(String(init?.body)) as { digest: { sha256: string } }).digest.sha256, "base64");
+    const digest = Buffer.from(
+      (JSON.parse(String(init?.body)) as { digest: { sha256: string } }).digest.sha256,
+      "base64",
+    );
     const sig = await sign({ hash: `0x${digest.toString("hex")}`, privateKey });
     let s = hexToBigInt(sig.s);
     if (options.highS) s = N - s;
@@ -47,7 +70,11 @@ function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
 
 test("signs a transaction through KMS and the signature recovers to the keeper", async () => {
   const { fetchFn, calls } = fakeFetch();
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(
+    "projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+    signer.address,
+    fetchFn,
+  );
   const signed = (await account.signTransaction(tx)) as TransactionSerializedEIP1559;
   assert.equal(await recoverTransactionAddress({ serializedTransaction: signed }), signer.address);
   assert.equal(parseTransaction(signed).nonce, 1);
@@ -58,7 +85,11 @@ test("signs a transaction through KMS and the signature recovers to the keeper",
 
 test("normalizes a high-s signature", async () => {
   const { fetchFn } = fakeFetch({ highS: true });
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(
+    "projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+    signer.address,
+    fetchFn,
+  );
   const signed = await account.signTransaction(tx);
   assert.equal(signed, await signer.signTransaction(tx));
 });
@@ -76,6 +107,10 @@ test("rejects malformed DER", async () => {
 
 test("reports a missing metadata server distinctly", async () => {
   const { fetchFn } = fakeFetch({ metadata: false });
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(
+    "projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+    signer.address,
+    fetchFn,
+  );
   await assert.rejects(account.signTransaction(tx), NoMetadataServer);
 });

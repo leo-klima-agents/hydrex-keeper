@@ -25,7 +25,10 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
     if (token && Date.now() < token.expires) return token.value;
     let response: Response;
     try {
-      response = await fetchFn(METADATA_URL, { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(5_000) });
+      response = await fetchFn(METADATA_URL, {
+        headers: { "Metadata-Flavor": "Google" },
+        signal: AbortSignal.timeout(5_000),
+      });
     } catch (error) {
       throw new NoMetadataServer(`metadata server unreachable: ${String(error)}`);
     }
@@ -68,7 +71,12 @@ export async function derToSignature(der: Uint8Array, hash: Hex, address: Addres
   let s = bytesToBigInt(der.subarray(6 + rLength, 6 + rLength + sLength));
   if (s > SECP256K1_N / 2n) s = SECP256K1_N - s;
   for (const yParity of [0, 1]) {
-    const signature: Signature = { r: numberToHex(r, { size: 32 }), s: numberToHex(s, { size: 32 }), yParity, v: BigInt(27 + yParity) };
+    const signature: Signature = {
+      r: numberToHex(r, { size: 32 }),
+      s: numberToHex(s, { size: 32 }),
+      yParity,
+      v: BigInt(27 + yParity),
+    };
     if ((await recoverAddress({ hash, signature })).toLowerCase() === address.toLowerCase()) return signature;
   }
   throw new Error(`KMS key does not sign for ${address}`);

@@ -28,32 +28,74 @@ test("water-filling matches a brute-force optimum for two pools", () => {
 });
 
 test("all power goes to the only paying pool; nothing pays gives null", () => {
-  assert.deepEqual(allocate([{ pool: A, rewardsUsd: 0, otherVotes: 10n }, { pool: B, rewardsUsd: 5, otherVotes: 10n }], 100n), [0, 1]);
+  assert.deepEqual(
+    allocate(
+      [
+        { pool: A, rewardsUsd: 0, otherVotes: 10n },
+        { pool: B, rewardsUsd: 5, otherVotes: 10n },
+      ],
+      100n,
+    ),
+    [0, 1],
+  );
   assert.equal(allocate([{ pool: A, rewardsUsd: 0, otherVotes: 10n }], 100n), null);
   assert.equal(select([], 100n, none), null);
 });
 
 test("equal pools split equally and weights are basis points", () => {
-  const candidates = [{ pool: A, rewardsUsd: 10, otherVotes: 100n }, { pool: B, rewardsUsd: 10, otherVotes: 100n }, { pool: C, rewardsUsd: 0, otherVotes: 1n }];
+  const candidates = [
+    { pool: A, rewardsUsd: 10, otherVotes: 100n },
+    { pool: B, rewardsUsd: 10, otherVotes: 100n },
+    { pool: C, rewardsUsd: 0, otherVotes: 1n },
+  ];
   assert.deepEqual(select(candidates, 50n, none), { pools: [A, B], weights: [5000n, 5000n] });
 });
 
 test("a pool nobody voted for gets a small share, not everything", () => {
-  const x = allocate([{ pool: A, rewardsUsd: 100, otherVotes: 0n }, { pool: B, rewardsUsd: 100, otherVotes: 1000n }], 1000n)!;
+  const x = allocate(
+    [
+      { pool: A, rewardsUsd: 100, otherVotes: 0n },
+      { pool: B, rewardsUsd: 100, otherVotes: 1000n },
+    ],
+    1000n,
+  )!;
   assert.ok(x[0]! > 0 && x[0]! < 0.2, `got ${x[0]}`);
 });
 
 test("shares below a tenth of a percent are dropped and the rest re-solved", () => {
-  const x = allocate([{ pool: A, rewardsUsd: 1000, otherVotes: 1000n }, { pool: B, rewardsUsd: 1, otherVotes: 1000n }], 1000n)!;
+  const x = allocate(
+    [
+      { pool: A, rewardsUsd: 1000, otherVotes: 1000n },
+      { pool: B, rewardsUsd: 1, otherVotes: 1000n },
+    ],
+    1000n,
+  )!;
   assert.deepEqual(x, [1, 0]);
-  const y = allocate([{ pool: A, rewardsUsd: 1000, otherVotes: 1000n }, { pool: B, rewardsUsd: 1000, otherVotes: 1000n }, { pool: C, rewardsUsd: 0.5, otherVotes: 1000n }], 1000n)!;
-  assert.deepEqual(y.map((f) => Math.round(f * 100)), [50, 50, 0]);
+  const y = allocate(
+    [
+      { pool: A, rewardsUsd: 1000, otherVotes: 1000n },
+      { pool: B, rewardsUsd: 1000, otherVotes: 1000n },
+      { pool: C, rewardsUsd: 0.5, otherVotes: 1000n },
+    ],
+    1000n,
+  )!;
+  assert.deepEqual(
+    y.map((f) => Math.round(f * 100)),
+    [50, 50, 0],
+  );
 });
 
 test("keeps the current vote unless the gain is at least one percent", () => {
-  const candidates = [{ pool: A, rewardsUsd: 10, otherVotes: 100n }, { pool: B, rewardsUsd: 10, otherVotes: 100n }];
+  const candidates = [
+    { pool: A, rewardsUsd: 10, otherVotes: 100n },
+    { pool: B, rewardsUsd: 10, otherVotes: 100n },
+  ];
   assert.equal(select(candidates, 50n, { pools: [A, B], votes: [25n, 25n] }), null, "already optimal");
   assert.equal(select(candidates, 50n, { pools: [A, B], votes: [26n, 24n] }), null, "within one percent");
-  assert.deepEqual(select(candidates, 50n, { pools: [A], votes: [50n] }), { pools: [A, B], weights: [5000n, 5000n] }, "clearly better");
+  assert.deepEqual(
+    select(candidates, 50n, { pools: [A], votes: [50n] }),
+    { pools: [A, B], weights: [5000n, 5000n] },
+    "clearly better",
+  );
   assert.deepEqual(select(candidates, 50n, none)?.weights, [5000n, 5000n], "first vote of the epoch");
 });

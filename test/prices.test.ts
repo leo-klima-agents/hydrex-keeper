@@ -35,15 +35,29 @@ test("prices known tokens by lowercase address, omits unknown ones", async () =>
 
 test("splits requests into chunks of 50", async () => {
   const tokens = Array.from({ length: 120 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as `0x${string}`);
-  const { fetchFn, urls } = fakeFetch([() => Response.json({ coins: {} }), () => Response.json({ coins: {} }), () => Response.json({ coins: {} })]);
+  const { fetchFn, urls } = fakeFetch([
+    () => Response.json({ coins: {} }),
+    () => Response.json({ coins: {} }),
+    () => Response.json({ coins: {} }),
+  ]);
   await prices(tokens, fetchFn);
-  assert.deepEqual(urls.map((u) => u.split(",").length), [50, 50, 20]);
+  assert.deepEqual(
+    urls.map((u) => u.split(",").length),
+    [50, 50, 20],
+  );
 });
 
 test("retries on failure, then gives up", async () => {
-  const { fetchFn } = fakeFetch([() => new Response("nope", { status: 500 }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } })]);
+  const { fetchFn } = fakeFetch([
+    () => new Response("nope", { status: 500 }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }),
+  ]);
   assert.equal((await prices([WETH], fetchFn)).get(WETH), 1);
-  const failing = fakeFetch([() => new Response("", { status: 503 }), () => new Response("", { status: 503 }), () => new Response("", { status: 503 })]);
+  const failing = fakeFetch([
+    () => new Response("", { status: 503 }),
+    () => new Response("", { status: 503 }),
+    () => new Response("", { status: 503 }),
+  ]);
   await assert.rejects(prices([WETH], failing.fetchFn), /DefiLlama unavailable: HTTP 503/);
   assert.equal(failing.urls.length, 3);
 });
@@ -66,7 +80,10 @@ test("priceFeed refreshes at every call, serves the last set when the refresh fa
 });
 
 test("a malformed 200 response is retried", async () => {
-  const { fetchFn, urls } = fakeFetch([() => Response.json({ message: "rate limited" }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 4 } } })]);
+  const { fetchFn, urls } = fakeFetch([
+    () => Response.json({ message: "rate limited" }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 4 } } }),
+  ]);
   assert.equal((await prices([WETH], fetchFn)).get(WETH), 4);
   assert.equal(urls.length, 2);
 });
@@ -86,7 +103,10 @@ test("priceFeed serves the last set when the deadline is near, unless a token is
 
 test("prices stops retrying when a retry cannot finish before the deadline", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
-  const { fetchFn, urls } = fakeFetch([() => new Response("", { status: 503 }), () => new Response("", { status: 503 })]);
+  const { fetchFn, urls } = fakeFetch([
+    () => new Response("", { status: 503 }),
+    () => new Response("", { status: 503 }),
+  ]);
   await assert.rejects(prices([WETH], fetchFn, Date.now() + 1_500), /DefiLlama unavailable/);
   assert.equal(urls.length, 1);
 });

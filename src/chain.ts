@@ -11,9 +11,14 @@ export const now = () => BigInt(Math.floor(Date.now() / 1000));
 function makeClient(rpcUrls: string[]) {
   // A hanging primary costs one short timeout per call before the next URL answers.
   const transports = rpcUrls.map((url, i) =>
-    http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }) }),
+    http(url, {
+      batch: true,
+      ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }),
+    }),
   );
-  return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(publicActionsL2());
+  return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(
+    publicActionsL2(),
+  );
 }
 
 export type Client = ReturnType<typeof makeClient>;
@@ -42,11 +47,19 @@ export type Call = { address: Address; abi: readonly unknown[]; functionName: st
 type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
 
 /** One multicall; every call must succeed unless `lenient`, which yields `undefined` for failures. */
-export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}): Promise<T[]> {
+export async function readMany<T>(
+  client: Client,
+  calls: readonly Call[],
+  { blockNumber, lenient }: ReadOptions = {},
+): Promise<T[]> {
   const contracts = calls as never;
   const at = blockNumber === undefined ? {} : { blockNumber };
   if (!lenient) return (await client.multicall({ contracts, allowFailure: false, ...at })) as T[];
-  const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown; error?: unknown }[];
+  const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as {
+    status: string;
+    result?: unknown;
+    error?: unknown;
+  }[];
   if (results.length && results.every((r) => r.status === "failure")) throw results[0]!.error;
   return results.map((r) => (r.status === "success" ? r.result : undefined)) as T[];
 }

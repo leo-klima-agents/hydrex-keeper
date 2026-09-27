@@ -43,8 +43,12 @@ async function pass(run: Run, until: bigint): Promise<void> {
     run.layout = await readLayout(chain, pools);
     rewards = await readRewards(chain, run.layout, epoch);
   }
-  const priced = await prices(rewards.flatMap((p) => p.rewards.map((r) => r.token)), Number(until));
-  if (priced.size === 0 && rewards.some((p) => p.rewards.length > 0)) throw new Error("no reward token could be priced");
+  const priced = await prices(
+    rewards.flatMap((p) => p.rewards.map((r) => r.token)),
+    Number(until),
+  );
+  if (priced.size === 0 && rewards.some((p) => p.rewards.length > 0))
+    throw new Error("no reward token could be priced");
   const candidates: Candidate[] = [];
   const nameOf = (pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
   for (const p of rewards) {
@@ -58,14 +62,22 @@ async function pass(run: Run, until: bigint): Promise<void> {
     if (unpriced.length) log.warning("unpriced rewards count as zero", { pool: nameOf(p.pool), unpriced });
     if (!p.alive) log.warning("gauge is dead, skipping", { pool: nameOf(p.pool) });
     else candidates.push({ pool: p.pool, rewardsUsd, otherVotes: p.otherVotes });
-    log.info("candidate", { pool: nameOf(p.pool), alive: p.alive, rewardsUsd, otherVotes: p.otherVotes, rewards: detail });
+    log.info("candidate", {
+      pool: nameOf(p.pool),
+      alive: p.alive,
+      rewardsUsd,
+      otherVotes: p.otherVotes,
+      rewards: detail,
+    });
   }
 
   if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
   const fractions = allocate(candidates, epoch.power);
   const vote = select(candidates, epoch.power, epoch.currentVote);
   const plan = fractions
-    ? candidates.map((c, i) => ({ pool: nameOf(c.pool), share: Math.round(fractions[i]! * 10_000) / 100 })).filter((p) => p.share > 0)
+    ? candidates
+        .map((c, i) => ({ pool: nameOf(c.pool), share: Math.round(fractions[i]! * 10_000) / 100 }))
+        .filter((p) => p.share > 0)
     : [];
   const expectedUsd = fractions ? expected(candidates, fractions, epoch.power) : 0;
   if (!vote) {
@@ -76,7 +88,14 @@ async function pass(run: Run, until: bigint): Promise<void> {
     });
     return;
   }
-  log.info("voting", { plan, expectedUsd, pools: vote.pools.map(nameOf), weights: vote.weights, currentVote: epoch.currentVote, power: epoch.power });
+  log.info("voting", {
+    plan,
+    expectedUsd,
+    pools: vote.pools.map(nameOf),
+    weights: vote.weights,
+    currentVote: epoch.currentVote,
+    power: epoch.power,
+  });
   await castVote(chain, account, vote, dryRun, until);
 }
 
@@ -89,13 +108,18 @@ async function main(): Promise<number> {
   const offsetFields = immediately ? [] : required("VOTE_OFFSETS").split(",");
   if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
   const offsets = offsetFields.map(BigInt);
-  const whitelist = (JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist).map((w) => ({
-    pool: getAddress(w.pool),
-    name: String(w.name),
-  }));
+  const whitelist = (JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist).map(
+    (w) => ({
+      pool: getAddress(w.pool),
+      name: String(w.name),
+    }),
+  );
   if (whitelist.length === 0) throw new Error("pools.json is empty");
 
-  const chain = await connect(module, [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()));
+  const chain = await connect(
+    module,
+    [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()),
+  );
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 
@@ -112,7 +136,10 @@ async function main(): Promise<number> {
   const deadline = flip * 1000n - BigInt(LAST_MARGIN_MS);
   const run: Run = { chain, whitelist, prices: priceFeed(), account, dryRun };
   try {
-    run.layout = await readLayout(chain, whitelist.map((w) => w.pool));
+    run.layout = await readLayout(
+      chain,
+      whitelist.map((w) => w.pool),
+    );
   } catch (error) {
     log.warning("layout read failed; the first pass retries it", { error: errorMessage(error) });
   }
@@ -134,7 +161,11 @@ async function main(): Promise<number> {
         break;
       } catch (error) {
         const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && BigInt(Date.now() + RETRY_DELAY_MS) < until;
-        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms: Date.now() - started, error: errorMessage(error) });
+        log.error(`pass failed${retry ? ", retrying" : ""}`, {
+          attempt,
+          ms: Date.now() - started,
+          error: errorMessage(error),
+        });
         if (!retry) {
           failed++;
           break;

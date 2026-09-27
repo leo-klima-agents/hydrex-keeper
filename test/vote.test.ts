@@ -9,7 +9,15 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
 const signer = privateKeyToAccount(generatePrivateKey());
 
-type Behaviour = { nonce?: number; pending?: number; receipt?: "success" | "reverted" | "timeout"; recorded?: Address; fee?: bigint; minedHash?: Hex; verifyFails?: boolean };
+type Behaviour = {
+  nonce?: number;
+  pending?: number;
+  receipt?: "success" | "reverted" | "timeout";
+  recorded?: Address;
+  fee?: bigint;
+  minedHash?: Hex;
+  verifyFails?: boolean;
+};
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
@@ -18,7 +26,8 @@ function fakeChain(b: Behaviour = {}) {
     simulateContract: async () => ({ result: undefined }),
     estimateGas: async () => 100_000n,
     estimateFeesPerGas: async () => ({ maxFeePerGas: b.fee ?? 1_000n, maxPriorityFeePerGas: (b.fee ?? 1_000n) / 10n }),
-    getTransactionCount: async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7)),
+    getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
+      blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
     sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
@@ -92,7 +101,8 @@ test("a pending vote of unknown fees is queued behind; one this process sent is 
   assert.equal(parseTransaction(queued.sent[0]!).nonce, 4);
   const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
   await castVote(own.chain, signer, vote, false, far);
-  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? 4 : 3)) as never;
+  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
+    blockTag === "pending" ? 4 : 3) as never;
   await castVote(own.chain, signer, vote, false, far);
   const tx = parseTransaction(own.sent[1]!);
   assert.equal(tx.nonce, 3);
@@ -101,7 +111,10 @@ test("a pending vote of unknown fees is queued behind; one this process sent is 
 
 test("a receipt of an earlier vote under the same nonce means this one must be sent again", async () => {
   const { chain } = fakeChain({ minedHash: `0x${"cd".repeat(32)}` });
-  await assert.rejects(castVote(chain, signer, vote, false, far), (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /replaced/.test(e.message));
+  await assert.rejects(
+    castVote(chain, signer, vote, false, far),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /replaced/.test(e.message),
+  );
 });
 
 test("a failed verification after mining is reported as sent", async () => {
