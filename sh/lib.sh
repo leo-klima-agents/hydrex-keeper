@@ -3,12 +3,12 @@
 # shellcheck disable=SC2034
 
 SERVICES="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com"
-TASK_TIMEOUT=90m
-TASK_TIMEOUT_SECONDS=5400
+TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600 # seconds; same as HORIZON in src/main.ts
 FLIP_WEEKDAY=4 # Thursday 00:00 UTC
+TAB=$(printf '\t')
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -28,10 +28,8 @@ make_tmp() {
   trap 'exit 143' TERM
 }
 
-# require_tools [EXTRA...]: gcloud and jq, plus any named extras.
-# shellcheck disable=SC2120
 require_tools() {
-  for tool in gcloud jq "$@"; do
+  for tool in gcloud jq; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found on PATH"
   done
 }
@@ -141,13 +139,13 @@ get_iam() {
   printf '%s\n' "$iam_json"
 }
 
-# write_iam_if_changed RESOURCE FLAGS LIVE DESIRED gcloud-subcommand...: writes DESIRED in full with LIVE's etag.
-write_iam_if_changed() {
+# set_iam_authoritative RESOURCE FLAGS DESIRED gcloud-subcommand...: writes DESIRED in full with the live etag.
+set_iam_authoritative() {
   iam_resource=$1
   iam_flags=$2
-  iam_live=$3
-  iam_desired=$4
-  shift 4
+  iam_desired=$3
+  shift 3
+  iam_live=$(get_iam "$iam_resource" "$iam_flags" "$@")
   if ! policy_differs "$iam_live" "$iam_desired"; then
     log "iam: $iam_resource unchanged"
     return 0
@@ -158,16 +156,6 @@ write_iam_if_changed() {
   log "iam: writing $iam_resource"
   # shellcheck disable=SC2086
   gcloud "$@" set-iam-policy $iam_flags "$iam_resource" "$iam_file" >/dev/null
-}
-
-# set_iam_authoritative RESOURCE FLAGS DESIRED gcloud-subcommand...
-set_iam_authoritative() {
-  set_iam_resource=$1
-  set_iam_flags=$2
-  set_iam_desired=$3
-  shift 3
-  set_iam_live=$(get_iam "$set_iam_resource" "$set_iam_flags" "$@")
-  write_iam_if_changed "$set_iam_resource" "$set_iam_flags" "$set_iam_live" "$set_iam_desired" "$@"
 }
 
 # find_channel: name of the email notification channel for ALERT_EMAIL, or "".
@@ -209,11 +197,11 @@ schedule_start() {
 # Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
 check_offsets_covered() {
   starts=''
-  rest=$SCHEDULES
-  while [ -n "$rest" ]; do
-    case "$rest" in *";"*) cron=${rest%%;*} rest=${rest#*;} ;; *) cron=$rest rest='' ;; esac
+  while IFS="$TAB" read -r _ cron; do
     starts="$starts $(schedule_start "$cron")"
-  done
+  done <<LIST
+$(schedules)
+LIST
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
     covered=no
     for start in $starts; do

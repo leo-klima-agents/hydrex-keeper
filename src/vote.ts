@@ -1,4 +1,4 @@
-import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
+import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type Hex, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
 import { readMany, type Chain, type Client } from "./chain.ts";
@@ -33,7 +33,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   const nonce = pending > latest && lastSent?.nonce !== latest ? pending : latest;
   const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
   const max = (a: bigint, b: bigint) => (a > b ? a : b);
-  const tx: TransactionSerializableEIP1559 = {
+  const tx = {
     chainId: base.id,
     to: module,
     data,
@@ -41,8 +41,8 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     maxFeePerGas: max(fees.maxFeePerGas, (floor.maxFeePerGas * 5n) / 4n),
     maxPriorityFeePerGas: max(fees.maxPriorityFeePerGas, (floor.maxPriorityFeePerGas * 5n) / 4n),
     nonce,
-  };
-  const cost = tx.gas! * tx.maxFeePerGas! + l1Fee;
+  } satisfies TransactionSerializableEIP1559;
+  const cost = tx.gas * tx.maxFeePerGas + l1Fee;
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce });
 
@@ -50,7 +50,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     log.warning("signing skipped: no KMS key configured");
     return;
   }
-  let signed: `0x${string}`;
+  let signed: Hex;
   try {
     signed = await account.signTransaction(tx);
   } catch (error) {
@@ -67,7 +67,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
 
   if (BigInt(Date.now()) >= until) throw new Error("out of time before sending");
   const hash = await client.sendRawTransaction({ serializedTransaction: signed });
-  lastSentBy.set(client, { nonce, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas! });
+  lastSentBy.set(client, tx);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
   let receipt;

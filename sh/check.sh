@@ -21,13 +21,22 @@ ok() { log "ok: $*"; }
 expect() {
   if [ "$2" = "$3" ]; then ok "$1 is $3"; else fail "$1 is ${2:-unset}, expected $3"; fi
 }
+# expect_policy LABEL LIVE TEMPLATE
+expect_policy() {
+  if policy_differs "$2" "$(render_policy "$3")"; then
+    fail "$1 IAM policy differs from template"
+    show_policy_diff
+  else
+    ok "$1 IAM policy matches template"
+  fi
+}
 
 # Job
 job=$(job_exists) || die "job $JOB not found; run deploy.sh"
 require_json "$job" "job $JOB"
 task='.spec.template.spec.template.spec'
 expect "job service account" "$(json_field "$job" "$task.serviceAccountName")" "$KEEPER_SA"
-expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT_SECONDS"
+expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT"
 expect "job max retries" "$(json_field "$job" "$task.maxRetries | tostring")" "$MAX_RETRIES"
 expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | tostring")" "1"
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
@@ -37,16 +46,10 @@ expect "job secrets" "$(json_field "$job" "[$task.containers[0].env[]? | select(
   "$SECRETS"
 
 live_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
-if policy_differs "$live_policy" "$(render_policy job.iam.json.tmpl)"; then
-  fail "job IAM policy differs from template"
-  show_policy_diff
-else
-  ok "job IAM policy matches template"
-fi
+expect_policy job "$live_policy" job.iam.json.tmpl
 
 # Schedules
-tab=$(printf '\t')
-while IFS="$tab" read -r name cron; do
+while IFS="$TAB" read -r name cron; do
   if ! scheduler=$(scheduler_exists "$name"); then
     fail "scheduler job $name not found; run deploy.sh"
     continue
@@ -67,12 +70,7 @@ if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler
 # Secret
 if [ "$(secret_versions)" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
 live_policy=$(get_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" secrets)
-if policy_differs "$live_policy" "$(render_policy secret.iam.json.tmpl)"; then
-  fail "secret IAM policy differs from template"
-  show_policy_diff
-else
-  ok "secret IAM policy matches template"
-fi
+expect_policy secret "$live_policy" secret.iam.json.tmpl
 
 # Service accounts: no downloadable key, nobody can impersonate the keeper, no project-level role.
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||

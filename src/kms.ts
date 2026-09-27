@@ -1,4 +1,5 @@
 import {
+  bytesToBigInt,
   hexToBigInt,
   keccak256,
   numberToHex,
@@ -25,7 +26,7 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
 
   async function accessToken(): Promise<string> {
     if (token && Date.now() < token.expires) return token.value;
-    let response: globalThis.Response;
+    let response: Response;
     try {
       response = await fetchFn(METADATA_URL, { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(5_000) });
     } catch (error) {
@@ -74,8 +75,4 @@ export async function derToSignature(der: Uint8Array, hash: Hex, address: Addres
     if ((await recoverAddress({ hash, signature })).toLowerCase() === address.toLowerCase()) return signature;
   }
   throw new Error(`KMS key does not sign for ${address}`);
-}
-
-function bytesToBigInt(bytes: Uint8Array): bigint {
-  return hexToBigInt(`0x${Buffer.from(bytes).toString("hex") || "0"}`);
 }

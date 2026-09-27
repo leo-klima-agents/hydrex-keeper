@@ -6,7 +6,7 @@ gcloud iam service-accounts create hydrex-keeper-scheduler --project=hydrex-keep
 gcloud secrets describe base-rpc-url --project=hydrex-keeper-test --format=value(name)
 gcloud secrets create base-rpc-url --project=hydrex-keeper-test --replication-policy=automatic
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
-gcloud secrets set-iam-policy --project=hydrex-keeper-test base-rpc-url {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"ACAB"}
+gcloud secrets set-iam-policy --project=hydrex-keeper-test base-rpc-url {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"BwSecretEmpty"}
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud beta monitoring channels create --project=hydrex-keeper-test --display-name=hydrex-keeper alerts --type=email --channel-labels=email_address=hydrex-admin@example.com --format=value(name)

@@ -23,7 +23,7 @@ export class StaticChanged extends Error {}
  * (a longer list reads as a different vote). Power is read at the calendar epoch; `assertFresh` in main.ts
  * makes that the Voter's epoch before it is used.
  */
-export async function readEpoch(chain: Chain, maxPools = 8): Promise<Epoch> {
+export async function readEpoch(chain: Chain, maxPools: number): Promise<Epoch> {
   const { client, voter, ve, conduit } = chain;
   const calendar = (BigInt(Math.floor(Date.now() / 1000)) / WEEK) * WEEK;
   const [start, lastVoted, poolVoteLength, power, ...listed] = await readMany<bigint | Address | undefined>(

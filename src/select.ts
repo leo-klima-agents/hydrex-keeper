@@ -8,6 +8,9 @@ export type Vote = { pools: Address[]; weights: bigint[] };
 
 export type Current = { pools: Address[]; votes: bigint[] };
 
+/** The best vote, its expected USD, and whether it beats the current vote by MIN_GAIN. */
+export type Choice = { vote: Vote; expectedUsd: number; better: boolean };
+
 const BPS = 10_000;
 const MIN_GAIN = 0.01; // re-vote only when the expected reward improves by this fraction
 const MIN_SHARE = 0.001; // pools that would get less are dropped: each costs gas for cents
@@ -29,12 +32,10 @@ export function expected(candidates: Candidate[], x: number[], power: bigint): n
  */
 export function allocate(candidates: Candidate[], power: bigint): number[] | null {
   let x = solve(candidates, power);
-  for (;;) {
-    if (!x) return null;
-    const kept = candidates.map((c, i) => (x![i]! >= MIN_SHARE ? c : { ...c, rewardsUsd: 0 }));
-    if (!x.some((xi, i) => xi > 0 && xi < MIN_SHARE)) return x;
-    x = solve(kept, power);
+  while (x?.some((xi) => xi > 0 && xi < MIN_SHARE)) {
+    x = solve(x.map((xi, i) => (xi >= MIN_SHARE ? candidates[i]! : { ...candidates[i]!, rewardsUsd: 0 })), power);
   }
+  return x;
 }
 
 function solve(candidates: Candidate[], power: bigint): number[] | null {
@@ -47,7 +48,7 @@ function solve(candidates: Candidate[], power: bigint): number[] | null {
   let lo = 0;
   let hi = Math.max(...B.map((b, i) => b / V[i]!));
   for (let k = 0; k < 200; k++) {
-    const mid = lo === 0 ? hi / 2 : (lo + hi) / 2;
+    const mid = (lo + hi) / 2;
     if (at(mid).reduce((a, b) => a + b, 0) > v) lo = mid;
     else hi = mid;
   }
@@ -56,24 +57,20 @@ function solve(candidates: Candidate[], power: bigint): number[] | null {
   return x.map((xi) => xi / total);
 }
 
-/** The vote to cast, or null to keep the current one (nothing pays, or the gain is below MIN_GAIN). */
-export function select(candidates: Candidate[], power: bigint, current: Current): Vote | null {
+/** The allocation in basis points, or null when nothing pays. */
+export function select(candidates: Candidate[], power: bigint, current: Current): Choice | null {
   const fractions = allocate(candidates, power);
   if (!fractions) return null;
   const weights = fractions.map((f) => Math.round(f * BPS));
-  const pools: Address[] = [];
-  const bps: bigint[] = [];
-  candidates.forEach((c, i) => {
-    if (weights[i]! > 0) {
-      pools.push(c.pool);
-      bps.push(BigInt(weights[i]!));
-    }
-  });
-  const rounded = candidates.map((_, i) => weights[i]! / BPS);
-  const now = candidates.map((c) => {
+  const funded = weights.flatMap((w, i) => (w > 0 ? [i] : []));
+  const held = candidates.map((c) => {
     const k = current.pools.findIndex((p) => p.toLowerCase() === c.pool.toLowerCase());
     return k < 0 ? 0 : Number(current.votes[k]!) / Number(power);
   });
-  const gain = expected(candidates, rounded, power) - expected(candidates, now, power);
-  return gain > MIN_GAIN * expected(candidates, rounded, power) ? { pools, weights: bps } : null;
+  const expectedUsd = expected(candidates, weights.map((w) => w / BPS), power);
+  return {
+    vote: { pools: funded.map((i) => candidates[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) },
+    expectedUsd,
+    better: expectedUsd - expected(candidates, held, power) > MIN_GAIN * expectedUsd,
+  };
 }

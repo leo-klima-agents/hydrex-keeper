@@ -35,7 +35,7 @@ test("all power goes to the only paying pool; nothing pays gives null", () => {
 
 test("equal pools split equally and weights are basis points", () => {
   const candidates = [{ pool: A, rewardsUsd: 10, otherVotes: 100n }, { pool: B, rewardsUsd: 10, otherVotes: 100n }, { pool: C, rewardsUsd: 0, otherVotes: 1n }];
-  assert.deepEqual(select(candidates, 50n, none), { pools: [A, B], weights: [5000n, 5000n] });
+  assert.deepEqual(select(candidates, 50n, none)?.vote, { pools: [A, B], weights: [5000n, 5000n] });
 });
 
 test("a pool nobody voted for gets a small share, not everything", () => {
@@ -52,8 +52,8 @@ test("shares below a tenth of a percent are dropped and the rest re-solved", () 
 
 test("keeps the current vote unless the gain is at least one percent", () => {
   const candidates = [{ pool: A, rewardsUsd: 10, otherVotes: 100n }, { pool: B, rewardsUsd: 10, otherVotes: 100n }];
-  assert.equal(select(candidates, 50n, { pools: [A, B], votes: [25n, 25n] }), null, "already optimal");
-  assert.equal(select(candidates, 50n, { pools: [A, B], votes: [26n, 24n] }), null, "within one percent");
-  assert.deepEqual(select(candidates, 50n, { pools: [A], votes: [50n] }), { pools: [A, B], weights: [5000n, 5000n] }, "clearly better");
-  assert.deepEqual(select(candidates, 50n, none)?.weights, [5000n, 5000n], "first vote of the epoch");
+  assert.equal(select(candidates, 50n, { pools: [A, B], votes: [25n, 25n] })?.better, false, "already optimal");
+  assert.equal(select(candidates, 50n, { pools: [A, B], votes: [26n, 24n] })?.better, false, "within one percent");
+  assert.equal(select(candidates, 50n, { pools: [A], votes: [50n] })?.better, true, "clearly better");
+  assert.equal(select(candidates, 50n, none)?.better, true, "first vote of the epoch");
 });

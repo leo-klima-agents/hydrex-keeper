@@ -108,9 +108,9 @@ sh/check.sh
 
 Read-only. Fails if the job's service account, environment, secret reference, timeout, retries or IAM differ from
 `config.env` and `policy/`; if a schedule, its target, its service account or its state differ, or a stale scheduler
-job remains; if the secret has no
-enabled version or extra readers; if the keeper's service account has a user-managed key, any IAM binding on itself
-(impersonation) or any project-level role; or if the alert is missing, disabled, or not pointed at `ALERT_EMAIL`.
+job remains; if the secret has no enabled version or extra readers; if the keeper's service account has a
+user-managed key, any IAM binding on itself (impersonation) or any project-level role; or if the alert is missing,
+disabled, or not pointed at `ALERT_EMAIL`.
 
 CI runs it every Friday after the vote, and on demand from the Actions tab, exactly like the key repo: a viewer-only
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
@@ -131,10 +131,9 @@ over pools is found by water-filling: the marginal reward `usd × V / (V + x)²`
 gives every funded pool the same marginal reward `λ`, `x = √(usd × V / λ) − V`, with `λ` found by bisection so the
 shares add up to `v`. A pool nobody has voted for is treated as having one ten-thousandth of `v` on it, so it gets a
 small bid rather than everything. Pools that would get under a tenth of a percent are dropped and the rest re-solved,
-since each funded pool costs gas for two bribe deposits. Shares are sent as basis points. A re-vote is
-sent only when the new allocation is expected to pay at least one percent more than what the current on-chain votes
-would earn under the same data, so most passes end without a transaction. `src/select.ts` is this strategy and
-nothing else.
+since each funded pool costs gas for two bribe deposits. Shares are sent as basis points. A re-vote is sent only when
+the new allocation is expected to pay at least one percent more than what the current on-chain votes would earn under
+the same data, so most passes end without a transaction. `src/select.ts` is this strategy and nothing else.
 
 Re-voting is safe: Hydrex's `VOTE_DELAY` is zero and `vote` resets before recasting, so each pass just recomputes.
 The Voter keeps last epoch's `poolVote` and `votes` until that reset, so the job treats them as absent unless
@@ -151,24 +150,22 @@ quarter more and replaces it, and if it came from an earlier process the new one
 broadcast once the pass's deadline has passed. After a send, the retry loop re-sends only when the receipt shows an
 earlier vote won the nonce; a vote that was mined but reverted or recorded differently, or whose outcome could not be
 read, is left to the next pass. A Voter whose epoch lags the calendar by more than an hour (minter not
-updated) fails the execution at startup and at every pass. "Already voted" means the Voter holds the desired pools
-with the weights it would derive, so a strategy that splits weights is compared correctly too.
+updated) fails the execution at startup and at every pass.
 
 The offsets (`VOTE_OFFSETS`) shrink geometrically towards the flip so that most of the information arrives late and
-few transactions are sent: a vote only goes out when the winner changes. To keep the last passes short, an execution
-reads gauges, bribe contracts and reward tokens once (re-reading them if a bribe contract gains a token), refreshes
-prices at every pass that has at least twenty seconds left (otherwise, or if DefiLlama fails, it reuses the last
-set, and it never retries past the pass deadline), re-reads every pool's votes and rewards, and then needs two round
-trips for the epoch state and one for the pools before signing; a pass measures under a second, and Base blocks are two seconds apart, so the last offset of five
-seconds leaves the transaction a block of margin. The primary RPC gets three seconds per call before the public
-fallback is tried; the public node throttles bursts of calls, so its retries back off by seconds. After a vote the Voter is read at
-the receipt's block, so a lagging fallback node cannot report it missing.
+few transactions are sent. To keep the last passes short, an execution reads gauges, bribe contracts and reward
+tokens once (re-reading them if a bribe contract gains a token), refreshes prices at every pass that has at least
+twenty seconds left (otherwise, or if DefiLlama fails, it reuses the last set, and it never retries past the pass
+deadline), and re-reads the epoch state and every pool's votes and rewards in a few multicalls before signing; a pass
+measures under a second, and Base blocks are two seconds apart, so the last offset of five seconds leaves the
+transaction a block of margin. The primary RPC gets three seconds per call before the next URL is tried. After a vote
+the Voter is read at the receipt's block, so a lagging fallback node cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
-| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | Each URL gets three seconds per call before the next; the public node throttles bursts for tens of seconds, so it only reliably covers the day-before pass. If all fail the pass fails and is retried |
+| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | The primary gets three seconds per call, the others five, before the next URL is tried; the public node throttles bursts for tens of seconds, so it only reliably covers the day-before pass. If all fail the pass fails and is retried |
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |
@@ -186,9 +183,9 @@ the receipt's block, so a lagging fallback node cannot report it missing.
 ## Development
 
 `npm ci`, then `npm run typecheck` and `npm test` (unit tests: selection, DER and low-s handling with a throwaway key
-and a stubbed KMS, price parsing and caching, reward mapping against a fake client, pass scheduling). `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
-BASE_RPC_URL=… npm run dry-run` runs a full pass against Base without a metadata server: it stops after simulating
-and estimating, logging what it would have signed.
+and a stubbed KMS, price parsing and caching, reward mapping and vote sending against a fake client, pass
+scheduling). `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URL=… npm run dry-run` runs a full pass
+against Base without a metadata server: it stops after simulating and estimating, logging what it would have signed.
 
 `test/sh/run.sh` runs every script under `dash` against a fake `gcloud` and diffs the calls and output against
 `test/sh/golden/`; `--update` regenerates after an intended change. CI runs `shellcheck -s sh`, `sh -n`, `reuse lint`,

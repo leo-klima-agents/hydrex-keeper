@@ -46,12 +46,13 @@ async function getJson(url: string, fetchFn: typeof fetch, until: number): Promi
   throw new Error(`DefiLlama unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-export function priceFeed(maxAgeMs: number, fetchFn: typeof fetch = fetch): (tokens: Address[], until?: number) => Promise<Map<Address, number>> {
+/** Fresh prices at every call, except that the last set stands in for tokens it covers when time is short or DefiLlama fails. */
+export function priceFeed(fetchFn: typeof fetch = fetch) {
   let cached: { at: number; requested: Set<Address>; map: Map<Address, number> } | undefined;
-  return async (tokens, until = Infinity) => {
+  return async (tokens: Address[], until = Infinity): Promise<Map<Address, number>> => {
     const requested = tokens.map((t) => t.toLowerCase() as Address);
     const covered = cached !== undefined && requested.every((t) => cached!.requested.has(t));
-    if (covered && (Date.now() - cached!.at <= maxAgeMs || until - Date.now() < REFRESH_BUDGET)) return cached!.map;
+    if (covered && until - Date.now() < REFRESH_BUDGET) return cached!.map;
     try {
       cached = { at: Date.now(), requested: new Set(requested), map: await prices(tokens, fetchFn, until) };
     } catch (error) {

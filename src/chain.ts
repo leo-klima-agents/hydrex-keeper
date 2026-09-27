@@ -4,10 +4,11 @@ import { publicActionsL2 } from "viem/op-stack";
 import { conduitAbi, moduleAbi } from "./abi.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
+const CHUNK = 150;
 
 function makeClient(rpcUrls: string[]) {
   // A hanging primary costs one short timeout per call before the next URL answers.
-  const transports = rpcUrls.map((url, i) => http(url, { batch: true, ...(i === 0 ? { timeout: 3_000, retryCount: 0 } : { timeout: 5_000, retryDelay: 1_000 }) }));
+  const transports = rpcUrls.map((url, i) => http(url, { batch: true, timeout: i === 0 ? 3_000 : 5_000 }));
   return createPublicClient({ chain: base, transport: fallback(transports), pollingInterval: 1_000 }).extend(publicActionsL2());
 }
 
@@ -25,12 +26,9 @@ export type Chain = {
 /** Connects and derives every address from the module. */
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(rpcUrls);
-  const read = <const abi extends readonly unknown[]>(address: Address, abi: abi, functionName: string) =>
-    client.readContract({ address, abi, functionName, args: [] } as never) as Promise<Address>;
-  const [conduit, keeper] = await Promise.all([
-    read(module, moduleAbi, "CONDUIT"),
-    read(module, moduleAbi, "KEEPER"),
-  ]);
+  const read = (address: Address, abi: readonly unknown[], functionName: string) =>
+    client.readContract({ address, abi, functionName } as never) as Promise<Address>;
+  const [conduit, keeper] = await Promise.all([read(module, moduleAbi, "CONDUIT"), read(module, moduleAbi, "KEEPER")]);
   const [voter, ve] = await Promise.all([read(conduit, conduitAbi, "voter"), read(conduit, conduitAbi, "veToken")]);
   return { client, module, conduit, keeper, voter, ve };
 }
@@ -40,14 +38,14 @@ export type Call = { address: Address; abi: readonly unknown[]; functionName: st
 type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
 
 /** Multicall in chunks; every call must succeed unless `lenient`, which yields `undefined` for failures. */
-export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}, chunk = 150): Promise<T[]> {
+export async function readMany<T>(client: Client, calls: readonly Call[], { blockNumber, lenient }: ReadOptions = {}): Promise<T[]> {
+  const at = blockNumber === undefined ? {} : { blockNumber };
   const out: T[] = [];
-  for (let i = 0; i < calls.length; i += chunk) {
-    const contracts = calls.slice(i, i + chunk) as never;
-    const at = blockNumber === undefined ? {} : { blockNumber };
+  for (let i = 0; i < calls.length; i += CHUNK) {
+    const contracts = calls.slice(i, i + CHUNK) as never;
     if (lenient) {
       const results = (await client.multicall({ contracts, allowFailure: true, ...at })) as { status: string; result?: unknown; error?: unknown }[];
-      if (results.length && results.every((r) => r.status === "failure")) throw results[0]!.error;
+      if (results.every((r) => r.status === "failure")) throw results[0]!.error;
       out.push(...(results.map((r) => (r.status === "success" ? r.result : undefined)) as T[]));
     } else {
       out.push(...((await client.multicall({ contracts, allowFailure: false, ...at })) as T[]));

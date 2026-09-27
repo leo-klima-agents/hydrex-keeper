@@ -57,7 +57,7 @@ job_policy_json() {
 
 secret_policy_json() {
   if [ "$has_secret" = no ]; then
-    printf '{"etag":"ACAB"}\n'
+    printf '{"etag":"BwSecretEmpty"}\n'
   elif [ "$drift" = yes ]; then
     printf '{"bindings":[{"role":"roles/secretmanager.secretAccessor","members":["serviceAccount:%s","user:stray@example.com"]}],"etag":"BwSecretStray","version":1}\n' "$keeper_sa"
   else
