@@ -1,4 +1,3 @@
-# What `gcloud run jobs deploy --source` uploads to Cloud Build: the Dockerfile's inputs only.
 .git
 .github
 node_modules

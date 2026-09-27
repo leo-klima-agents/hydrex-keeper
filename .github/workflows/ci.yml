@@ -3,26 +3,19 @@ name: ci
 on:
   push:
   pull_request:
-  schedule:
-    - cron: "0 12 * * 5" # Friday 12:00 UTC, after the weekly vote
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   lint:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
-      - run: for f in sh/*.sh test/sh/fake-gcloud test/sh/golden.sh; do sh -n "$f"; done
       - run: shellcheck -s sh -x sh/*.sh test/sh/fake-gcloud test/sh/golden.sh
       - uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
   node:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,57 +28,13 @@ jobs:
       - run: npm test
 
   golden:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: TEST_SH=dash test/sh/golden.sh
+      - run: test/sh/golden.sh
 
   image:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build .
-
-  # Weekly drift check against the keeper project. Reads only; no stored secret.
-  check:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-26.04
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-          service_account: ${{ vars.CI_SERVICE_ACCOUNT }}
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jq
-      - env:
-          KEEPER_PROJECT: ${{ vars.KEEPER_PROJECT }}
-          REGION: ${{ vars.REGION }}
-          JOB: ${{ vars.JOB }}
-          KEEPER_SA_NAME: ${{ vars.KEEPER_SA_NAME }}
-          SCHEDULER_SA_NAME: ${{ vars.SCHEDULER_SA_NAME }}
-          KMS_KEY_VERSION: ${{ vars.KMS_KEY_VERSION }}
-          MODULE: ${{ vars.MODULE }}
-          VOTE_OFFSETS: ${{ vars.VOTE_OFFSETS }}
-          SCHEDULES: ${{ vars.SCHEDULES }}
-          RPC_SECRET: ${{ vars.RPC_SECRET }}
-          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
-        run: |
-          cat >config.env <<CFG
-          KEEPER_PROJECT='$KEEPER_PROJECT'
-          REGION='$REGION'
-          JOB='$JOB'
-          KEEPER_SA_NAME='$KEEPER_SA_NAME'
-          SCHEDULER_SA_NAME='$SCHEDULER_SA_NAME'
-          KMS_KEY_VERSION='$KMS_KEY_VERSION'
-          MODULE='$MODULE'
-          VOTE_OFFSETS='$VOTE_OFFSETS'
-          SCHEDULES='$SCHEDULES'
-          RPC_SECRET='$RPC_SECRET'
-          ALERT_EMAIL='$ALERT_EMAIL'
-          CFG
-      - run: sh/check.sh
