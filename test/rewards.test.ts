@@ -26,7 +26,7 @@ function fakeChain(answer: (call: Call) => unknown, batches: string[][] = []): C
       });
     },
   } as unknown as Client;
-  return { client, module: addr(99), conduit: CONDUIT, keeper: addr(98), voter: VOTER, ve: addr(97) };
+  return { client, module: addr(99), conduit: CONDUIT, keeper: addr(98), voter: VOTER, ve: addr(97), broadcast: () => Promise.reject(new Error("unused")) };
 }
 
 const rewardTokens: Record<string, Address[]> = { [EXT_A]: [TOK_1, TOK_2], [INT_A]: [], [EXT_B]: [TOK_3], [INT_B]: [TOK_1] };

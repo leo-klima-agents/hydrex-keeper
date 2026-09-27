@@ -21,11 +21,6 @@ function fakeChain(b: Behaviour = {}) {
     getTransactionCount: async ({ blockTag }: { blockTag: string }) => (blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7)),
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
-    sendRawTransaction: async ({ serializedTransaction }: { serializedTransaction: Hex }) => {
-      sent.push(serializedTransaction);
-      if (b.sendFails) throw new Error("timeout after broadcast");
-      return `0x${"ab".repeat(32)}` as Hex;
-    },
     waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
       assert.ok(timeout >= 1 && timeout <= 60_000);
       if (b.receipt === "timeout") throw new WaitForTransactionReceiptTimeoutError({ hash });
@@ -37,7 +32,12 @@ function fakeChain(b: Behaviour = {}) {
       return contracts.map((c) => (c.functionName === "poolVote" ? (b.recorded ?? POOL) : 1n));
     },
   } as unknown as Client;
-  const chain: Chain = { client, module: MODULE, conduit: CONDUIT, keeper: signer.address, voter: VOTER, ve: addr(6) };
+  const broadcast = async (signed: Hex) => {
+    sent.push(signed);
+    if (b.sendFails) throw new Error("timeout after broadcast");
+    return `0x${"ab".repeat(32)}` as Hex;
+  };
+  const chain: Chain = { client, module: MODULE, conduit: CONDUIT, keeper: signer.address, voter: VOTER, ve: addr(6), broadcast };
   return { chain, sent };
 }
 

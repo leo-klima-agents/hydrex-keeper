@@ -70,9 +70,12 @@ In hydrex-keeper-key, set `KEEPER_SA` to that email and run `sh/grant.sh`. That 
 printf '%s' 'https://…' | gcloud secrets versions add base-rpc-url --project=KEEPER_PROJECT --data-file=-
 ```
 
-Several URLs separated by commas are tried in order; the public `https://mainnet.base.org` is always the last resort.
-Each pass reads in one call, but public nodes still throttle busy clients, so a second paid provider in the secret is
-what makes the final passes robust to a primary outage.
+Several URLs separated by commas are tried in order, then three free public nodes: `https://mainnet.base.org`,
+`https://base.drpc.org` and `https://base-rpc.publicnode.com`. The first URL gets half a second per call before the
+next is tried; it should be a paid provider (QuickNode answers a pass's read in about 125 ms). The public nodes are
+rate-limited and Base calls its own "not suitable for production apps", so they only answer when every URL in the
+secret has failed, and a second paid provider in the secret is what makes the final passes robust to a primary
+outage. The signed vote itself is sent to every URL at once.
 
 ## 5. Fund the keeper
 
@@ -165,16 +168,17 @@ token (re-reading them if so), and every pool's liveness, votes and this epoch's
 pass that has at least twenty seconds left; otherwise, or if DefiLlama fails, the last set is reused and a token it
 lacks counts as zero. The read measures about 0.2 s and a pass about half a second including prices, and Base
 blocks are two seconds apart, so the last offset of five seconds leaves the transaction a block of margin. The
-primary RPC gets three seconds per call before the next URL is tried, and calls are not retried at the transport
+primary RPC gets half a second per call before the next URL is tried, and calls are not retried at the transport
 level (the pass retry above is bounded by the deadline; a transport retry would honour a `Retry-After` of tens of
-seconds). After a vote the Voter is read at the receipt's block, so a lagging fallback node
+seconds). The signed vote is sent to every URL in parallel and counts as sent once one accepts it, so its inclusion
+does not depend on one node. After a vote the Voter is read at the receipt's block, so a lagging fallback node
 cannot report it missing.
 
 ## External dependencies and failure modes
 
 | Dependency | Used for | On failure |
 |---|---|---|
-| Base RPC (`BASE_RPC_URL`, one or more URLs, then `https://mainnet.base.org`) | All reads, simulation, sending | The primary gets three seconds per call, the others five, before the next URL is tried. Each read is one `eth_call`, which public nodes throttle less than bursts, but a paid provider is still what makes the final passes robust. If all fail the pass fails and is retried |
+| Base RPC (`BASE_RPC_URL`, one or more URLs, then `mainnet.base.org`, `base.drpc.org` and `base-rpc.publicnode.com`) | All reads, simulation, sending | The primary gets half a second per call, the others five, before the next URL is tried. The vote is sent to every URL; it fails only if none accepts it. The public nodes are rate-limited, so a paid provider is what makes the final passes robust. If all fail the pass fails and is retried |
 | [DefiLlama](https://defillama.com/docs/api) `coins.llama.fi`, no key | USD prices of reward tokens, refreshed at every pass with time for it | Three attempts within the pass deadline, then the last set is reused, else the pass fails. A token it does not price counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist. A second price source may be added later for redundancy |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | No pass that day; the alert covers failed executions, not absent ones (see below) |

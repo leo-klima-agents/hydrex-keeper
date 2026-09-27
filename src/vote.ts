@@ -15,7 +15,7 @@ const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; ma
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
 export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: bigint): Promise<void> {
-  const { client, module, keeper, voter, conduit } = chain;
+  const { client, module, keeper, voter, conduit, broadcast } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
@@ -70,7 +70,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   if (BigInt(Date.now()) >= until) throw new Error("out of time before sending");
   // Recorded first: a send that errors may still have broadcast it.
   lastSentBy.set(client, tx);
-  const hash = await client.sendRawTransaction({ serializedTransaction: signed });
+  const hash = await broadcast(signed, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
   let receipt;

@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, WEEK, type Chain } from "./chain.ts";
+import { connect, hostOf, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
@@ -8,7 +8,9 @@ import { readEpoch, readState, readStatic, StaticChanged, type State, type Stati
 import { select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
 
-const PUBLIC_RPC = "https://mainnet.base.org";
+// Tried in this order after the URLs in BASE_RPC_URL. Free, rate-limited nodes: Base itself says its own is "not
+// suitable for production apps", so they only answer when every configured provider has failed.
+const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
 const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
 const HORIZON = 3600n; // an execution runs the passes due within this many seconds
 const ATTEMPTS = 3;
@@ -130,9 +132,10 @@ async function main(): Promise<number> {
   const offsets = offsetFields.map(BigInt);
   const whitelist = parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8"));
 
-  const chain = await connect(module, [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()));
+  const rpcUrls = [...new Set([...required("BASE_RPC_URL").split(","), ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
+  const chain = await connect(module, rpcUrls);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
-  log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
+  log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, rpcs: rpcUrls.map(hostOf), dryRun });
 
   const { start, flip } = await readEpoch(chain);
   if (!immediately && flip <= now() && now() - flip < HORIZON) {
