@@ -11,18 +11,6 @@ const RECEIPT_TIMEOUT = 60_000;
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
-/** Whether the Voter already holds `desired` for `power`, pool by pool and with the weights the Voter would derive. */
-export function sameVote(current: { pools: Address[]; votes: bigint[] }, desired: Vote, power: bigint): boolean {
-  const total = desired.weights.reduce((a, b) => a + b, 0n);
-  return (
-    current.pools.length === desired.pools.length &&
-    current.pools.every(
-      (pool, i) =>
-        pool.toLowerCase() === desired.pools[i]!.toLowerCase() && current.votes[i] === (desired.weights[i]! * power) / total,
-    )
-  );
-}
-
 const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */

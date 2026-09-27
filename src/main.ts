@@ -5,8 +5,8 @@ import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
 import { readEpoch, readRewards, readStatic, StaticChanged, type Epoch, type Static } from "./rewards.ts";
-import { select, type Candidate } from "./select.ts";
-import { castVote, sameVote, VoteSent } from "./vote.ts";
+import { allocate, expected, select, type Candidate } from "./select.ts";
+import { castVote, VoteSent } from "./vote.ts";
 
 const PUBLIC_RPC = "https://mainnet.base.org";
 const DEFAULT_OFFSETS = "86400,600,200,70,25,10,5";
@@ -89,17 +89,15 @@ async function pass(run: Run, until: bigint): Promise<void> {
   }
 
   if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
-  const vote = select(candidates, epoch.power);
+  const fractions = allocate(candidates, epoch.power);
+  const vote = select(candidates, epoch.power, epoch.currentVote);
+  const plan = fractions ? candidates.map((c, i) => ({ pool: nameOf(c.pool), share: Math.round(fractions[i]! * 10_000) / 100 })).filter((p) => p.share > 0) : [];
+  const expectedUsd = fractions ? expected(candidates, fractions, epoch.power) : 0;
   if (!vote) {
-    log.warning("no pool pays anything; keeping the current vote", { currentVote: epoch.currentVote });
+    log.info(fractions ? "keeping the current vote" : "no pool pays anything; keeping the current vote", { plan, expectedUsd, currentVote: epoch.currentVote });
     return;
   }
-  const names = vote.pools.map(nameOf);
-  if (sameVote(epoch.currentVote, vote, epoch.power)) {
-    log.info("already voted for the best pool this epoch", { pools: names });
-    return;
-  }
-  log.info("voting", { pools: names, currentVote: epoch.currentVote, power: epoch.power });
+  log.info("voting", { plan, expectedUsd, pools: vote.pools.map(nameOf), weights: vote.weights, currentVote: epoch.currentVote, power: epoch.power });
   await castVote(chain, account, vote, dryRun, until);
 }
 

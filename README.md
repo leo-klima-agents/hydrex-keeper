@@ -14,9 +14,10 @@ for (`pools.json`), and the scripts that create its Google Cloud project resourc
 Cloud Scheduler starts the job twice a week: Tuesday 23:50 UTC and Wednesday 23:40 UTC. Each execution runs the
 passes due within the following hour: one 24 hours before the Thursday 00:00 UTC flip, then a geometric series at
 600, 200, 70, 25, 10 and 5 seconds before it. A pass reads this epoch's bribes and fees for every whitelisted pool,
-prices them, and votes for the pool that would pay the conduit the most. Votes do not carry over between epochs, so
-the first pass always votes; later passes only send a transaction if the best pool changed. Claiming and swapping
-rewards is not implemented yet.
+prices them, and spreads the conduit's votes across the pools by water-filling so that the expected reward is
+maximal. Votes do not carry over between epochs, so the first pass always votes; later passes only send a
+transaction if a new allocation would pay at least one percent more. Claiming and swapping rewards is not
+implemented yet.
 
 ## What it can and cannot do
 
@@ -92,7 +93,7 @@ re-run it after any change to `src/` or `pools.json`.
 
 ```sh
 sh/run.sh --dry-run --now   # reads, prices, selects, simulates, signs with KMS; sends nothing
-sh/run.sh --now             # votes now, unless this epoch already has a vote for the best pool
+sh/run.sh --now             # votes now, unless the current vote is already within one percent of optimal
 ```
 
 Read the execution's logs in Cloud Run. The dry run proves the whole path including that the KMS key recovers to
@@ -124,10 +125,16 @@ Everything on-chain is derived from `MODULE`: its `CONDUIT` and `KEEPER`, the co
 For each pool in `pools.json` the job reads the gauge (a pool without one is skipped), whether it is alive, its votes
 this epoch, and this epoch's `rewardsPerEpoch` of every token in its external bribe (bribes) and internal bribe
 (trading fees) contracts, then prices the tokens in USD. Bribes notified during an epoch are keyed to that epoch on
-Hydrex's `BribeV2`, which is what the job reads. With `v` the conduit's voting power at epoch start and `V` the pool's votes from others,
-voting everything for one pool is expected to pay `usd × v / (V + v)`. The pool with the largest value wins; ties keep
-whitelist order; if nothing pays, the current vote is kept. `src/select.ts` is this function and nothing else, so a
-different strategy (water-filling across several pools) replaces one file.
+Hydrex's `BribeV2`, which is what the job reads. With `v` the conduit's voting power at epoch start and `V` a pool's
+votes from others, putting `x` votes on it is expected to pay `usd × x / (V + x)`. The allocation maximising the sum
+over pools is found by water-filling: the marginal reward `usd × V / (V + x)²` falls as `x` grows, so the optimum
+gives every funded pool the same marginal reward `λ`, `x = √(usd × V / λ) − V`, with `λ` found by bisection so the
+shares add up to `v`. A pool nobody has voted for is treated as having one ten-thousandth of `v` on it, so it gets a
+small bid rather than everything. Pools that would get under a tenth of a percent are dropped and the rest re-solved,
+since each funded pool costs gas for two bribe deposits. Shares are sent as basis points. A re-vote is
+sent only when the new allocation is expected to pay at least one percent more than what the current on-chain votes
+would earn under the same data, so most passes end without a transaction. `src/select.ts` is this strategy and
+nothing else.
 
 Re-voting is safe: Hydrex's `VOTE_DELAY` is zero and `vote` resets before recasting, so each pass just recomputes.
 The Voter keeps last epoch's `poolVote` and `votes` until that reset, so the job treats them as absent unless
@@ -199,7 +206,7 @@ by Dependabot, as are npm packages and base images.
 
 ## Known limitations
 
-- One pool, all voting power. Water-filling across the whitelist is the planned next strategy.
+- The expected reward assumes other voters stay put; the late passes are what corrects for them moving.
 - No claiming or swapping of rewards yet.
 - Prices come from one source and are trusted for ranking only.
 - The last pass is five seconds before the flip. Pre-signing one transaction per candidate and broadcasting the
