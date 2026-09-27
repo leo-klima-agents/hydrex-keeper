@@ -1,10 +1,9 @@
 #!/bin/sh
-# Sourced by every script in sh/.
+# Sourced by the scripts in sh/.
 # shellcheck disable=SC2034
 
 SERVICES="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com"
-TASK_TIMEOUT=90m
-TASK_TIMEOUT_SECONDS=5400
+TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600 # seconds; same as HORIZON in src/main.ts
@@ -28,10 +27,8 @@ make_tmp() {
   trap 'exit 143' TERM
 }
 
-# require_tools [EXTRA...]: gcloud and jq, plus any named extras.
-# shellcheck disable=SC2120
 require_tools() {
-  for tool in gcloud jq "$@"; do
+  for tool in gcloud jq; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found on PATH"
   done
 }
@@ -63,6 +60,7 @@ load_config() {
   key_project=${key_project%%/*}
   [ "$key_project" != "$KEEPER_PROJECT" ] || die "the key must live in another project than KEEPER_PROJECT"
   case "$MODULE" in
+    0x*[!0-9a-fA-F]*) die "MODULE must be a 20-byte hex address" ;;
     0x*) [ ${#MODULE} -eq 42 ] || die "MODULE must be a 20-byte hex address" ;;
     *) die "MODULE must be a 20-byte hex address" ;;
   esac
@@ -81,8 +79,8 @@ load_config() {
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
-  # `|` separates the variables because VOTE_OFFSETS contains commas.
-  ENV_VARS="^|^MODULE=$MODULE|KMS_KEY_VERSION=$KMS_KEY_VERSION|VOTE_OFFSETS=$VOTE_OFFSETS"
+  # Sorted by name, as check.sh reads them back; `|`-separated since VOTE_OFFSETS contains commas.
+  ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
   SECRETS="BASE_RPC_URL=$RPC_SECRET:latest"
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
@@ -141,33 +139,22 @@ get_iam() {
   printf '%s\n' "$iam_json"
 }
 
-# write_iam_if_changed RESOURCE FLAGS LIVE DESIRED gcloud-subcommand...: writes DESIRED in full with LIVE's etag.
-write_iam_if_changed() {
-  iam_resource=$1
-  iam_flags=$2
-  iam_live=$3
-  iam_desired=$4
-  shift 4
-  if ! policy_differs "$iam_live" "$iam_desired"; then
-    log "iam: $iam_resource unchanged"
-    return 0
-  fi
-  iam_etag=$(printf '%s\n' "$iam_live" | jq -r '.etag // empty')
-  iam_file=$TMP/policy.json
-  printf '%s\n' "$iam_desired" | jq --arg etag "$iam_etag" '.etag = $etag' >"$iam_file"
-  log "iam: writing $iam_resource"
-  # shellcheck disable=SC2086
-  gcloud "$@" set-iam-policy $iam_flags "$iam_resource" "$iam_file" >/dev/null
-}
-
-# set_iam_authoritative RESOURCE FLAGS DESIRED gcloud-subcommand...
-set_iam_authoritative() {
+# set_iam RESOURCE FLAGS DESIRED gcloud-subcommand...: writes DESIRED in full, with the live etag, unless it matches.
+set_iam() {
   set_iam_resource=$1
   set_iam_flags=$2
   set_iam_desired=$3
   shift 3
   set_iam_live=$(get_iam "$set_iam_resource" "$set_iam_flags" "$@")
-  write_iam_if_changed "$set_iam_resource" "$set_iam_flags" "$set_iam_live" "$set_iam_desired" "$@"
+  if ! policy_differs "$set_iam_live" "$set_iam_desired"; then
+    log "iam: $set_iam_resource unchanged"
+    return 0
+  fi
+  set_iam_etag=$(printf '%s\n' "$set_iam_live" | jq -r '.etag // empty')
+  printf '%s\n' "$set_iam_desired" | jq --arg etag "$set_iam_etag" '.etag = $etag' >"$TMP/policy.json"
+  log "iam: writing $set_iam_resource"
+  # shellcheck disable=SC2086
+  gcloud "$@" set-iam-policy $set_iam_flags "$set_iam_resource" "$TMP/policy.json" >/dev/null
 }
 
 # find_channel: name of the email notification channel for ALERT_EMAIL, or "".
@@ -186,7 +173,16 @@ find_alert() {
   printf '%s\n' "$alerts" | jq -c 'first(.[]) // empty'
 }
 
-job_exists() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
+describe_job() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
+
+describe_scheduler() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
+
+has_secret_version() {
+  versions=$(gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
+    die "cannot list versions of $RPC_SECRET"
+  require_json "$versions" "secret version list"
+  [ "$(printf '%s\n' "$versions" | jq 'length')" -gt 0 ]
+}
 
 # schedule_start CRON: seconds before the flip at which a "M H * * D" schedule fires.
 schedule_start() {
@@ -208,12 +204,7 @@ schedule_start() {
 
 # Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
 check_offsets_covered() {
-  starts=''
-  rest=$SCHEDULES
-  while [ -n "$rest" ]; do
-    case "$rest" in *";"*) cron=${rest%%;*} rest=${rest#*;} ;; *) cron=$rest rest='' ;; esac
-    starts="$starts $(schedule_start "$cron")"
-  done
+  starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
     covered=no
     for start in $starts; do
@@ -237,23 +228,13 @@ schedules() {
   done
 }
 
-scheduler_exists() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
-
-# stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists.
+# stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists, space-separated.
+# Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
 stale_schedulers() {
-  stale_configured=$(schedules | cut -f1)
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
-  printf '%s\n' "$stale_list" |
-    jq -r --arg job "$JOB" '.[].name | split("/") | last | select(. == $job or startswith($job + "-"))' |
-    while IFS= read -r stale_name; do
-      printf '%s\n' "$stale_configured" | grep -qx "$stale_name" || printf '%s\n' "$stale_name"
-    done
-}
-
-secret_versions() {
-  versions=$(gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
-    die "cannot list versions of $RPC_SECRET"
-  require_json "$versions" "secret version list"
-  printf '%s\n' "$versions" | jq 'length'
+  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg configured "$(schedules | cut -f1)" '
+    ($configured | split("\n")) as $configured
+    | [.[].name | split("/") | last | select((. == $job or startswith($job + "-")) and (IN($configured[]) | not))]
+    | join(" ")'
 }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseTransaction, WaitForTransactionReceiptTimeoutError, type Address, type Hex } from "viem";
+import { decodeErrorResult, parseTransaction, toFunctionSelector, WaitForTransactionReceiptTimeoutError, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
 import { castVote, VoteSent } from "../src/vote.ts";
 
@@ -41,7 +42,7 @@ function fakeChain(b: Behaviour = {}) {
 }
 
 const vote = { pools: [POOL], weights: [100n] };
-const far = BigInt(Date.now()) + 3_600_000n;
+const far = Date.now() + 3_600_000;
 
 test("signs with the confirmed nonce and the estimated fees, then verifies at the receipt block", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
@@ -71,7 +72,7 @@ test("a receipt that does not arrive in time is left to the next pass", async ()
 
 test("does not send once the deadline has passed", async () => {
   const { chain, sent } = fakeChain();
-  await assert.rejects(castVote(chain, signer, vote, false, BigInt(Date.now()) - 1n), /out of time/);
+  await assert.rejects(castVote(chain, signer, vote, false, Date.now() - 1), /out of time/);
   assert.equal(sent.length, 0);
 });
 
@@ -106,4 +107,10 @@ test("a receipt of an earlier vote under the same nonce means this one must be s
 
 test("a failed verification after mining is reported as sent", async () => {
   await assert.rejects(castVote(fakeChain({ verifyFails: true }).chain, signer, vote, false, far), VoteSent);
+});
+
+test("the module ABI names the Voter's errors that a simulated vote passes through", () => {
+  for (const name of ["EpochFlipInProgress", "EpochStale", "VotedAlready"]) {
+    assert.equal(decodeErrorResult({ abi: moduleAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
+  }
 });

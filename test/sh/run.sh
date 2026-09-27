@@ -1,6 +1,5 @@
 #!/bin/sh
-# run.sh [--update]: every script under $TEST_SH (default dash) against
-# test/sh/fake-gcloud, diffed against test/sh/golden/<case>.txt.
+# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud and diffs with golden/; --update rewrites it.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -57,13 +56,16 @@ golden_case deploy-no-secret fresh deploy.sh
 golden_case deploy-first first-deploy deploy.sh
 golden_case deploy-existing existing deploy.sh
 golden_case deploy-stale drift deploy.sh
+golden_case deploy-list-fails list-fails deploy.sh
 golden_case run-dry existing run.sh --dry-run --now
 golden_case run-bad-arg existing run.sh --later
 CONFIG=uncovered golden_case config-uncovered existing run.sh --now
 CONFIG=zeros golden_case config-zeros existing run.sh --now
+CONFIG=bad-module golden_case config-bad-module existing run.sh --now
 golden_case check-ok existing check.sh
 golden_case check-drift drift check.sh
 golden_case check-fresh fresh check.sh
+golden_case check-list-fails list-fails check.sh
 
 [ "$failures" -eq 0 ] || { printf '%s golden case(s) failed\n' "$failures"; exit 1; }
 printf 'all golden cases passed\n'

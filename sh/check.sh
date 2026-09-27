@@ -1,6 +1,5 @@
 #!/bin/sh
-# check.sh: live state vs config.env and policy/. Read-only.
-# Runs every check; exits 1 if any failed.
+# Compares the live project with config.env and policy/. Read-only; runs every check, exits 1 if any failed.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
@@ -23,18 +22,17 @@ expect() {
 }
 
 # Job
-job=$(job_exists) || die "job $JOB not found; run deploy.sh"
+job=$(describe_job) || die "job $JOB not found; run deploy.sh"
 require_json "$job" "job $JOB"
 task='.spec.template.spec.template.spec'
 expect "job service account" "$(json_field "$job" "$task.serviceAccountName")" "$KEEPER_SA"
-expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT_SECONDS"
+expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring")" "$TASK_TIMEOUT"
 expect "job max retries" "$(json_field "$job" "$task.maxRetries | tostring")" "$MAX_RETRIES"
 expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | tostring")" "1"
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
-expect "job env" "$(json_field "$job" "[$task.containers[0].env[]? | select(.value != null) | \"\(.name)=\(.value)\"] | sort | join(\"|\")")" \
-  "KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
-expect "job secrets" "$(json_field "$job" "[$task.containers[0].env[]? | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | join(\"|\")")" \
-  "$SECRETS"
+container_env="$task.containers[0].env[]?"
+expect "job env" "$(json_field "$job" "[$container_env | select(.value != null) | \"\(.name)=\(.value)\"] | sort | join(\"|\")")" "$ENV_VARS"
+expect "job secrets" "$(json_field "$job" "[$container_env | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | sort | join(\"|\")")" "$SECRETS"
 
 live_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
 if policy_differs "$live_policy" "$(render_policy job.iam.json.tmpl)"; then
@@ -47,7 +45,7 @@ fi
 # Schedules
 tab=$(printf '\t')
 while IFS="$tab" read -r name cron; do
-  if ! scheduler=$(scheduler_exists "$name"); then
+  if ! scheduler=$(describe_scheduler "$name"); then
     fail "scheduler job $name not found; run deploy.sh"
     continue
   fi
@@ -61,11 +59,11 @@ while IFS="$tab" read -r name cron; do
 done <<LIST
 $(schedules)
 LIST
-stale=$(stale_schedulers | paste -sd ' ' -)
+stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
 # Secret
-if [ "$(secret_versions)" -gt 0 ]; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
+if has_secret_version; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
 live_policy=$(get_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" secrets)
 if policy_differs "$live_policy" "$(render_policy secret.iam.json.tmpl)"; then
   fail "secret IAM policy differs from template"
@@ -74,7 +72,7 @@ else
   ok "secret IAM policy matches template"
 fi
 
-# Service accounts: no downloadable key, nobody can impersonate the keeper, no project-level role.
+# Service accounts
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||
   die "cannot list keys of $KEEPER_SA"
 require_json "$sa_keys" "key list of $KEEPER_SA"

@@ -6,6 +6,7 @@ import { base } from "viem/chains";
 import { derToSignature, kmsAccount, NoMetadataServer } from "../src/kms.ts";
 
 const N = hexToBigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+const KEY_VERSION = "projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1";
 
 function derInteger(value: bigint): number[] {
   const bytes = [...Buffer.from(numberToHex(value).slice(2).padStart(64, "0"), "hex")];
@@ -14,7 +15,7 @@ function derInteger(value: bigint): number[] {
   return [0x02, bytes.length, ...bytes];
 }
 
-/** DER as KMS returns it, optionally with the high-s form KMS may produce. */
+/** DER as KMS returns it. */
 function der(r: bigint, s: bigint): Uint8Array {
   const body = [...derInteger(r), ...derInteger(s)];
   return Uint8Array.from([0x30, body.length, ...body]);
@@ -34,7 +35,7 @@ function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
       assert.equal((init?.headers as Record<string, string>)["Metadata-Flavor"], "Google");
       return Response.json({ access_token: "tok", expires_in: 3600, token_type: "Bearer" });
     }
-    assert.equal(String(url), "https://cloudkms.googleapis.com/v1/projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1:asymmetricSign");
+    assert.equal(String(url), `https://cloudkms.googleapis.com/v1/${KEY_VERSION}:asymmetricSign`);
     assert.equal((init?.headers as Record<string, string>).authorization, "Bearer tok");
     const digest = Buffer.from((JSON.parse(String(init?.body)) as { digest: { sha256: string } }).digest.sha256, "base64");
     const sig = await sign({ hash: `0x${digest.toString("hex")}`, privateKey });
@@ -47,7 +48,7 @@ function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
 
 test("signs a transaction through KMS and the signature recovers to the keeper", async () => {
   const { fetchFn, calls } = fakeFetch();
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(KEY_VERSION, signer.address, fetchFn);
   const signed = (await account.signTransaction(tx)) as TransactionSerializedEIP1559;
   assert.equal(await recoverTransactionAddress({ serializedTransaction: signed }), signer.address);
   assert.equal(parseTransaction(signed).nonce, 1);
@@ -58,7 +59,7 @@ test("signs a transaction through KMS and the signature recovers to the keeper",
 
 test("normalizes a high-s signature", async () => {
   const { fetchFn } = fakeFetch({ highS: true });
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(KEY_VERSION, signer.address, fetchFn);
   const signed = await account.signTransaction(tx);
   assert.equal(signed, await signer.signTransaction(tx));
 });
@@ -72,10 +73,11 @@ test("rejects a key that does not sign for the keeper", async () => {
 
 test("rejects malformed DER", async () => {
   await assert.rejects(derToSignature(Uint8Array.from([0x31, 0x00]), keccak256("0x"), signer.address), /not a DER/);
+  await assert.rejects(derToSignature(Uint8Array.from([0x30, 0x04, 0x02, 0x00, 0x02, 0x00]), keccak256("0x"), signer.address), /not a DER/, "empty integers");
 });
 
 test("reports a missing metadata server distinctly", async () => {
   const { fetchFn } = fakeFetch({ metadata: false });
-  const account = kmsAccount("projects/p/locations/us/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", signer.address, fetchFn);
+  const account = kmsAccount(KEY_VERSION, signer.address, fetchFn);
   await assert.rejects(account.signTransaction(tx), NoMetadataServer);
 });

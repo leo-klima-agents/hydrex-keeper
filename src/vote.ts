@@ -1,4 +1,4 @@
-import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
+import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type Hex, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi, voterAbi } from "./abi.ts";
 import { readMany, type Chain, type Client } from "./chain.ts";
@@ -14,7 +14,7 @@ export class VoteSent extends Error {}
 const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
-export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: bigint): Promise<void> {
+export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: number): Promise<void> {
   const { client, module, keeper, voter, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
@@ -27,8 +27,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
-  // A vote still pending under `latest` is replaced by paying a quarter more than it did when its fees are
-  // known (sent by this process); a pending vote of unknown fees is queued behind instead.
+  // A pending vote this process sent is replaced at a quarter higher fees; one of unknown fees is queued behind.
   const lastSent = lastSentBy.get(client);
   const nonce = pending > latest && lastSent?.nonce !== latest ? pending : latest;
   const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
@@ -50,7 +49,7 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     log.warning("signing skipped: no KMS key configured");
     return;
   }
-  let signed: `0x${string}`;
+  let signed: Hex;
   try {
     signed = await account.signTransaction(tx);
   } catch (error) {
@@ -65,11 +64,11 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
     return;
   }
 
-  if (BigInt(Date.now()) >= until) throw new Error("out of time before sending");
+  if (Date.now() >= until) throw new Error("out of time before sending");
   const hash = await client.sendRawTransaction({ serializedTransaction: signed });
   lastSentBy.set(client, { nonce, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas! });
   log.info("vote sent", { hash });
-  const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, Number(until - BigInt(Date.now()))));
+  const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT, until - Date.now()));
   let receipt;
   try {
     receipt = await client.waitForTransactionReceipt({ hash, timeout });

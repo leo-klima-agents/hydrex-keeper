@@ -1,7 +1,6 @@
 #!/bin/sh
-# gcloud stub for the golden tests. Logs each call to $FAKE_GCLOUD_LOG; answers
-# from canned state per $FAKE_GCLOUD_SCENARIO. In the log, --source paths become
-# <repo> and set-iam-policy files become their canonical JSON.
+# gcloud stub for the golden tests: logs each call to $FAKE_GCLOUD_LOG and answers from the $FAKE_GCLOUD_SCENARIO state.
+# In the log, --source paths become <repo> and set-iam-policy files their canonical JSON.
 set -eu
 
 : "${FAKE_GCLOUD_LOG:?}" "${FAKE_GCLOUD_SCENARIO:?}"
@@ -18,13 +17,14 @@ email=hydrex-admin@example.com
 channel=projects/$project/notificationChannels/1234567890
 run_uri=https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/$job:run
 
-# What exists; drift bends the live state.
-has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no
+# What exists; drift bends the live state; list-fails denies listing scheduler jobs.
+has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no list_fails=no
 case "$FAKE_GCLOUD_SCENARIO" in
   fresh) has_sas=no has_secret=no has_version=no has_channel=no has_alert=no has_job=no has_scheduler=no ;;
   first-deploy) has_job=no has_scheduler=no ;;
   existing) ;;
   drift) drift=yes ;;
+  list-fails) list_fails=yes ;;
   *) printf 'fake-gcloud: unknown scenario %s\n' "$FAKE_GCLOUD_SCENARIO" >&2; exit 98 ;;
 esac
 
@@ -40,7 +40,8 @@ job_json() {
     "$env" "$region" "$project" "$job" "$retries" "$sa"
 }
 
-scheduler_json() { # NAME
+# scheduler_json NAME
+scheduler_json() {
   case "$1" in "$job-1") cron='50 23 * * 2' ;; *) cron='40 23 * * 3' ;; esac
   if [ "$drift" = yes ] && [ "$1" = "$job-2" ]; then state=PAUSED; else state=ENABLED; fi
   printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
@@ -87,8 +88,8 @@ alert_json() {
 
 log_call() { printf 'gcloud %s\n' "$*" >>"$FAKE_GCLOUD_LOG"; }
 
-# Checks the etag matches what the fake returned; logs the file as canonical JSON.
-log_set_policy() { # EXPECTED_ETAG ARGS...
+# log_set_policy EXPECTED_ETAG ARGS...: checks the etag, then logs the policy file as canonical JSON.
+log_set_policy() {
   expected_etag=$1
   shift
   file=$(eval "printf '%s' \"\$$#\"")
@@ -99,7 +100,8 @@ log_set_policy() { # EXPECTED_ETAG ARGS...
   log_call "${logged# } $(jq -c -S . "$file")"
 }
 
-missing() { # WHAT
+# missing WHAT
+missing() {
   printf 'ERROR: (gcloud) %s not found\n' "$1" >&2
   exit 1
 }
@@ -177,6 +179,7 @@ case "$*" in
     log_call "$@" ;;
   "scheduler jobs list "*)
     log_call "$@"
+    [ "$list_fails" = no ] || { printf 'ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED\n' >&2; exit 1; }
     names=''
     [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/$job-2\""
     [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job\",\"projects/$project/locations/$region/jobs/other-job\""

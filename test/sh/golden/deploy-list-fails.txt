@@ -6,9 +6,11 @@ gcloud scheduler jobs update http hydrex-keeper-1 --location=us-central1 --proje
 gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs update http hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --schedule=40 23 * * 3 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
-exit=0
+exit=1
 --- output ---
 == 1/3 job
 == 2/3 job IAM
 iam: hydrex-keeper unchanged
 == 3/3 schedules
+ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED
+error: cannot list scheduler jobs

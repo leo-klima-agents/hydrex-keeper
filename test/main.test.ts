@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { missed, passTimes, schedule } from "../src/main.ts";
 
-const A = "0x000000000000000000000000000000000000000a";
-const B = "0x000000000000000000000000000000000000000b";
+const flip = 1_790_812_800n;
 
 test("pass times are the offsets due within the horizon, earliest first, deduplicated", () => {
-  const flip = 1_790_812_800n;
   assert.deepEqual(passTimes(flip, [3600n, 600n, 60n], flip - 7200n), [flip - 3600n], "the rest is beyond the horizon");
   assert.deepEqual(passTimes(flip, [3600n, 600n, 60n], flip - 3600n), [flip - 600n, flip - 60n], "an offset exactly now is skipped");
   assert.deepEqual(passTimes(flip, [60n, 60n, 600n], flip - 3600n), [flip - 600n, flip - 60n]);
@@ -16,9 +14,7 @@ test("pass times are the offsets due within the horizon, earliest first, dedupli
   assert.deepEqual(passTimes(flip, [86400n, 600n], flip - 86400n - 600n, 100_000n), [flip - 86400n, flip - 600n]);
 });
 
-
 test("missed tells a late start from a restart after the flip", () => {
-  const flip = 1_790_812_800n;
   assert.equal(missed(flip, [600n, 5n], flip - 300n), true, "the 600 s pass was due 5 minutes ago");
   assert.equal(missed(flip, [600n, 5n], flip + 100n), true, "both passes were due within the last hour");
   assert.equal(missed(flip + 604800n, [86400n, 600n, 5n], flip + 100n), false, "next week's passes are not due");
@@ -26,7 +22,6 @@ test("missed tells a late start from a restart after the flip", () => {
 });
 
 test("schedule runs what is due, a missed pass right away, or nothing", () => {
-  const flip = 1_790_812_800n;
   const offsets = [86400n, 600n, 5n];
   assert.deepEqual(schedule(flip, offsets, flip - 1200n, false), { times: [flip - 600n, flip - 5n] });
   assert.deepEqual(schedule(flip, offsets, flip - 1200n, true), { times: [flip - 1200n] });
