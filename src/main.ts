@@ -109,12 +109,6 @@ async function main(): Promise<number> {
   if (times.length === 0) return 0;
   const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
   const run: Run = { chain, whitelist, prices: priceFeed(), account, dryRun };
-  const pools = whitelist.map((w) => w.pool);
-  try {
-    run.layout = await readLayout(chain, pools);
-  } catch (error) {
-    log.warning("layout read failed; the first pass retries it", { error: errorMessage(error) });
-  }
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
