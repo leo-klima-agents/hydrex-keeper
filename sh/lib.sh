@@ -10,7 +10,7 @@ logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanage
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-HORIZON=3600 # seconds; same as HORIZON in src/main.ts
+HORIZON=3600   # seconds; same as HORIZON in src/main.ts
 FLIP_WEEKDAY=4 # Thursday 00:00 UTC
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

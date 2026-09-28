@@ -1,4 +1,15 @@
-import { bytesToBigInt, hexToBigInt, keccak256, numberToHex, recoverAddress, serializeTransaction, type Address, type Hex, type LocalAccount, type Signature } from "viem";
+import {
+  bytesToBigInt,
+  hexToBigInt,
+  keccak256,
+  numberToHex,
+  recoverAddress,
+  serializeTransaction,
+  type Address,
+  type Hex,
+  type LocalAccount,
+  type Signature,
+} from "viem";
 import { toAccount } from "viem/accounts";
 
 const METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -12,7 +23,8 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
 
   async function accessToken(): Promise<string> {
     if (token && Date.now() < token.expires) return token.value;
-    const response = await fetchFn(METADATA_URL, { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(5_000) }).catch((error: unknown) => {
+    const request = { headers: { "Metadata-Flavor": "Google" }, signal: AbortSignal.timeout(5_000) };
+    const response = await fetchFn(METADATA_URL, request).catch((error: unknown) => {
       throw new NoMetadataServer(`metadata server unreachable: ${String(error)}`);
     });
     if (!response.ok) throw new Error(`metadata server: HTTP ${response.status}`);
@@ -54,7 +66,12 @@ export async function derToSignature(der: Uint8Array, hash: Hex, address: Addres
   let s = bytesToBigInt(der.subarray(6 + rLength, 6 + rLength + sLength));
   if (s > SECP256K1_N / 2n) s = SECP256K1_N - s;
   for (const yParity of [0, 1]) {
-    const signature: Signature = { r: numberToHex(r, { size: 32 }), s: numberToHex(s, { size: 32 }), yParity, v: BigInt(27 + yParity) };
+    const signature: Signature = {
+      r: numberToHex(r, { size: 32 }),
+      s: numberToHex(s, { size: 32 }),
+      yParity,
+      v: BigInt(27 + yParity),
+    };
     if ((await recoverAddress({ hash, signature })).toLowerCase() === address.toLowerCase()) return signature;
   }
   throw new Error(`KMS key does not sign for ${address}`);

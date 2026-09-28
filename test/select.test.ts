@@ -7,7 +7,12 @@ const A = "0x000000000000000000000000000000000000000a" as Address;
 const B = "0x000000000000000000000000000000000000000b" as Address;
 const C = "0x000000000000000000000000000000000000000c" as Address;
 
-const candidate = (pool: Address, rewardsUsd: number, otherVotes: bigint, ownVotes = 0n): Candidate => ({ pool, rewardsUsd, otherVotes, ownVotes });
+const candidate = (pool: Address, rewardsUsd: number, otherVotes: bigint, ownVotes = 0n): Candidate => ({
+  pool,
+  rewardsUsd,
+  otherVotes,
+  ownVotes,
+});
 
 /** Best expected value over a fine grid of splits between two pools. */
 function gridBest(candidates: Candidate[], power: bigint): number {
@@ -46,7 +51,8 @@ test("a pool nobody voted for gets a small share, not everything", () => {
 test("shares below a tenth of a percent are dropped and the rest re-solved", () => {
   assert.deepEqual(allocate([candidate(A, 1000, 1000n), candidate(B, 1, 1000n)], 1000n), [1, 0]);
   const y = allocate([candidate(A, 1000, 1000n), candidate(B, 1000, 1000n), candidate(C, 0.5, 1000n)], 1000n)!;
-  assert.deepEqual(y.map((f) => Math.round(f * 100)), [50, 50, 0]);
+  const percents = y.map((f) => Math.round(f * 100));
+  assert.deepEqual(percents, [50, 50, 0]);
 });
 
 test("keeps the current vote unless the gain is at least one percent", () => {

@@ -1,8 +1,10 @@
 // JSON lines on stdout; Cloud Logging reads `severity` and `message`.
 type Fields = Record<string, unknown>;
 
+const bigints = (_: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
+
 function emit(severity: "INFO" | "WARNING" | "ERROR", message: string, fields: Fields): void {
-  process.stdout.write(JSON.stringify({ severity, message, ...fields }, (_, v: unknown) => (typeof v === "bigint" ? v.toString() : v)) + "\n");
+  process.stdout.write(JSON.stringify({ severity, message, ...fields }, bigints) + "\n");
 }
 
 export const log = {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud and diffs with golden/; --update rewrites it.
+# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud.sh and diffs with golden/.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -8,7 +8,10 @@ update=no
 case "$#:${1:-}" in
   0:) ;;
   1:--update) update=yes ;;
-  *) printf 'usage: %s [--update]\n' "$0" >&2; exit 2 ;;
+  *)
+    printf 'usage: %s [--update]\n' "$0" >&2
+    exit 2
+    ;;
 esac
 
 tmp=$(mktemp -d)
@@ -16,12 +19,12 @@ trap 'rm -rf "$tmp"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$tmp/bin"
-ln -s "$root/test/sh/fake-gcloud" "$tmp/bin/gcloud"
+ln -s "$root/test/sh/fake-gcloud.sh" "$tmp/bin/gcloud"
 PATH=$tmp/bin:$PATH
 export PATH
 failures=0
 
-# golden_case NAME SCENARIO CONFIG SCRIPT [ARGS...]: runs SCRIPT with config/CONFIG.env, appends the exit code, compares.
+# golden_case NAME SCENARIO CONFIG SCRIPT [ARGS...]: runs SCRIPT with config/CONFIG.env and compares.
 golden_case() {
   name=$1
   scenario=$2
@@ -33,7 +36,10 @@ golden_case() {
   rc=0
   FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/$config.env \
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
-  { printf 'exit=%s\n--- output ---\n' "$rc"; cat "$tmp/$name.out"; } >>"$log"
+  {
+    printf 'exit=%s\n--- output ---\n' "$rc"
+    cat "$tmp/$name.out"
+  } >>"$log"
   golden=$root/test/sh/golden/$name.txt
   if grep -Eq '^exit=12[67]$' "$log"; then # 126/127: broken script
     printf 'FAIL    %s: exit 126/127\n' "$name"
@@ -68,5 +74,8 @@ golden_case check-drift drift keeper check.sh
 golden_case check-fresh fresh keeper check.sh
 golden_case check-list-fails list-fails keeper check.sh
 
-[ "$failures" -eq 0 ] || { printf '%s golden case(s) failed\n' "$failures"; exit 1; }
+[ "$failures" -eq 0 ] || {
+  printf '%s golden case(s) failed\n' "$failures"
+  exit 1
+}
 printf 'all golden cases passed\n'

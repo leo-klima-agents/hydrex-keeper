@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hexToBigInt, keccak256, numberToHex, parseTransaction, recoverTransactionAddress, serializeTransaction, type Hex, type TransactionSerializedEIP1559 } from "viem";
+import {
+  hexToBigInt,
+  keccak256,
+  numberToHex,
+  parseTransaction,
+  recoverTransactionAddress,
+  serializeTransaction,
+  type Hex,
+  type TransactionSerializedEIP1559,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount, sign } from "viem/accounts";
 import { base } from "viem/chains";
 import { derToSignature, kmsAccount, NoMetadataServer } from "../src/kms.ts";
@@ -23,7 +32,15 @@ function der(r: bigint, s: bigint): Uint8Array {
 
 const privateKey = generatePrivateKey();
 const signer = privateKeyToAccount(privateKey);
-const tx = { chainId: base.id, to: signer.address, nonce: 1, gas: 100_000n, maxFeePerGas: 10n, maxPriorityFeePerGas: 1n, data: "0x1234" as Hex };
+const tx = {
+  chainId: base.id,
+  to: signer.address,
+  nonce: 1,
+  gas: 100_000n,
+  maxFeePerGas: 10n,
+  maxPriorityFeePerGas: 1n,
+  data: "0x1234" as Hex,
+};
 
 /** fetch stub: metadata token, then KMS signing with the local key in DER, high-s when asked. */
 function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
@@ -37,8 +54,9 @@ function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
     }
     assert.equal(String(url), `https://cloudkms.googleapis.com/v1/${KEY_VERSION}:asymmetricSign`);
     assert.equal((init?.headers as Record<string, string>).authorization, "Bearer tok");
-    const digest = Buffer.from((JSON.parse(String(init?.body)) as { digest: { sha256: string } }).digest.sha256, "base64");
-    const sig = await sign({ hash: `0x${digest.toString("hex")}`, privateKey });
+    const { digest } = JSON.parse(String(init?.body)) as { digest: { sha256: string } };
+    const hash = Buffer.from(digest.sha256, "base64");
+    const sig = await sign({ hash: `0x${hash.toString("hex")}`, privateKey });
     let s = hexToBigInt(sig.s);
     if (options.highS) s = N - s;
     return Response.json({ signature: Buffer.from(der(hexToBigInt(sig.r), s)).toString("base64") });
@@ -73,7 +91,11 @@ test("rejects a key that does not sign for the keeper", async () => {
 
 test("rejects malformed DER", async () => {
   await assert.rejects(derToSignature(Uint8Array.from([0x31, 0x00]), keccak256("0x"), signer.address), /not a DER/);
-  await assert.rejects(derToSignature(Uint8Array.from([0x30, 0x04, 0x02, 0x00, 0x02, 0x00]), keccak256("0x"), signer.address), /not a DER/, "empty integers");
+  await assert.rejects(
+    derToSignature(Uint8Array.from([0x30, 0x04, 0x02, 0x00, 0x02, 0x00]), keccak256("0x"), signer.address),
+    /not a DER/,
+    "empty integers",
+  );
 });
 
 test("reports a missing metadata server distinctly", async () => {

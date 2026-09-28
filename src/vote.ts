@@ -1,7 +1,14 @@
-import { encodeFunctionData, WaitForTransactionReceiptTimeoutError, type Address, type Hex, type LocalAccount, type TransactionSerializableEIP1559 } from "viem";
+import {
+  encodeFunctionData,
+  WaitForTransactionReceiptTimeoutError,
+  type Address,
+  type Hex,
+  type LocalAccount,
+  type TransactionSerializableEIP1559,
+} from "viem";
 import { base } from "viem/chains";
-import { moduleAbi, voterAbi } from "./abi.ts";
-import { readMany, type Chain, type Client } from "./chain.ts";
+import { moduleAbi } from "./abi.ts";
+import { readMany, voterCall, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import type { Vote } from "./select.ts";
@@ -14,8 +21,14 @@ export class VoteSent extends Error {}
 const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
-export async function castVote(chain: Chain, account: LocalAccount | undefined, vote: Vote, dryRun: boolean, until: number): Promise<void> {
-  const { client, module, keeper, voter, conduit } = chain;
+export async function castVote(
+  chain: Chain,
+  account: LocalAccount | undefined,
+  vote: Vote,
+  dryRun: boolean,
+  until: number,
+): Promise<void> {
+  const { client, module, keeper, conduit } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
@@ -73,22 +86,23 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   try {
     receipt = await client.waitForTransactionReceipt({ hash, timeout });
   } catch (error) {
-    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) throw new VoteSent(`vote ${hash}: outcome unknown: ${describe(error)}`);
+    if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
+      throw new VoteSent(`vote ${hash}: outcome unknown: ${describe(error)}`);
+    }
     log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
     return;
   }
-  if (receipt.transactionHash !== hash) throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
+  if (receipt.transactionHash !== hash) {
+    throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
+  }
   if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
+  const calls = [
+    ...vote.pools.map((_, i) => voterCall(chain, "poolVote", [conduit, BigInt(i)])),
+    ...vote.pools.map((pool) => voterCall(chain, "votes", [conduit, pool])),
+  ];
   let recorded: (Address | bigint)[];
   try {
-    recorded = await readMany<Address | bigint>(
-      client,
-      [
-        ...vote.pools.map((_, i) => ({ address: voter, abi: voterAbi, functionName: "poolVote", args: [conduit, BigInt(i)] })),
-        ...vote.pools.map((pool) => ({ address: voter, abi: voterAbi, functionName: "votes", args: [conduit, pool] })),
-      ],
-      { blockNumber: receipt.blockNumber },
-    );
+    recorded = await readMany<Address | bigint>(client, calls, { blockNumber: receipt.blockNumber });
   } catch (error) {
     throw new VoteSent(`vote ${hash} mined in block ${receipt.blockNumber}, verification failed: ${describe(error)}`);
   }
@@ -99,8 +113,10 @@ export async function castVote(chain: Chain, account: LocalAccount | undefined, 
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
 }
 
+type Promises<T extends readonly unknown[]> = { [K in keyof T]: Promise<T[K]> };
+
 /** Like Promise.all, but the rejection reported is the earliest in the list, not the earliest in time. */
-async function allOrFirstFailure<T extends readonly unknown[]>(promises: { [K in keyof T]: Promise<T[K]> }): Promise<T> {
+async function allOrFirstFailure<T extends readonly unknown[]>(promises: Promises<T>): Promise<T> {
   const settled = await Promise.allSettled(promises);
   const failure = settled.find((s) => s.status === "rejected");
   if (failure) throw failure.reason;

@@ -25,7 +25,10 @@ case "$FAKE_GCLOUD_SCENARIO" in
   existing) ;;
   drift) drift=yes ;;
   list-fails) list_fails=yes ;;
-  *) printf 'fake-gcloud: unknown scenario %s\n' "$FAKE_GCLOUD_SCENARIO" >&2; exit 98 ;;
+  *)
+    printf 'fake-gcloud: unknown scenario %s\n' "$FAKE_GCLOUD_SCENARIO" >&2
+    exit 98
+    ;;
 esac
 
 job_json() {
@@ -94,9 +97,15 @@ log_set_policy() {
   shift
   file=$(eval "printf '%s' \"\$$#\"")
   [ "$(jq -r '.etag // ""' "$file")" = "$expected_etag" ] ||
-    { printf 'fake-gcloud: etag %s, expected %s\n' "$(jq -r .etag "$file")" "$expected_etag" >&2; exit 96; }
+    {
+      printf 'fake-gcloud: etag %s, expected %s\n' "$(jq -r .etag "$file")" "$expected_etag" >&2
+      exit 96
+    }
   logged=''
-  while [ $# -gt 1 ]; do logged="$logged $1"; shift; done
+  while [ $# -gt 1 ]; do
+    logged="$logged $1"
+    shift
+  done
   log_call "${logged# } $(jq -c -S . "$file")"
 }
 
@@ -108,87 +117,114 @@ missing() {
 
 case "$*" in
   "services enable "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "iam service-accounts describe "*)
     log_call "$@"
     [ "$has_sas" = yes ] || missing "$4"
-    printf '%s\n' "$4" ;;
+    printf '%s\n' "$4"
+    ;;
   "iam service-accounts create "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "iam service-accounts keys list "*)
     log_call "$@"
     if [ "$drift" = yes ]; then
       printf '[{"keyType":"USER_MANAGED","name":"projects/%s/serviceAccounts/%s/keys/0123abcd"}]\n' "$project" "$keeper_sa"
     else
       printf '[]\n'
-    fi ;;
+    fi
+    ;;
   "iam service-accounts get-iam-policy "*)
     log_call "$@"
-    sa_policy_json ;;
+    sa_policy_json
+    ;;
   "secrets describe "*)
     log_call "$@"
     [ "$has_secret" = yes ] || missing "$3"
-    printf 'projects/%s/secrets/%s\n' "$project" "$3" ;;
+    printf 'projects/%s/secrets/%s\n' "$project" "$3"
+    ;;
   "secrets create "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "secrets get-iam-policy "*)
     log_call "$@"
-    secret_policy_json ;;
+    secret_policy_json
+    ;;
   "secrets set-iam-policy "*)
-    log_set_policy "$(secret_policy_json | jq -r .etag)" "$@" ;;
+    log_set_policy "$(secret_policy_json | jq -r .etag)" "$@"
+    ;;
   "secrets versions list "*)
     log_call "$@"
     if [ "$has_version" = yes ]; then
       printf '[{"name":"projects/%s/secrets/%s/versions/1","state":"ENABLED"}]\n' "$project" "$4"
     else
       printf '[]\n'
-    fi ;;
+    fi
+    ;;
   "beta monitoring channels list "*)
     log_call "$@"
-    if [ "$has_channel" = yes ]; then printf '[{"name":"%s","type":"email"}]\n' "$channel"; else printf '[]\n'; fi ;;
+    if [ "$has_channel" = yes ]; then printf '[{"name":"%s","type":"email"}]\n' "$channel"; else printf '[]\n'; fi
+    ;;
   "beta monitoring channels create "*)
     log_call "$@"
-    printf '%s\n' "$channel" ;;
+    printf '%s\n' "$channel"
+    ;;
   "monitoring policies list "*)
     log_call "$@"
-    if [ "$has_alert" = yes ]; then printf '[%s]\n' "$(alert_json)"; else printf '[]\n'; fi ;;
+    if [ "$has_alert" = yes ]; then printf '[%s]\n' "$(alert_json)"; else printf '[]\n'; fi
+    ;;
   "monitoring policies create "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "run jobs deploy "*)
     logged=''
     for arg in "$@"; do
       case "$arg" in --source=*) logged="$logged --source=<repo>" ;; *) logged="$logged $arg" ;; esac
     done
-    log_call "${logged# }" ;;
+    log_call "${logged# }"
+    ;;
   "run jobs get-iam-policy "*)
     log_call "$@"
-    job_policy_json ;;
+    job_policy_json
+    ;;
   "run jobs set-iam-policy "*)
-    log_set_policy "$(job_policy_json | jq -r .etag)" "$@" ;;
+    log_set_policy "$(job_policy_json | jq -r .etag)" "$@"
+    ;;
   "run jobs describe "*)
     log_call "$@"
     [ "$has_job" = yes ] || missing "$4"
-    job_json ;;
+    job_json
+    ;;
   "run jobs execute "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "scheduler jobs describe "*)
     log_call "$@"
     [ "$has_scheduler" = yes ] || missing "$4"
-    scheduler_json "$4" ;;
+    scheduler_json "$4"
+    ;;
   "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs delete "*)
-    log_call "$@" ;;
+    log_call "$@"
+    ;;
   "scheduler jobs list "*)
     log_call "$@"
-    [ "$list_fails" = no ] || { printf 'ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED\n' >&2; exit 1; }
+    [ "$list_fails" = no ] || {
+      printf 'ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED\n' >&2
+      exit 1
+    }
     names=''
     [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/$job-2\""
     [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job\",\"projects/$project/locations/$region/jobs/other-job\""
-    printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')" ;;
+    printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
+    ;;
   "projects get-iam-policy "*)
     log_call "$@"
-    project_policy_json ;;
+    project_policy_json
+    ;;
   *)
     log_call "UNEXPECTED:" "$@"
     printf 'fake-gcloud: unexpected call: gcloud %s\n' "$*" >&2
-    exit 99 ;;
+    exit 99
+    ;;
 esac

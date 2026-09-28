@@ -30,9 +30,11 @@ expect "job task timeout" "$(json_field "$job" "$task.timeoutSeconds | tostring"
 expect "job max retries" "$(json_field "$job" "$task.maxRetries | tostring")" "$MAX_RETRIES"
 expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | tostring")" "1"
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
-container_env="$task.containers[0].env[]?"
-expect "job env" "$(json_field "$job" "[$container_env | select(.value != null) | \"\(.name)=\(.value)\"] | sort | join(\"|\")")" "$ENV_VARS"
-expect "job secrets" "$(json_field "$job" "[$container_env | select(.valueFrom != null) | \"\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)\"] | sort | join(\"|\")")" "$SECRETS"
+container_env=$(json_field "$job" "[$task.containers[0].env[]?] | tojson")
+env_vars=$(json_field "$container_env" '[.[] | select(.value) | "\(.name)=\(.value)"] | sort | join("|")')
+secrets=$(json_field "$container_env" '[.[] | select(.valueFrom) | "\(.name)=\(.valueFrom.secretKeyRef | "\(.name):\(.key)")"] | sort | join("|")')
+expect "job env" "$env_vars" "$ENV_VARS"
+expect "job secrets" "$secrets" "$SECRETS"
 
 live_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
 if policy_differs "$live_policy" "$(render_policy job.iam.json.tmpl)"; then

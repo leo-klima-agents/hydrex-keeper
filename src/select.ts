@@ -18,15 +18,16 @@ export function expected(candidates: Candidate[], x: number[], power: bigint): n
 }
 
 /**
- * Water-filling: the marginal reward B·V/(V + x)² of a pool falls as x grows, so the optimum gives every funded pool
- * the same marginal λ: x = max(0, √(B·V/λ) − V), with λ such that Σx = v. Shares under MIN_SHARE are dropped and the
- * rest re-solved. Returns fractions of `power`, or null when nothing pays.
+ * Water-filling: the marginal reward B·V/(V + x)² of a pool falls as x grows, so the optimum gives every funded
+ * pool the same marginal λ: x = max(0, √(B·V/λ) − V), with λ such that Σx = v. Shares under MIN_SHARE are dropped
+ * and the rest re-solved. Returns fractions of `power`, or null when nothing pays.
  */
 export function allocate(candidates: Candidate[], power: bigint): number[] | null {
   let x = solve(candidates, power);
   while (x?.some((xi) => xi > 0 && xi < MIN_SHARE)) {
     const shares = x;
-    x = solve(candidates.map((c, i) => (shares[i]! >= MIN_SHARE ? c : { ...c, rewardsUsd: 0 })), power);
+    const kept = candidates.map((c, i) => (shares[i]! >= MIN_SHARE ? c : { ...c, rewardsUsd: 0 }));
+    x = solve(kept, power);
   }
   return x;
 }
@@ -50,14 +51,16 @@ function solve(candidates: Candidate[], power: bigint): number[] | null {
   return x.map((xi) => xi / total);
 }
 
-/** The allocation, and the vote to cast or null to keep the current one (nothing pays, or the gain is under MIN_GAIN). */
+/** The allocation and the vote to cast; the vote is null when nothing pays or the gain is under MIN_GAIN. */
 export function select(candidates: Candidate[], power: bigint): { fractions: number[] | null; vote: Vote | null } {
   const fractions = allocate(candidates, power);
   if (!fractions) return { fractions, vote: null };
   const weights = fractions.map((f) => Math.round(f * BPS));
+  const rounded = weights.map((w) => w / BPS);
+  const current = candidates.map((c) => Number(c.ownVotes) / Number(power));
+  const next = expected(candidates, rounded, power);
+  if (next - expected(candidates, current, power) <= MIN_GAIN * next) return { fractions, vote: null };
   const funded = candidates.flatMap((_, i) => (weights[i]! > 0 ? [i] : []));
-  const next = expected(candidates, weights.map((w) => w / BPS), power);
-  const current = expected(candidates, candidates.map((c) => Number(c.ownVotes) / Number(power)), power);
-  const vote = next - current > MIN_GAIN * next ? { pools: funded.map((i) => candidates[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) } : null;
+  const vote = { pools: funded.map((i) => candidates[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
   return { fractions, vote };
 }
