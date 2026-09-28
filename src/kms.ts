@@ -1,6 +1,5 @@
 import {
   bytesToBigInt,
-  hexToBigInt,
   keccak256,
   numberToHex,
   recoverAddress,
@@ -14,7 +13,7 @@ import { toAccount } from "viem/accounts";
 
 const METADATA_URL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const KMS_URL = "https://cloudkms.googleapis.com/v1/";
-const SECP256K1_N = hexToBigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 export class NoMetadataServer extends Error {}
 

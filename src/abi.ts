@@ -37,5 +37,3 @@ export const bribeAbi = parseAbi([
   "function rewardTokens(uint256 index) view returns (address)",
   "function rewardData(address token, uint256 epoch) view returns (uint256 periodFinish, uint256 rewardsPerEpoch, uint256 lastUpdateTime)",
 ]);
-
-export const erc20Abi = parseAbi(["function decimals() view returns (uint8)"]);

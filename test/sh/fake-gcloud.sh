@@ -204,7 +204,7 @@ case "$*" in
     [ "$has_scheduler" = yes ] || missing "$4"
     scheduler_json "$4"
     ;;
-  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs delete "*)
+  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs resume "* | "scheduler jobs delete "*)
     log_call "$@"
     ;;
   "scheduler jobs list "*)

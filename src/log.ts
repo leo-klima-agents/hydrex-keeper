@@ -13,7 +13,7 @@ export const log = {
   error: (message: string, fields: Fields = {}) => emit("ERROR", message, fields),
 };
 
-export function describe(error: unknown): string {
+export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     const { name, shortMessage, details } = error as Error & { shortMessage?: string; details?: string };
     if (shortMessage) return `${name}: ${shortMessage}${details ? ` (${details})` : ""}`;

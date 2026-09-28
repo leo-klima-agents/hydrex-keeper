@@ -1,5 +1,5 @@
-import { zeroAddress, type Address } from "viem";
-import { bribeAbi, erc20Abi, veAbi } from "./abi.ts";
+import { erc20Abi, zeroAddress, type Address } from "viem";
+import { bribeAbi, veAbi } from "./abi.ts";
 import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
@@ -12,27 +12,35 @@ type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; ownVotes
 type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
 
 /** What rarely changes within an epoch: gauges, bribe contracts, their reward tokens. */
-export type Static = { pools: Address[]; gauges: Address[]; bribes: Address[]; lengths: bigint[]; slots: Slot[] };
+export type Layout = { pools: Address[]; gauges: Address[]; bribes: Address[]; lengths: bigint[]; slots: Slot[] };
 
-/** A bribe contract gained a reward token since `readStatic`. */
-export class StaticChanged extends Error {}
+/** A bribe contract gained a reward token since `readLayout`. */
+export class LayoutChanged extends Error {}
+
+const calendarEpoch = () => (now() / WEEK) * WEEK;
 
 function bribeCall(address: Address, functionName: string, args: readonly unknown[] = []): Call {
   return { address, abi: bribeAbi, functionName, args };
 }
 
-/** Power is read at the calendar epoch start; `assertFresh` in main.ts checks that it is the Voter's epoch. */
+/** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
 export async function readEpoch(chain: Chain): Promise<Epoch> {
   const { client, ve, conduit } = chain;
   const [start, lastVoted, power] = (await readMany<bigint>(client, [
     voterCall(chain, "_epochTimestamp"),
     voterCall(chain, "lastVoted", [conduit]),
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, (now() / WEEK) * WEEK] },
+    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendarEpoch()] },
   ])) as [bigint, bigint, bigint];
   return { start, flip: start + WEEK, power, votedThisEpoch: lastVoted >= start };
 }
 
-export async function readStatic(chain: Chain, whitelist: Address[]): Promise<Static> {
+export function assertFresh(epoch: Epoch): void {
+  if (epoch.start !== calendarEpoch()) {
+    throw new Error(`Voter epoch ${epoch.start} is stale at ${now()}; minter not updated`);
+  }
+}
+
+export async function readLayout(chain: Chain, whitelist: Address[]): Promise<Layout> {
   const { client } = chain;
   const allGauges = await readMany<Address>(
     client,
@@ -78,7 +86,7 @@ export async function readStatic(chain: Chain, whitelist: Address[]): Promise<St
 /** This epoch's bribes and fees and the votes of each pool. */
 export async function readRewards(
   chain: Chain,
-  { pools, gauges, bribes, lengths, slots }: Static,
+  { pools, gauges, bribes, lengths, slots }: Layout,
   epoch: Epoch,
 ): Promise<PoolRewards[]> {
   const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(chain.client, [
@@ -90,7 +98,7 @@ export async function readRewards(
     ]),
     ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, epoch.start])),
   ]);
-  if (lengths.some((length, b) => results[b] !== length)) throw new StaticChanged("reward tokens changed");
+  if (lengths.some((length, b) => results[b] !== length)) throw new LayoutChanged("reward tokens changed");
   const perPool = results.slice(bribes.length, bribes.length + 3 * pools.length);
   const data = results.slice(bribes.length + 3 * pools.length) as [bigint, bigint, bigint][];
 

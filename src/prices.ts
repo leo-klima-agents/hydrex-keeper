@@ -1,12 +1,12 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Address } from "viem";
-import { describe, log } from "./log.ts";
+import { errorMessage, log } from "./log.ts";
 
 const ENDPOINT = "https://coins.llama.fi/prices/current/";
 const CHUNK = 50;
 const ATTEMPTS = 3;
-const TIMEOUT = 15_000;
-const REFRESH_BUDGET = 20_000; // ms before `until` under which the last set is reused
+const TIMEOUT_MS = 15_000;
+const REFRESH_BUDGET_MS = 20_000; // how close to `until` the last set is reused
 
 type LlamaPrices = { coins: Record<string, { price: number }> };
 
@@ -37,7 +37,7 @@ async function getJson(url: string, fetchFn: typeof fetch, until: number): Promi
     }
     try {
       const response = await fetchFn(url, {
-        signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT, until - Date.now()))),
+        signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, until - Date.now()))),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = (await response.json()) as Partial<LlamaPrices> | null;
@@ -55,12 +55,13 @@ export function priceFeed(fetchFn: typeof fetch = fetch): (tokens: Address[], un
   let last: { at: number; requested: Set<Address>; map: Prices } | undefined;
   return async (tokens, until = Infinity) => {
     const requested = tokens.map((t) => t.toLowerCase() as Address);
-    if (last && until - Date.now() < REFRESH_BUDGET && requested.every((t) => last!.requested.has(t))) return last.map;
+    if (last && until - Date.now() < REFRESH_BUDGET_MS && requested.every((t) => last!.requested.has(t)))
+      return last.map;
     try {
       last = { at: Date.now(), requested: new Set(requested), map: await prices(tokens, fetchFn, until) };
     } catch (error) {
       if (!last) throw error;
-      log.warning("using the last prices", { ageMs: Date.now() - last.at, reason: describe(error) });
+      log.warning("using the last prices", { ageMs: Date.now() - last.at, reason: errorMessage(error) });
     }
     return last.map;
   };

@@ -1,56 +1,26 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, now, WEEK, type Chain } from "./chain.ts";
+import { connect, now, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
-import { describe, log } from "./log.ts";
+import { errorMessage, log } from "./log.ts";
 import { priceFeed } from "./prices.ts";
-import { readEpoch, readRewards, readStatic, StaticChanged, type Epoch, type Static } from "./rewards.ts";
+import { assertFresh, LayoutChanged, readEpoch, readLayout, readRewards, type Layout } from "./read.ts";
+import { HORIZON, schedule } from "./schedule.ts";
 import { expected, select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
 
 const PUBLIC_RPC = "https://mainnet.base.org";
-const HORIZON = 3600n; // an execution runs the passes due within this many seconds
 const ATTEMPTS = 3;
-const RETRY_DELAY = 5_000;
-const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted
+const RETRY_DELAY_MS = 5_000;
+const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
 
 type Whitelist = { pool: Address; name: string }[];
-
-/** Times (unix seconds) of the passes due within the horizon, earliest first. */
-export function passTimes(flip: bigint, offsets: bigint[], at: bigint, horizon = HORIZON): bigint[] {
-  return [...new Set(offsets.map((o) => flip - o))]
-    .filter((t) => t > at && t <= at + horizon)
-    .sort((a, b) => (a < b ? -1 : 1));
-}
-
-/** Whether a pass fell due within the horizon before `at`. */
-export function missed(flip: bigint, offsets: bigint[], at: bigint): boolean {
-  return offsets.some((o) => flip - o <= at && flip - o > at - HORIZON);
-}
-
-type Schedule = { times: bigint[]; note?: string };
-
-/** The passes this execution runs: the ones due ahead, or a missed one right now, or none. */
-export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediately: boolean): Schedule {
-  if (immediately) return { times: [at] };
-  const times = passTimes(flip, offsets, at);
-  if (times.length) return { times };
-  if (flip > at && missed(flip, offsets, at)) return { times: [at], note: "running the missed pass now" };
-  return { times: [], note: `no pass due within ${HORIZON} s: flip at ${flip}, offsets ${offsets.join(",")}` };
-}
-
-function assertFresh(epoch: Epoch): void {
-  const t = now();
-  if (epoch.start !== (t / WEEK) * WEEK) {
-    throw new Error(`Voter epoch ${epoch.start} is stale at ${t}; minter not updated`);
-  }
-}
 
 type Run = {
   chain: Chain;
   whitelist: Whitelist;
-  static?: Static;
+  layout?: Layout;
   prices: ReturnType<typeof priceFeed>;
   account: LocalAccount | undefined;
   dryRun: boolean;
@@ -63,15 +33,15 @@ async function pass(run: Run, until: number): Promise<void> {
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
   const pools = whitelist.map((w) => w.pool);
-  run.static ??= await readStatic(chain, pools);
+  run.layout ??= await readLayout(chain, pools);
   let rewards;
   try {
-    rewards = await readRewards(chain, run.static, epoch);
+    rewards = await readRewards(chain, run.layout, epoch);
   } catch (error) {
-    if (!(error instanceof StaticChanged)) throw error;
+    if (!(error instanceof LayoutChanged)) throw error;
     log.info("reward tokens changed, re-reading");
-    run.static = await readStatic(chain, pools);
-    rewards = await readRewards(chain, run.static, epoch);
+    run.layout = await readLayout(chain, pools);
+    rewards = await readRewards(chain, run.layout, epoch);
   }
   const tokens = rewards.flatMap((p) => p.rewards.map((r) => r.token));
   const priced = await prices(tokens, until);
@@ -137,13 +107,13 @@ async function main(): Promise<number> {
   const { times, note } = schedule(flip, offsets, now(), immediately);
   if (note) log.warning(note, { flip });
   if (times.length === 0) return 0;
-  const deadline = Number(flip) * 1000 - LAST_MARGIN;
+  const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
   const run: Run = { chain, whitelist, prices: priceFeed(), account, dryRun };
   const pools = whitelist.map((w) => w.pool);
   try {
-    run.static = await readStatic(chain, pools);
+    run.layout = await readLayout(chain, pools);
   } catch (error) {
-    log.warning("static read failed; the first pass retries it", { error: describe(error) });
+    log.warning("layout read failed; the first pass retries it", { error: errorMessage(error) });
   }
 
   let failed = 0;
@@ -163,13 +133,13 @@ async function main(): Promise<number> {
         break;
       } catch (error) {
         const ms = Date.now() - started;
-        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY < until;
-        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: describe(error) });
+        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
+        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
         if (!retry) {
           failed++;
           break;
         }
-        await sleep(RETRY_DELAY);
+        await sleep(RETRY_DELAY_MS);
       }
     }
   }
@@ -182,12 +152,10 @@ function required(name: string): string {
   return value;
 }
 
-if (import.meta.main) {
-  main().then(
-    (code) => process.exit(code),
-    (error: unknown) => {
-      log.error("fatal", { error: describe(error) });
-      process.exit(1);
-    },
-  );
-}
+main().then(
+  (code) => process.exit(code),
+  (error: unknown) => {
+    log.error("fatal", { error: errorMessage(error) });
+    process.exit(1);
+  },
+);

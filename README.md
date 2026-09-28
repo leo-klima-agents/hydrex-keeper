@@ -66,9 +66,10 @@ script is safe to re-run.
 8. **Check for drift.** `sh/check.sh` compares the project with `config.env` and `policy/`, read-only: service accounts,
    keys, environment, secret, IAM, schedules and alert.
 
-CI runs `sh/check.sh` every Friday and on demand. It uses a read-only service account in the keeper project, reached by
-Workload Identity Federation from this repository through the `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT` repository
-variables, and builds `config.env` from the repository variables named in `config.env.example`.
+The `check` workflow runs `sh/check.sh` every Friday and on demand. It uses a read-only service account in the keeper
+project, reached by Workload Identity Federation from this repository through the `WIF_PROVIDER` and
+`CI_SERVICE_ACCOUNT` repository variables, and builds `config.env` from the repository variables named in
+`config.env.example`.
 
 Outside the scripts:
 
@@ -91,7 +92,7 @@ Outside the scripts:
 
 Run `npm ci`, `npm run typecheck` and `npm test`, and `npm run format` before committing.
 `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URLS=… npm run dry-run` runs one pass against Base without
-KMS and sends nothing. `test/sh/run.sh` runs the scripts under `dash` (or `$TEST_SH`) against a fake `gcloud` and
+KMS and sends nothing. `test/sh/golden.sh` runs the scripts under `dash` (or `$TEST_SH`) against a fake `gcloud` and
 compares the calls and output with `test/sh/golden/`; `--update` rewrites them.
 
 CI runs these checks, Prettier, `shellcheck` and `reuse lint`, and builds the image on every push. Dependabot updates

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { missed, passTimes, schedule } from "../src/main.ts";
+import { missed, passTimes, schedule } from "../src/schedule.ts";
 
 const flip = 1_790_812_800n;
 

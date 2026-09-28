@@ -45,8 +45,7 @@ else
 fi
 
 # Schedules
-tab=$(printf '\t')
-while IFS="$tab" read -r name cron; do
+while IFS="$TAB" read -r name cron; do
   if ! scheduler=$(describe_scheduler "$name"); then
     fail "scheduler job $name not found; run deploy.sh"
     continue

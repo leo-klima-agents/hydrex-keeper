@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroAddress, type Address } from "viem";
 import { readMany, WEEK, type Chain, type Client } from "../src/chain.ts";
-import { readEpoch, readRewards, readStatic, StaticChanged } from "../src/rewards.ts";
+import { LayoutChanged, readEpoch, readLayout, readRewards } from "../src/read.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [VOTER, CONDUIT, VE] = [addr(1), addr(2), addr(97)] as const;
@@ -94,8 +94,8 @@ function table({ address, functionName, args = [] }: Call): unknown {
 
 const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, votedThisEpoch: true };
 
-test("readStatic drops pools without a gauge and defaults missing decimals", async () => {
-  const s = await readStatic(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
+test("readLayout drops pools without a gauge and defaults missing decimals", async () => {
+  const s = await readLayout(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
   assert.deepEqual(s.pools, [POOL_A, POOL_B]);
   assert.deepEqual(s.bribes, [EXT_A, INT_A, EXT_B, INT_B]);
   assert.deepEqual(s.lengths, [2n, 0n, 1n, 1n]);
@@ -109,7 +109,7 @@ test("readStatic drops pools without a gauge and defaults missing decimals", asy
 
 test("readRewards maps rewards, liveness and votes per pool", async () => {
   const chain = fakeChain(table);
-  const s = await readStatic(chain, [POOL_A, POOL_B]);
+  const s = await readLayout(chain, [POOL_A, POOL_B]);
   assert.deepEqual(await readRewards(chain, s, epoch), [
     {
       pool: POOL_A,
@@ -139,7 +139,7 @@ test("readRewards maps rewards, liveness and votes per pool", async () => {
 
 test("readRewards is one multicall however many calls it makes; no calls make no request", async () => {
   const chain = fakeChain(table);
-  const s = await readStatic(chain, [POOL_A]);
+  const s = await readLayout(chain, [POOL_A]);
   multicalls = 0;
   const [pool] = await readRewards(chain, { ...s, slots: Array.from({ length: 200 }, () => s.slots[0]!) }, epoch);
   assert.equal(pool!.rewards.length, 200);
@@ -149,10 +149,10 @@ test("readRewards is one multicall however many calls it makes; no calls make no
 
 test("readRewards reports a grown reward token list", async () => {
   const chain = fakeChain(table);
-  const s = await readStatic(chain, [POOL_A]);
+  const s = await readLayout(chain, [POOL_A]);
   rewardTokens[INT_A] = [TOK_2];
   try {
-    await assert.rejects(readRewards(chain, s, epoch), StaticChanged);
+    await assert.rejects(readRewards(chain, s, epoch), LayoutChanged);
   } finally {
     rewardTokens[INT_A] = [];
   }

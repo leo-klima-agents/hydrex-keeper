@@ -10,8 +10,9 @@ logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanage
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-HORIZON=3600   # seconds; same as HORIZON in src/main.ts
+HORIZON=3600   # seconds; HORIZON in src/schedule.ts
 FLIP_WEEKDAY=4 # Thursday 00:00 UTC
+TAB=$(printf '\t')
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -238,7 +239,6 @@ stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
   printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg configured "$(schedules | cut -f1)" '
-    ($configured | split("\n")) as $configured
-    | [.[].name | split("/") | last | select((. == $job or startswith($job + "-")) and (IN($configured[]) | not))]
+    [.[].name | split("/") | last | select(. == $job or startswith($job + "-"))] - ($configured | split("\n"))
     | join(" ")'
 }
