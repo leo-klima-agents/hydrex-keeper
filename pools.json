@@ -1,6 +1,10 @@
 [
   { "pool": "0x7796fc53B75960A9762Ba267c19F5da9868B7853", "name": "wtSPYM/USDC" },
   { "pool": "0x51f0B932855986B0E621c9D4DB6Eee1f4644D3D2", "name": "HYDX/USDC" },
+  { "pool": "0x79C025fA131184853B4c720cD381cD97aAbeCE11", "name": "HYDX/USDC (2)" },
+  { "pool": "0xfF8B29e9f536F9A43DA7868011b7B667fa8d73f7", "name": "HYDX/USDC (3)" },
+  { "pool": "0x605abD1873737CA9a9Ec1CFa52CDfc8ef62c2E1d", "name": "HYDX/USDC (4)" },
+  { "pool": "0x89F29DD355d74e57389374a2AA5f9518a1e497aC", "name": "HYDX/WETH" },
   { "pool": "0x9849E92f29a9d3b89fe09694746E7AcF52bBc37D", "name": "wtGRND/USDC" },
   { "pool": "0x3f9b863EF4B295d6Ba370215bcCa3785FCC44f44", "name": "WETH/cbBTC" },
   { "pool": "0x680581725840958141Bb328666D8Fc185aC4FA49", "name": "BNKR/WETH" },
