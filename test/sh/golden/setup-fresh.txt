@@ -1,4 +1,4 @@
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com --project=hydrex-keeper-test
+gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com --project=hydrex-keeper-test
 gcloud iam service-accounts describe hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)
 gcloud iam service-accounts create hydrex-keeper --project=hydrex-keeper-test --display-name=hydrex-keeper --description=runs the job and signs with the key
 gcloud iam service-accounts describe hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)

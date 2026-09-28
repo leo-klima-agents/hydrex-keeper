@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=26"
+    "node": "26.10.0"
   },
   "scripts": {
     "dry-run": "node src/main.ts --dry-run --now",

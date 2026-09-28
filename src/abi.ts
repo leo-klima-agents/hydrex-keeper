@@ -10,9 +10,6 @@ export const moduleAbi = parseAbi([
   // Raised by the Voter; the module re-raises them.
   "error EpochFlipInProgress()",
   "error VoteDelayNotMet()",
-  "error EpochStale()",
-  "error LengthMismatch()",
-  "error VotedAlready()",
   "error InsufficientVotingPower()",
 ]);
 

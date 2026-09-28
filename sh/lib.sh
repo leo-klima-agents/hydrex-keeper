@@ -2,7 +2,11 @@
 # Sourced by the scripts in sh/.
 # shellcheck disable=SC2034
 
-SERVICES="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com"
+# cloudkms: the job signs with a key in another project, which needs the API enabled in both.
+# cloudresourcemanager, iamcredentials, sts: CI's Workload Identity Federation and check.sh.
+SERVICES="artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com
+cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
+logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
@@ -81,7 +85,7 @@ load_config() {
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
   # Sorted by name, as check.sh reads them back; `|`-separated since VOTE_OFFSETS contains commas.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
-  SECRETS="BASE_RPC_URL=$RPC_SECRET:latest"
+  SECRETS="BASE_RPC_URLS=$RPC_SECRET:latest"
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
 }

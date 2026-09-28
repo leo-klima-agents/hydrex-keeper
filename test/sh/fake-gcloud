@@ -36,7 +36,7 @@ job_json() {
     sa=$keeper_sa retries=3
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400,600,200,70,25,10,5"}'
   fi
-  printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,{"name":"BASE_RPC_URL","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}}],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \
+  printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,{"name":"BASE_RPC_URLS","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}}],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \
     "$env" "$region" "$project" "$job" "$retries" "$sa"
 }
 

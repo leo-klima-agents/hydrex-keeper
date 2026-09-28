@@ -18,7 +18,8 @@ next hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600, 200, 70,
 
 A pass reads this epoch's bribes and fees for each pool, prices them in USD with DefiLlama, and splits the conduit's
 votes to maximise the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn
-`usd × x / (V + x)`. Pools that would get under 0.1% are dropped, since each costs gas. Votes do not carry over, so
+`usd × x / (V + x)`. To save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for
+adds two bribe deposits to the transaction, and a share that small earns almost nothing. Votes do not carry over, so
 the first pass of an epoch votes; later passes vote again only if that pays at least 1% more. A pass takes under a
 second, and Base blocks are two seconds apart, so the last pass leaves a block of margin.
 
@@ -39,7 +40,7 @@ Every log line is JSON: each pass logs each pool's rewards and votes, the decisi
 
 ## Setup
 
-Needs `gcloud` and `jq`, and Node 26 for development. `sh/setup.sh` and `sh/deploy.sh` need `roles/owner` on the
+Needs `gcloud` and `jq`, and Node 26.10.0 for development. `sh/setup.sh` and `sh/deploy.sh` need `roles/owner` on the
 keeper project; `sh/check.sh` needs `roles/viewer`, `roles/iam.securityReviewer` and `roles/secretmanager.viewer`.
 Every script is safe to re-run.
 
@@ -90,7 +91,7 @@ Outside the scripts:
 ## Development
 
 Run `npm ci`, `npm run typecheck` and `npm test`.
-`MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URL=… npm run dry-run` runs one pass against Base without
+`MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URLS=… npm run dry-run` runs one pass against Base without
 KMS and sends nothing. `test/sh/run.sh` runs the scripts under `dash` (or `$TEST_SH`) against a fake `gcloud` and
 compares the calls and output with `test/sh/golden/`; `--update` rewrites them.
 

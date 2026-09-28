@@ -6,7 +6,7 @@ export type Vote = { pools: Address[]; weights: bigint[] };
 
 const BPS = 10_000;
 const MIN_GAIN = 0.01; // re-vote only when the expected reward improves by this fraction
-const MIN_SHARE = 0.001; // pools that would get less are dropped: each costs gas for cents
+const MIN_SHARE = 0.001; // pools that would get less are left out to save gas
 
 /** Expected USD of putting fractions `x` (of `power`) on the candidates: Σ B·x/(V + x). */
 export function expected(candidates: Candidate[], x: number[], power: bigint): number {

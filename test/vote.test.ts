@@ -110,7 +110,7 @@ test("a failed verification after mining is reported as sent", async () => {
 });
 
 test("the module ABI names the Voter's errors that a simulated vote passes through", () => {
-  for (const name of ["EpochFlipInProgress", "EpochStale", "VotedAlready"]) {
+  for (const name of ["EpochFlipInProgress", "VoteDelayNotMet", "InsufficientVotingPower"]) {
     assert.equal(decodeErrorResult({ abi: moduleAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
   }
 });

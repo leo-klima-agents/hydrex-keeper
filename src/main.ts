@@ -111,7 +111,7 @@ async function main(): Promise<number> {
   );
   if (whitelist.length === 0) throw new Error("pools.json is empty");
 
-  const chain = await connect(module, [...required("BASE_RPC_URL").split(","), PUBLIC_RPC].map((url) => url.trim()));
+  const chain = await connect(module, [...required("BASE_RPC_URLS").split(","), PUBLIC_RPC].map((url) => url.trim()));
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
 

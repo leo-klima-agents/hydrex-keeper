@@ -1,4 +1,4 @@
-FROM node:26-trixie-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS build
+FROM node:26.10.0-trixie-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 # typescript is also an optional peer of viem's abitype, so --omit=dev alone keeps it.
