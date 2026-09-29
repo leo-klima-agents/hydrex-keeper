@@ -49,5 +49,8 @@
   { "pool": "0x3AA880d06fA191581762976a0E0D1a2ecAe3874E", "name": "wtSGOV/USDC (2)" },
   { "pool": "0x130D86a1f1602DD03db95f01F2Dc3472423D5Beb", "name": "wtPPLT/USDC" },
   { "pool": "0x10c163eFEE859D3e6F17407B53CF1625Cbc5Bdd3", "name": "USDC/wtHOOD" },
-  { "pool": "0xaA98B6191Ba4a0385E4123979171DfFC4Deb6aEf", "name": "wtGOOGL/USDC" }
+  { "pool": "0xaA98B6191Ba4a0385E4123979171DfFC4Deb6aEf", "name": "wtGOOGL/USDC" },
+  { "pool": "0xc465CEad3eEC9bA6F2224727fc73B1685f6A652B", "name": "kVCM/USDC" },
+  { "pool": "0xEf96Ec76eEB36584FC4922e9fA268e0780170f33", "name": "kVCM/USDC (2)" },
+  { "pool": "0x3e5D77a94F7629aBB637B241D20a44fDE3C4c38f", "name": "kVCM/USDC (3)" }
 ]
