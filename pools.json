@@ -10,6 +10,8 @@
   { "pool": "0x680581725840958141Bb328666D8Fc185aC4FA49", "name": "BNKR/WETH" },
   { "pool": "0x02107bAb40bBA06AE979A15f67B5AD3853c5E116", "name": "USDC/VVV" },
   { "pool": "0x82dbe18346a8656dBB5E76F74bf3AE279cC16B29", "name": "WETH/USDC" },
+  { "pool": "0x50cBEfFdD5671C8CdcE323E0553F1990678100FC", "name": "ETH/USD₮0" },
+  { "pool": "0x84C7c4d9f5EDe7DF6Fa04cDB737C2F813C42e2f1", "name": "USDC/USDT" },
   { "pool": "0x0BA69825c4C033e72309F6AC0Bde0023b15Cc97c", "name": "USDC/cbBTC" },
   { "pool": "0xB20f018Dde5A6FE7F93c31Da05a5Da9EfBc52772", "name": "WETH/EURC" },
   { "pool": "0x6C072f7c8E54Ff147817d0Dd6Fd08734EDE6dE1f", "name": "SOL/cbBTC" },
@@ -52,5 +54,11 @@
   { "pool": "0xaA98B6191Ba4a0385E4123979171DfFC4Deb6aEf", "name": "wtGOOGL/USDC" },
   { "pool": "0xc465CEad3eEC9bA6F2224727fc73B1685f6A652B", "name": "kVCM/USDC" },
   { "pool": "0xEf96Ec76eEB36584FC4922e9fA268e0780170f33", "name": "kVCM/USDC (2)" },
-  { "pool": "0x3e5D77a94F7629aBB637B241D20a44fDE3C4c38f", "name": "kVCM/USDC (3)" }
+  { "pool": "0x3e5D77a94F7629aBB637B241D20a44fDE3C4c38f", "name": "kVCM/USDC (3)" },
+  { "pool": "0xBEEFE94c8aD530842bfE7d8B397938fFc1cb83b2", "name": "steakUSDC" },
+  { "pool": "0xbEEf050a7485865A7a8d8Ca0CC5f7536b7a3443e", "name": "steakETH" },
+  { "pool": "0xBeEF086b8807Dc5E5A1740C5E3a7C4c366eA6ab5", "name": "steakEURC" },
+  { "pool": "0x4C1aeda9B43EfcF1da1d1755b18802aAbe90f61E", "name": "eUSDC-49" },
+  { "pool": "0x07954BEB7e137101A7cbb3e47864C684aEC50524", "name": "eUSDC-100" },
+  { "pool": "0x882018411Bc4A020A879CEE183441fC9fa5D7f8B", "name": "ecbBTC-1" }
 ]
