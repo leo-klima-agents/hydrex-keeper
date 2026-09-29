@@ -6,7 +6,7 @@ script_dir=$(dirname -- "$0")
 . "$script_dir/lib.sh"
 
 [ $# -eq 0 ] || die "usage: ${0##*/}"
-require_tools
+require_tools gcloud jq
 load_config
 make_tmp
 
@@ -27,17 +27,23 @@ ensure_sa() {
 ensure_sa "$KEEPER_SA_NAME" "$KEEPER_SA" "runs the job and signs with the key"
 ensure_sa "$SCHEDULER_SA_NAME" "$SCHEDULER_SA" "starts the job on schedule"
 
-log "== 3/4 RPC secret"
-if gcloud secrets describe "$RPC_SECRET" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
-  log "exists: $RPC_SECRET"
-else
-  log "creating $RPC_SECRET"
-  gcloud secrets create "$RPC_SECRET" --project="$KEEPER_PROJECT" --replication-policy=automatic
-fi
-set_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
-has_secret_version || log "add the RPC URL: printf '%s' URL | gcloud secrets versions add $RPC_SECRET --project=$KEEPER_PROJECT --data-file=-"
+log "== 3/4 secrets"
+# ensure_secret NAME WHAT: NAME, readable by the job only; says how to add WHAT if it has no version.
+ensure_secret() {
+  if gcloud secrets describe "$1" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
+    log "exists: $1"
+  else
+    log "creating $1"
+    gcloud secrets create "$1" --project="$KEEPER_PROJECT" --replication-policy=automatic
+  fi
+  set_iam "$1" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
+  has_version "$1" || log "add the $2: printf '%s' '…' | gcloud secrets versions add $1 --project=$KEEPER_PROJECT --data-file=-"
+}
+ensure_secret "$RPC_SECRET" "RPC URLs"
+ensure_secret "$ALCHEMY_SECRET" "Alchemy API key"
+[ -z "$COINGECKO_SECRET" ] || ensure_secret "$COINGECKO_SECRET" "CoinGecko Demo API key"
 
-log "== 4/4 failure alert"
+log "== 4/4 alerts"
 channel=$(find_channel)
 if [ -n "$channel" ]; then
   log "exists: $channel"
@@ -46,7 +52,7 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-if [ -n "$(find_alert)" ]; then
+if [ -n "$(find_alert "$ALERT_NAME")" ]; then
   log "exists: $ALERT_NAME"
 else
   log "creating alert policy: $ALERT_NAME"
@@ -55,6 +61,24 @@ else
     --aggregation='{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}' \
     --notification-channels="$channel" \
     --documentation="A $JOB execution failed. Read its logs in Cloud Run before the epoch flips." >/dev/null
+fi
+if [ -n "$(find_alert "$START_ALERT_NAME")" ]; then
+  log "exists: $START_ALERT_NAME"
+else
+  log "creating alert policy: $START_ALERT_NAME"
+  # A log-based condition needs a policy file, and a notification rate limit.
+  jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
+    displayName: $name,
+    combiner: "OR",
+    conditions: [{displayName: "failed start attempts", conditionMatchedLog: {filter: $filter}}],
+    alertStrategy: {notificationRateLimit: {period: "300s"}},
+    notificationChannels: [$channel],
+    documentation: {
+      mimeType: "text/markdown",
+      content: "Cloud Scheduler failed to start \($job). It retries three times; if all failed, run sh/run.sh before the epoch flips."
+    }
+  }' >"$TMP/start-alert.json"
+  gcloud monitoring policies create --project="$KEEPER_PROJECT" --policy-from-file="$TMP/start-alert.json" >/dev/null
 fi
 
 log "set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:"

@@ -5,11 +5,16 @@ gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
 gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --managed-by=user --format=json
 gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --format=json
 gcloud projects get-iam-policy hydrex-keeper-test --format=json
+curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
+curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
 exit=0
 --- output ---
 ok: job service account is hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
@@ -18,7 +23,7 @@ ok: job max retries is 3
 ok: job task count is 1
 ok: job containers is 1
 ok: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=86400,600,200,70,25,10,5
-ok: job secrets is BASE_RPC_URLS=base-rpc-url:latest
+ok: job secrets is ALCHEMY_API_KEY=alchemy-api-key:latest|BASE_RPC_URLS=base-rpc-url:latest
 ok: job IAM policy matches template
 ok: hydrex-keeper-1 schedule is 50 23 * * 2
 ok: hydrex-keeper-1 time zone is Etc/UTC
@@ -26,20 +31,28 @@ ok: hydrex-keeper-1 target is https://run.googleapis.com/v2/projects/hydrex-keep
 ok: hydrex-keeper-1 method is POST
 ok: hydrex-keeper-1 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper-1 state is ENABLED
+ok: hydrex-keeper-1 retries is --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
 ok: hydrex-keeper-2 schedule is 40 23 * * 3
 ok: hydrex-keeper-2 time zone is Etc/UTC
 ok: hydrex-keeper-2 target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
 ok: hydrex-keeper-2 method is POST
 ok: hydrex-keeper-2 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper-2 state is ENABLED
+ok: hydrex-keeper-2 retries is --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
 ok: no stale scheduler job
 ok: base-rpc-url has an enabled version
-ok: secret IAM policy matches template
+ok: base-rpc-url IAM policy matches template
+ok: alchemy-api-key has an enabled version
+ok: alchemy-api-key IAM policy matches template
 ok: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has no user-managed keys
 ok: nobody can act as hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
 ok: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
-ok: alert enabled is true
-ok: alert notifies hydrex-admin@example.com
-ok: alert filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"
+ok: keeper 0x625cf6663d9d090535fbd57680bffe6fa0262434 holds 0.0050 ETH
+ok: "hydrex-keeper failed" enabled is true
+ok: "hydrex-keeper failed" notifies hydrex-admin@example.com
+ok: "hydrex-keeper failed" filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"
+ok: "hydrex-keeper start failed" enabled is true
+ok: "hydrex-keeper start failed" notifies hydrex-admin@example.com
+ok: "hydrex-keeper start failed" filter is resource.type="cloud_scheduler_job" AND resource.labels.job_id=~"^hydrex-keeper-[0-9]+$" AND jsonPayload.@type="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished" AND (severity>=ERROR OR httpRequest.status>=400)
 all checks passed

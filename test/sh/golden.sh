@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud.sh and diffs with golden/.
+# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud.sh and fake-curl.sh, and diffs with golden/.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -20,6 +20,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$tmp/bin"
 ln -s "$root/test/sh/fake-gcloud.sh" "$tmp/bin/gcloud"
+ln -s "$root/test/sh/fake-curl.sh" "$tmp/bin/curl"
 PATH=$tmp/bin:$PATH
 export PATH
 failures=0
@@ -64,6 +65,8 @@ golden_case deploy-first first-deploy keeper deploy.sh
 golden_case deploy-existing existing keeper deploy.sh
 golden_case deploy-stale drift keeper deploy.sh
 golden_case deploy-list-fails list-fails keeper deploy.sh
+golden_case deploy-spaces existing spaces deploy.sh
+golden_case deploy-coingecko existing coingecko deploy.sh
 golden_case run-dry existing keeper run.sh --dry-run --now
 golden_case run-bad-arg existing keeper run.sh --later
 golden_case config-uncovered existing uncovered run.sh --now

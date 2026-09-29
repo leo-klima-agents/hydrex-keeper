@@ -9,9 +9,14 @@ cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis
 logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
+# Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the first pass.
+SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-HORIZON=3600   # seconds; HORIZON in src/schedule.ts
-FLIP_WEEKDAY=4 # Thursday 00:00 UTC
+HORIZON=3600                   # seconds; HORIZON in src/schedule.ts
+FLIP_WEEKDAY=4                 # Thursday 00:00 UTC
+MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH: weeks of votes; check.sh fails below it
+# PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
+PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 TAB=$(printf '\t')
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -32,8 +37,9 @@ make_tmp() {
   trap 'exit 143' TERM
 }
 
+# require_tools TOOL...: dies unless every TOOL is on PATH.
 require_tools() {
-  for tool in gcloud jq; do
+  for tool in "$@"; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found on PATH"
   done
 }
@@ -41,7 +47,8 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES RPC_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES \
+    RPC_SECRET ALCHEMY_SECRET COINGECKO_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -52,6 +59,8 @@ load_config() {
   VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
+  ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
+  COINGECKO_SECRET=${COINGECKO_SECRET:-}
 
   for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
     eval "value=\${$required:-}"
@@ -86,9 +95,17 @@ load_config() {
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
   # Sorted by name, as check.sh reads them back; `|`-separated since VOTE_OFFSETS contains commas.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
-  SECRETS="BASE_RPC_URLS=$RPC_SECRET:latest"
+  SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest|BASE_RPC_URLS=$RPC_SECRET:latest"
+  SECRET_NAMES="$RPC_SECRET $ALCHEMY_SECRET"
+  if [ -n "$COINGECKO_SECRET" ]; then
+    SECRETS="$SECRETS|COINGECKO_API_KEY=$COINGECKO_SECRET:latest"
+    SECRET_NAMES="$SECRET_NAMES $COINGECKO_SECRET"
+  fi
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
+  # Cloud Scheduler logs an AttemptFinished entry for each attempt to start the job, at ERROR if it failed.
+  START_ALERT_NAME="$JOB start failed"
+  START_ALERT_FILTER="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^$JOB-[0-9]+\$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
 }
 
 # render_policy FILE: policy/FILE with the service accounts filled in.
@@ -170,10 +187,10 @@ find_channel() {
   printf '%s\n' "$channels" | jq -r 'first(.[] | .name) // ""'
 }
 
-# find_alert: the alert policy named ALERT_NAME as JSON, or "".
+# find_alert NAME: the alert policy named NAME as JSON, or "".
 find_alert() {
   alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" \
-    --filter="displayName=\"$ALERT_NAME\"" --format=json) || die "cannot list alert policies"
+    --filter="displayName=\"$1\"" --format=json) || die "cannot list alert policies"
   require_json "$alerts" "alert policy list"
   printf '%s\n' "$alerts" | jq -c 'first(.[]) // empty'
 }
@@ -182,11 +199,23 @@ describe_job() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$
 
 describe_scheduler() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
-has_secret_version() {
-  versions=$(gcloud secrets versions list "$RPC_SECRET" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
-    die "cannot list versions of $RPC_SECRET"
+# has_version SECRET: whether SECRET has an enabled version.
+has_version() {
+  versions=$(gcloud secrets versions list "$1" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
+    die "cannot list versions of $1"
   require_json "$versions" "secret version list"
   [ "$(printf '%s\n' "$versions" | jq 'length')" -gt 0 ]
+}
+
+# rpc METHOD PARAMS: the result of a JSON-RPC call to the first of PUBLIC_RPCS that answers.
+rpc() {
+  for rpc_url in $PUBLIC_RPCS; do
+    rpc_reply=$(curl -sS --max-time 15 -H 'content-type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$rpc_url" 2>&1) &&
+      printf '%s\n' "$rpc_reply" | jq -er '.result' 2>/dev/null && return 0
+    log "$1 failed on $rpc_url: $rpc_reply"
+  done
+  die "$1 failed on every public Base node"
 }
 
 # schedule_start CRON: seconds before the flip at which a "M H * * D" schedule fires.
@@ -229,16 +258,21 @@ schedules() {
       *";"*) schedules_cron=${schedules_rest%%;*} schedules_rest=${schedules_rest#*;} ;;
       *) schedules_cron=$schedules_rest schedules_rest='' ;;
     esac
-    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$schedules_cron"
+    # Word splitting normalizes the spaces, so that check.sh compares what deploy.sh sent.
+    set -f
+    # shellcheck disable=SC2086
+    set -- $schedules_cron
+    set +f
+    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$*"
   done
 }
 
-# stale_schedulers: scheduler jobs named $JOB or $JOB-* that SCHEDULES no longer lists, space-separated.
+# stale_schedulers: scheduler jobs named $JOB-* that SCHEDULES no longer lists, space-separated.
 # Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
   printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg configured "$(schedules | cut -f1)" '
-    [.[].name | split("/") | last | select(. == $job or startswith($job + "-"))] - ($configured | split("\n"))
+    [.[].name | split("/") | last | select(startswith($job + "-"))] - ($configured | split("\n"))
     | join(" ")'
 }

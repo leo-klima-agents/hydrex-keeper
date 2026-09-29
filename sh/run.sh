@@ -13,7 +13,7 @@ for arg in "$@"; do
   esac
 done
 
-require_tools
+require_tools gcloud jq
 load_config
 
 gcloud run jobs execute "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --wait --args="${args#,}"

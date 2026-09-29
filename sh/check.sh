@@ -6,7 +6,7 @@ script_dir=$(dirname -- "$0")
 . "$script_dir/lib.sh"
 
 [ $# -eq 0 ] || die "usage: ${0##*/}"
-require_tools
+require_tools gcloud jq curl
 load_config
 make_tmp
 
@@ -19,6 +19,15 @@ ok() { log "ok: $*"; }
 # expect LABEL ACTUAL EXPECTED
 expect() {
   if [ "$2" = "$3" ]; then ok "$1 is $3"; else fail "$1 is ${2:-unset}, expected $3"; fi
+}
+# expect_policy LABEL LIVE TEMPLATE
+expect_policy() {
+  if policy_differs "$2" "$(render_policy "$3")"; then
+    fail "$1 IAM policy differs from template"
+    show_policy_diff
+  else
+    ok "$1 IAM policy matches template"
+  fi
 }
 
 # Job
@@ -36,13 +45,7 @@ secrets=$(json_field "$container_env" '[.[] | select(.valueFrom) | "\(.name)=\(.
 expect "job env" "$env_vars" "$ENV_VARS"
 expect "job secrets" "$secrets" "$SECRETS"
 
-live_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
-if policy_differs "$live_policy" "$(render_policy job.iam.json.tmpl)"; then
-  fail "job IAM policy differs from template"
-  show_policy_diff
-else
-  ok "job IAM policy matches template"
-fi
+expect_policy job "$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)" job.iam.json.tmpl
 
 # Schedules
 while IFS="$TAB" read -r name cron; do
@@ -57,21 +60,20 @@ while IFS="$TAB" read -r name cron; do
   expect "$name method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
   expect "$name service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
   expect "$name state" "$(json_field "$scheduler" .state)" "ENABLED"
+  retry='.retryConfig | "--max-retry-attempts=\(.retryCount // 0) --min-backoff=\(.minBackoffDuration)'
+  retry="$retry"' --max-backoff=\(.maxBackoffDuration) --max-doublings=\(.maxDoublings) --max-retry-duration=\(.maxRetryDuration)"'
+  expect "$name retries" "$(json_field "$scheduler" "$retry")" "$SCHEDULER_RETRY_FLAGS"
 done <<LIST
 $(schedules)
 LIST
 stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
-# Secret
-if has_secret_version; then ok "$RPC_SECRET has an enabled version"; else fail "$RPC_SECRET has no enabled version"; fi
-live_policy=$(get_iam "$RPC_SECRET" "--project=$KEEPER_PROJECT" secrets)
-if policy_differs "$live_policy" "$(render_policy secret.iam.json.tmpl)"; then
-  fail "secret IAM policy differs from template"
-  show_policy_diff
-else
-  ok "secret IAM policy matches template"
-fi
+# Secrets
+for secret in $SECRET_NAMES; do
+  if has_version "$secret"; then ok "$secret has an enabled version"; else fail "$secret has no enabled version"; fi
+  expect_policy "$secret" "$(get_iam "$secret" "--project=$KEEPER_PROJECT" secrets)" secret.iam.json.tmpl
+done
 
 # Service accounts
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||
@@ -88,22 +90,39 @@ for sa in "$KEEPER_SA" "$SCHEDULER_SA"; do
   if [ -z "$roles" ]; then ok "$sa has no project-level role"; else fail "$sa has project-level roles: $roles"; fi
 done
 
-# Alert
-channel=$(find_channel)
-alert=$(find_alert)
-if [ -z "$channel" ]; then
-  fail "no email channel for $ALERT_EMAIL"
-elif [ -z "$alert" ]; then
-  fail "alert policy \"$ALERT_NAME\" missing"
+# Keeper balance: the module's KEEPER(), then its ETH.
+keeper=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
+keeper=0x$(printf '%s' "$keeper" | tail -c 40)
+balance=$(rpc eth_getBalance "[\"$keeper\",\"latest\"]")
+balance=$(printf '%s' "${balance#0x}" | sed 's/^0*//')
+if [ ${#balance} -gt 15 ]; then # over 1 ETH, and too large for shell arithmetic
+  ok "keeper $keeper holds over 1 ETH"
 else
-  expect "alert enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
-  if [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
-    ok "alert notifies $ALERT_EMAIL"
-  else
-    fail "alert does not notify $ALERT_EMAIL"
-  fi
-  expect "alert filter" "$(json_field "$alert" '.conditions[0].conditionThreshold.filter')" "$ALERT_FILTER"
+  balance=$((0x${balance:-0}))
+  eth=$(awk "BEGIN { printf \"%.4f\", $balance / 1e18 }")
+  if [ "$balance" -ge "$MIN_KEEPER_WEI" ]; then ok "keeper $keeper holds $eth ETH"; else fail "keeper $keeper holds $eth ETH; fund it"; fi
 fi
+
+# Alerts
+channel=$(find_channel)
+[ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"
+# expect_alert NAME FILTER
+expect_alert() {
+  alert=$(find_alert "$1")
+  if [ -z "$alert" ]; then
+    fail "alert policy \"$1\" missing"
+    return 0
+  fi
+  expect "\"$1\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
+  if [ -n "$channel" ] && [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
+    ok "\"$1\" notifies $ALERT_EMAIL"
+  else
+    fail "\"$1\" does not notify $ALERT_EMAIL"
+  fi
+  expect "\"$1\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$2"
+}
+expect_alert "$ALERT_NAME" "$ALERT_FILTER"
+expect_alert "$START_ALERT_NAME" "$START_ALERT_FILTER"
 
 [ "$failed" -ne 0 ] || log "all checks passed"
 exit "$failed"

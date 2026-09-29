@@ -39,16 +39,22 @@ job_json() {
     sa=$keeper_sa retries=3
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400,600,200,70,25,10,5"}'
   fi
-  printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,{"name":"BASE_RPC_URLS","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}}],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \
-    "$env" "$region" "$project" "$job" "$retries" "$sa"
+  secrets='{"name":"BASE_RPC_URLS","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}},{"name":"ALCHEMY_API_KEY","valueFrom":{"secretKeyRef":{"key":"latest","name":"alchemy-api-key"}}}'
+  printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,%s],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \
+    "$env" "$secrets" "$region" "$project" "$job" "$retries" "$sa"
 }
 
 # scheduler_json NAME
 scheduler_json() {
   case "$1" in "$job-1") cron='50 23 * * 2' ;; *) cron='40 23 * * 3' ;; esac
   if [ "$drift" = yes ] && [ "$1" = "$job-2" ]; then state=PAUSED; else state=ENABLED; fi
-  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
-    "$scheduler_sa" "$run_uri" "$project" "$region" "$1" "$cron" "$state"
+  if [ "$drift" = yes ] && [ "$1" = "$job-1" ]; then # Cloud Scheduler's defaults: no retry
+    retry='{"maxBackoffDuration":"3600s","maxDoublings":5,"maxRetryDuration":"0s","minBackoffDuration":"5s"}'
+  else
+    retry='{"maxBackoffDuration":"60s","maxDoublings":2,"maxRetryDuration":"300s","minBackoffDuration":"15s","retryCount":3}'
+  fi
+  printf '{"httpTarget":{"httpMethod":"POST","oauthToken":{"scope":"https://www.googleapis.com/auth/cloud-platform","serviceAccountEmail":"%s"},"uri":"%s"},"name":"projects/%s/locations/%s/jobs/%s","retryConfig":%s,"schedule":"%s","state":"%s","timeZone":"Etc/UTC"}\n' \
+    "$scheduler_sa" "$run_uri" "$project" "$region" "$1" "$retry" "$cron" "$state"
 }
 
 job_policy_json() {
@@ -87,6 +93,13 @@ alert_json() {
   if [ "$drift" = yes ]; then enabled=false channels='[]'; else enabled=true channels='["'$channel'"]'; fi
   printf '{"displayName":"%s failed","enabled":%s,"name":"projects/%s/alertPolicies/1","notificationChannels":%s,"conditions":[{"conditionThreshold":{"filter":"metric.type=\\"run.googleapis.com/job/completed_task_attempt_count\\" AND resource.type=\\"cloud_run_job\\" AND resource.labels.job_name=\\"%s\\" AND metric.labels.result=\\"failed\\""}}]}\n' \
     "$job" "$enabled" "$project" "$channels" "$job"
+}
+
+start_alert_json() {
+  filter="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^$job-[0-9]+\$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
+  [ "$drift" = no ] || filter='resource.type="cloud_scheduler_job"' # edited by hand
+  jq -nc --arg name "$job start failed" --arg filter "$filter" --arg channel "$channel" --arg project "$project" \
+    '{displayName: $name, enabled: true, name: "projects/\($project)/alertPolicies/2", notificationChannels: [$channel], conditions: [{conditionMatchedLog: {filter: $filter}}]}'
 }
 
 log_call() { printf 'gcloud %s\n' "$*" >>"$FAKE_GCLOUD_LOG"; }
@@ -172,10 +185,18 @@ case "$*" in
     ;;
   "monitoring policies list "*)
     log_call "$@"
-    if [ "$has_alert" = yes ]; then printf '[%s]\n' "$(alert_json)"; else printf '[]\n'; fi
+    if [ "$has_alert" = no ]; then
+      printf '[]\n'
+    else
+      case "$*" in *"start failed"*) printf '[%s]\n' "$(start_alert_json)" ;; *) printf '[%s]\n' "$(alert_json)" ;; esac
+    fi
     ;;
   "monitoring policies create "*)
-    log_call "$@"
+    logged=''
+    for arg in "$@"; do
+      case "$arg" in --policy-from-file=*) logged="$logged $(jq -c -S . "${arg#*=}")" ;; *) logged="$logged $arg" ;; esac
+    done
+    log_call "${logged# }"
     ;;
   "run jobs deploy "*)
     logged=''
@@ -215,7 +236,7 @@ case "$*" in
     }
     names=''
     [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/$job-2\""
-    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job\",\"projects/$project/locations/$region/jobs/other-job\""
+    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-3\",\"projects/$project/locations/$region/jobs/other-job\""
     printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
     ;;
   "projects get-iam-policy "*)
