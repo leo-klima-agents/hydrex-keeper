@@ -182,7 +182,7 @@ set_iam() {
 # find_channel: name of the email notification channel for ALERT_EMAIL, or "".
 find_channel() {
   channels=$(gcloud beta monitoring channels list --project="$KEEPER_PROJECT" \
-    --filter="type=email AND labels.email_address=$ALERT_EMAIL" --format=json) || die "cannot list notification channels"
+    --filter="type=\"email\" AND labels.email_address=\"$ALERT_EMAIL\"" --format=json) || die "cannot list notification channels"
   require_json "$channels" "channel list"
   printf '%s\n' "$channels" | jq -r 'first(.[] | .name) // ""'
 }

@@ -58,8 +58,8 @@ else
   log "creating alert policy: $ALERT_NAME"
   gcloud monitoring policies create --project="$KEEPER_PROJECT" --display-name="$ALERT_NAME" \
     --condition-display-name="failed task attempts" --condition-filter="$ALERT_FILTER" --if="> 0" \
-    --aggregation='{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}' \
-    --notification-channels="$channel" \
+    --duration="300s" --aggregation='{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}' \
+    --combiner="OR" --notification-channels="$channel" \
     --documentation="A $JOB execution failed. Read its logs in Cloud Run before the epoch flips." >/dev/null
 fi
 if [ -n "$(find_alert "$START_ALERT_NAME")" ]; then
