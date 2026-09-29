@@ -139,15 +139,17 @@ export function combined(sources: PriceSource[]): PriceSource {
 }
 
 /**
- * Fresh prices at every call, except that the last set stands in when time is short or every source fails. Tokens
- * that set lacks are then unpriced, which the caller counts as zero, rather than failing the pass.
+ * Fresh prices at every call, except that the last set stands in when every source fails, or when time is short and
+ * it was asked for every token (a reward token new since then is fetched). Tokens the set lacks are then unpriced,
+ * which the caller counts as zero, rather than failing the pass.
  */
 export function priceFeed(source: PriceSource) {
-  let cached: { at: number; map: Prices } | undefined;
+  let cached: { at: number; asked: Set<Address>; map: Prices } | undefined;
   return async (tokens: Address[], until = Infinity): Promise<Prices> => {
-    if (cached && until - Date.now() < REFRESH_BUDGET) return cached.map;
+    const distinct = lower(tokens);
+    if (cached && until - Date.now() < REFRESH_BUDGET && distinct.every((t) => cached!.asked.has(t))) return cached.map;
     try {
-      cached = { at: Date.now(), map: await source.get(tokens, until) };
+      cached = { at: Date.now(), asked: new Set(distinct), map: await source.get(distinct, until) };
     } catch (error) {
       if (!cached) throw error;
       log.warning("using cached prices", { ageMs: Date.now() - cached.at, reason: describe(error) });

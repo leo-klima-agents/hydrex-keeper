@@ -38,6 +38,7 @@ test("the whitelist names each pool once, and at most MAX_POOLS of them", () => 
   assert.throws(() => parseWhitelist(JSON.stringify([{ pool, name: "a" }, { pool: pool.toLowerCase(), name: "b" }])), /more than once/);
   assert.throws(() => parseWhitelist("[]"), /empty/);
   const tooMany = Array.from({ length: MAX_POOLS + 1 }, (_, i) => ({ pool: `0x${(i + 1).toString(16).padStart(40, "0")}`, name: `p${i}` }));
-  assert.throws(() => parseWhitelist(JSON.stringify(tooMany)), /at most 50/);
+  assert.equal(MAX_POOLS, 199, "3 + 5 calls per pool within CHUNK");
+  assert.throws(() => parseWhitelist(JSON.stringify(tooMany)), /at most 199/);
   assert.equal(parseWhitelist(JSON.stringify(tooMany.slice(1))).length, MAX_POOLS);
 });

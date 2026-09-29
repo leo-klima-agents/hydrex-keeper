@@ -5,6 +5,7 @@ script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
 . "$script_dir/lib.sh"
 
+[ $# -eq 0 ] || die "usage: ${0##*/}"
 require_tools
 load_config
 make_tmp

@@ -23,16 +23,18 @@ PATH=$tmp/bin:$PATH
 export PATH
 failures=0
 
-# golden_case NAME SCENARIO SCRIPT [ARGS...]: runs with $CONFIG (default keeper), appends the exit code, compares.
+# golden_case NAME SCENARIO CONFIG SCRIPT [ARGS...]: runs SCRIPT with config/CONFIG.env, appends the exit code, compares.
+# CONFIG is an argument, not a prefix assignment: bash 3.2 as sh keeps `VAR=x fn` set after the call.
 golden_case() {
   name=$1
   scenario=$2
-  script=$3
-  shift 3
+  config=$3
+  script=$4
+  shift 4
   log=$tmp/$name.log
   : >"$log"
   rc=0
-  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/${CONFIG:-keeper}.env \
+  FAKE_GCLOUD_LOG=$log FAKE_GCLOUD_SCENARIO=$scenario HYDREX_CONFIG=$root/test/sh/config/$config.env \
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   { printf 'exit=%s\n--- output ---\n' "$rc"; cat "$tmp/$name.out"; } >>"$log"
   golden=$root/test/sh/golden/$name.txt
@@ -52,23 +54,24 @@ golden_case() {
   fi
 }
 
-golden_case setup-fresh fresh setup.sh
-golden_case setup-existing existing setup.sh
-golden_case deploy-no-secret fresh deploy.sh
-golden_case deploy-first first-deploy deploy.sh
-golden_case deploy-existing existing deploy.sh
-golden_case deploy-stale drift deploy.sh
-golden_case deploy-list-fails list-fails deploy.sh
-CONFIG=spaces golden_case deploy-spaces existing deploy.sh
-CONFIG=coingecko golden_case deploy-coingecko existing deploy.sh
-golden_case run-dry existing run.sh --dry-run --now
-golden_case run-bad-arg existing run.sh --later
-CONFIG=uncovered golden_case config-uncovered existing run.sh --now
-CONFIG=zeros golden_case config-zeros existing run.sh --now
-golden_case check-ok existing check.sh
-golden_case check-drift drift check.sh
-golden_case check-fresh fresh check.sh
-golden_case check-list-fails list-fails check.sh
+golden_case setup-fresh fresh keeper setup.sh
+golden_case setup-existing existing keeper setup.sh
+golden_case deploy-no-secret fresh keeper deploy.sh
+golden_case deploy-first first-deploy keeper deploy.sh
+golden_case deploy-existing existing keeper deploy.sh
+golden_case deploy-stale drift keeper deploy.sh
+golden_case deploy-list-fails list-fails keeper deploy.sh
+golden_case deploy-spaces existing spaces deploy.sh
+golden_case deploy-coingecko existing coingecko deploy.sh
+golden_case run-dry existing keeper run.sh --dry-run --now
+golden_case run-bad-arg existing keeper run.sh --later
+golden_case config-uncovered existing uncovered run.sh --now
+golden_case config-zeros existing zeros run.sh --now
+golden_case config-bad-module existing bad-module run.sh --now
+golden_case check-ok existing keeper check.sh
+golden_case check-drift drift keeper check.sh
+golden_case check-fresh fresh keeper check.sh
+golden_case check-list-fails list-fails keeper check.sh
 
 [ "$failures" -eq 0 ] || { printf '%s golden case(s) failed\n' "$failures"; exit 1; }
 printf 'all golden cases passed\n'

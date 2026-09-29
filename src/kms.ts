@@ -65,8 +65,8 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
 export async function derToSignature(der: Uint8Array, hash: Hex, address: Address): Promise<Signature> {
   if (der[0] !== 0x30 || der[2] !== 0x02) throw new Error("KMS signature is not a DER sequence");
   const rLength = der[3]!;
-  if (der[4 + rLength] !== 0x02) throw new Error("KMS signature is not a DER sequence");
   const sLength = der[5 + rLength]!;
+  if (der[4 + rLength] !== 0x02 || !rLength || !sLength) throw new Error("KMS signature is not a DER sequence");
   const r = bytesToBigInt(der.subarray(4, 4 + rLength));
   let s = bytesToBigInt(der.subarray(6 + rLength, 6 + rLength + sLength));
   if (s > SECP256K1_N / 2n) s = SECP256K1_N - s;

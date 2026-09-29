@@ -1,6 +1,6 @@
 #!/bin/sh
 # curl stub for the golden tests: answers check.sh's two JSON-RPC calls from canned state per $FAKE_GCLOUD_SCENARIO
-# (drift: an underfunded keeper) and logs each call to $FAKE_GCLOUD_LOG.
+# (drift: the first node times out, and the keeper is underfunded) and logs each call to $FAKE_GCLOUD_LOG.
 set -eu
 
 : "${FAKE_GCLOUD_LOG:?}" "${FAKE_GCLOUD_SCENARIO:?}"
@@ -17,6 +17,10 @@ while [ $# -gt 0 ]; do
 done
 method=$(printf '%s' "$body" | jq -r .method)
 printf 'curl %s %s %s\n' "$url" "$method" "$(printf '%s' "$body" | jq -c .params)" >>"$FAKE_GCLOUD_LOG"
+if [ "$FAKE_GCLOUD_SCENARIO" = drift ] && [ "$url" = https://mainnet.base.org ]; then
+  printf 'curl: (28) Operation timed out after 15001 milliseconds\n' >&2
+  exit 28
+fi
 case "$method" in
   eth_call) result=0x000000000000000000000000625cf6663d9d090535fbd57680bffe6fa0262434 ;;
   eth_getBalance) if [ "$FAKE_GCLOUD_SCENARIO" = drift ]; then result=0x5af3107a4000; else result=0x11c37937e08000; fi ;;

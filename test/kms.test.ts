@@ -73,6 +73,8 @@ test("rejects a key that does not sign for the keeper", async () => {
 
 test("rejects malformed DER", async () => {
   await assert.rejects(derToSignature(Uint8Array.from([0x31, 0x00]), keccak256("0x"), signer.address), /not a DER/);
+  const emptyS = Uint8Array.from([0x30, 0x05, 0x02, 0x01, 0x01, 0x02, 0x00]);
+  await assert.rejects(derToSignature(emptyS, keccak256("0x"), signer.address), /not a DER/, "a zero-length integer");
 });
 
 test("reports a missing metadata server distinctly", async () => {

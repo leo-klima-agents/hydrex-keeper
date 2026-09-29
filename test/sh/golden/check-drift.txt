@@ -11,7 +11,9 @@ gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-
 gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --format=json
 gcloud projects get-iam-policy hydrex-keeper-test --format=json
 curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
+curl https://base.drpc.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
 curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
+curl https://base.drpc.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
 gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
@@ -80,6 +82,8 @@ FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has user-managed 
 FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has IAM bindings: roles/iam.serviceAccountTokenCreator:user:stray@example.com
 FAIL: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has project-level roles: roles/editor
 ok: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
+eth_call failed on https://mainnet.base.org: curl: (28) Operation timed out after 15001 milliseconds
+eth_getBalance failed on https://mainnet.base.org: curl: (28) Operation timed out after 15001 milliseconds
 FAIL: keeper 0x625cf6663d9d090535fbd57680bffe6fa0262434 holds 0.000100 ETH, under 0.0005; fund it
 FAIL: "hydrex-keeper failed" enabled is false, expected true
 FAIL: "hydrex-keeper failed" does not notify hydrex-admin@example.com

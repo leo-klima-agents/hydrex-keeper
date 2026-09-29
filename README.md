@@ -21,17 +21,18 @@ implemented yet.
 
 ## What it can and cannot do
 
-- **Can:** call `vote` on the module with pools from `pools.json`, at the times in `VOTE_OFFSETS`. That is the entire
-  effect of a compromised keeper: a suboptimal vote within the whitelist. The whitelist names pools by address, each
-  once, and holds at most 50 (`MAX_POOLS` in `src/main.ts`) so that a pass's read stays one `eth_call` and its votes
-  and epoch come from one block. It currently holds every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC,
-  BNKR, VVV and the ST0x tokenized stocks and ETFs (`wt…`), every pool pairing Klima's kVCM with one of those
-  (three kVCM/USDC pools), plus the HYDX/USDC pool: 50 pools, the cap, so adding a pool means removing one. The
-  module, the conduit and the Voter enforce everything else (single caller, gauge liveness, voting power, epoch
-  timing).
+- **Can:** call `vote` on the module with pools from `pools.json`, at the times in `VOTE_OFFSETS`. The whitelist
+  names pools by address, each once, and holds at most 199 (`MAX_POOLS` in `src/main.ts`) so that a pass's votes and
+  epoch come from one `eth_call`, and so from one block. It currently holds every pool pairing two of cbBTC, WETH,
+  SOL, USDC, USD₮0, EURC, BNKR, VVV and the ST0x tokenized stocks and ETFs (`wt…`), and every pool pairing Hydrex's
+  HYDX or Klima's kVCM with one of those (four HYDX/USDC, one HYDX/WETH, three kVCM/USDC): 54 pools. The module, the
+  conduit and the Voter enforce everything else (single caller, gauge liveness, voting power, epoch timing).
 - **Cannot:** claim, swap, move funds, call any other contract, or read the private key. It asks Cloud KMS to sign
   one hash per vote; the key never leaves the HSM. The job's service account has no role in its own project beyond
-  reading the RPC URL, and nothing in the project can impersonate it.
+  reading its secrets, and nothing in the project can impersonate it.
+- **The key can do more than the job:** as the module's `KEEPER`, it can vote for any pool, whitelisted or not, and
+  call `claimSwapAndDistribute` with any swap calldata for the conduit's approved routers. Anyone who can run code as
+  the job's service account, such as an owner of the keeper project, holds that power.
 
 ## Prerequisites
 
@@ -56,10 +57,11 @@ must be of the form `M H * * D`), since an execution only runs the passes due wi
 sh/setup.sh
 ```
 
-Enables the APIs, creates the two service accounts (`hydrex-keeper` runs the job and is the only principal allowed
-to sign; `hydrex-keeper-scheduler` may only start the job), creates the RPC and Alchemy secrets with the keeper as
-their only reader, and creates the email channel and two alerts: one when an execution fails, one when Cloud
-Scheduler fails to start one. Safe to re-run. It prints the keeper's service account email for the next step.
+Enables the APIs the job, the scripts and CI's Workload Identity Federation use (including Cloud KMS, which the keeper's
+project must enable as well as the key's), creates the two service accounts (`hydrex-keeper` runs the job and is the
+only principal allowed to sign; `hydrex-keeper-scheduler` may only start the job), creates the RPC and Alchemy secrets
+with the keeper as their only reader, and creates the email channel and two alerts: one when an execution fails, one
+when Cloud Scheduler fails to start one. Safe to re-run. It prints the keeper's service account email for the next step.
 
 ## 3. Grant the keeper
 
@@ -85,9 +87,9 @@ same way.
 
 ## 5. Fund the keeper
 
-Send ETH on Base to `KEEPER` (`0x625CF6663d9D090535FBd57680bFFE6fA0262434`, from the key repo's record). A vote costs
-a few thousandths of a cent; 0.005 ETH lasts years. The job refuses to vote with less than twice the estimated cost,
-L1 data fee included.
+Send ETH on Base to `KEEPER` (`0x625CF6663d9D090535FBd57680bFFE6fA0262434`, from the key repo's record). A vote costs a
+few cents (2 to 3M gas at Base's usual 0.005 gwei, L1 data fee included), so 0.005 ETH pays for several hundred. The job
+refuses to vote with less than twice the estimated cost, L1 data fee included.
 
 ## 6. Deploy
 
@@ -95,11 +97,12 @@ L1 data fee included.
 sh/deploy.sh
 ```
 
-Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both
-images pinned by digest), deploys the job with both secrets and the config as environment, sets the job's IAM so
-only the scheduler account can start it, and creates or updates one Cloud Scheduler job per entry of `SCHEDULES`
-(`hydrex-keeper-1`, `hydrex-keeper-2`), each retrying a failed start three times, deleting any `hydrex-keeper-*`
-scheduler job no longer listed. Safe to re-run; re-run it after any change to `src/` or `pools.json`.
+Builds the image from this checkout with Cloud Build (`Dockerfile`: distroless Node 24, no shell, non-root, both images
+pinned by digest, TypeScript left out of the runtime image), deploys the job with both secrets and the config as
+environment, sets the job's IAM so only the scheduler account can start it, and creates or updates one Cloud Scheduler
+job per entry of `SCHEDULES` (`hydrex-keeper-1`, `hydrex-keeper-2`), each retrying a failed start three times and
+resumed if paused, deleting any `hydrex-keeper-*` scheduler job no longer listed. Safe to re-run; re-run it after any
+change to `src/` or `pools.json`.
 
 ## 7. First vote, watched
 
@@ -122,8 +125,8 @@ Read-only. Fails if the job's service account, environment, secret reference, ti
 `config.env` and `policy/`; if a schedule, its target, its service account, its state or its retries differ, or a
 stale scheduler job remains; if a secret has no enabled version or extra readers; if the keeper's service account
 has a user-managed key, any IAM binding on itself (impersonation) or any project-level role; if `KEEPER` holds under
-0.0005 ETH on Base, about four weeks of worst-case votes (read through `https://mainnet.base.org`, or
-`CHECK_RPC_URL`); or if either alert is missing, disabled, not pointed at `ALERT_EMAIL`, or has another filter.
+0.0005 ETH on Base, about four weeks of worst-case votes (read through `CHECK_RPC_URL` if set, then the public
+nodes in order); or if either alert is missing, disabled, not pointed at `ALERT_EMAIL`, or has another filter.
 
 CI runs it every Friday after the vote, and on demand from the Actions tab, exactly like the key repo: a viewer-only
 service account in the keeper project (`roles/viewer`, `roles/iam.securityReviewer`, `roles/secretmanager.viewer`),
@@ -194,7 +197,7 @@ it missing.
 | Dependency | Used for | On failure |
 |---|---|---|
 | Base RPC (`BASE_RPC_URL`, one or more URLs, then `mainnet.base.org`, `base.drpc.org` and `base-rpc.publicnode.com`) | All reads, simulation, sending | A call unanswered after 250 ms also goes to the next URL; the first answer wins, and a request is abandoned after 5 s. The vote is sent to every URL; it fails only if none accepts it. The public nodes are rate-limited, so a paid provider is what makes the final passes robust. If all fail the pass fails and is retried |
-| Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (`COINGECKO_API_KEY`, optional) | USD prices of reward tokens, refreshed at every pass with time for it | A failed source is logged and left out; each gets three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
+| Prices: [DefiLlama](https://defillama.com/docs/api) (no key), [Alchemy Prices](https://docs.alchemy.com/reference/prices-api-quickstart) (`ALCHEMY_API_KEY`), [CoinGecko](https://docs.coingecko.com/) (`COINGECKO_API_KEY`, optional) | USD prices of reward tokens, refreshed at every pass with time for it, and whenever a reward token is new since the last set | A failed source is logged and left out; each gets three attempts within the pass deadline. If all fail, the last set is reused, else the pass fails. A token no source prices counts as zero and is logged; if no token at all can be priced the pass fails. A wrong price can only move the vote within the whitelist, and needs two sources to agree on it |
 | Cloud KMS `asymmetricSign` via the service account's metadata token | The one signature per vote | Pass fails. A signature that does not recover to `KEEPER` is rejected before sending |
 | Cloud Scheduler | Starting the two executions | A failed start is retried three times (after 15, 30 and 60 s, within 5 minutes, before the first pass). If it still fails, no pass that day: a missed Tuesday start leaves the Wednesday series, which votes at its first pass; a missed Wednesday start leaves the Tuesday vote in place, unadjusted. Every failed attempt emails `ALERT_EMAIL` through the "start failed" alert; a paused or deleted schedule is only caught by `check.sh` |
 | ETH balance of `KEEPER` on Base | Gas | Job refuses to vote below twice the estimated cost and says so; the weekly `check.sh` fails below 0.0005 ETH, days before that |
@@ -208,7 +211,7 @@ it missing.
    a metric-absence condition waits at most 23.5 hours.
 3. Keep the keeper's ETH balance topped up: `check.sh` fails under 0.0005 ETH, and the dry run reports the cost of
    a vote.
-4. `pools.json` is the policy, at most 50 pools, each once (`npm test` checks). Change it by pull request and redeploy.
+4. `pools.json` is the policy, at most 199 pools, each once (`npm test` checks). Change it by pull request and redeploy.
 
 ## Development
 

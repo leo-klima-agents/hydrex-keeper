@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { clockLag, connect, hostOf, WEEK, type Chain } from "./chain.ts";
+import { CHUNK, clockLag, connect, hostOf, WEEK, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { describe, log } from "./log.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
@@ -16,10 +16,10 @@ const HORIZON = 3600n; // an execution runs the passes due within this many seco
 const ATTEMPTS = 3;
 const RETRY_DELAY = 5_000;
 const LAST_MARGIN = 2_000; // ms before the flip after which nothing is attempted
-// A pass reads 3 calls, then 5 per pool, then one per reward token (about 12 per pool today). At 50 pools that is about
-// 850 calls, one eth_call; and the epoch and votes, which are compared and subtracted, always fit in the first
-// CHUNK (chain.ts) and so come from one block. Reward tokens beyond it go to a second call; they are only summed.
-export const MAX_POOLS = 50;
+// A pass reads 3 calls, then 5 per pool, then one per reward token (about 12 per pool today). The epoch and votes, which
+// are compared and subtracted, come first; up to this many pools they fit in the first CHUNK (chain.ts), one eth_call,
+// and so come from one block. Reward amounts beyond it go to further calls; they are only summed.
+export const MAX_POOLS = Math.floor((CHUNK - 3) / 5);
 
 type Whitelist = { pool: Address; name: string }[];
 
@@ -29,7 +29,7 @@ type Whitelist = { pool: Address; name: string }[];
 let behindMs = 0;
 const nowMs = () => Date.now() + behindMs;
 const now = () => BigInt(Math.floor(nowMs() / 1000));
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms))); // negative: a warning on stderr
 
 /** Times (unix seconds) of the passes due within the horizon, earliest first. */
 export function passTimes(flip: bigint, offsets: bigint[], at: bigint, horizon = HORIZON): bigint[] {
@@ -54,7 +54,7 @@ export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediatel
 export function parseWhitelist(json: string): Whitelist {
   const whitelist = (JSON.parse(json) as Whitelist).map((w) => ({ pool: getAddress(w.pool), name: String(w.name) }));
   if (whitelist.length === 0) throw new Error("pools.json is empty");
-  if (whitelist.length > MAX_POOLS) throw new Error(`pools.json lists ${whitelist.length} pools; at most ${MAX_POOLS} fit one read (see MAX_POOLS)`);
+  if (whitelist.length > MAX_POOLS) throw new Error(`pools.json lists ${whitelist.length} pools; at most ${MAX_POOLS} read in one block (see MAX_POOLS)`);
   const repeated = whitelist.filter((w, i) => whitelist.findIndex((x) => x.pool === w.pool) !== i);
   if (repeated.length) throw new Error(`pools.json lists ${repeated.map((w) => w.pool).join(", ")} more than once`);
   return whitelist;

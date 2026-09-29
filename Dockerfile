@@ -1,7 +1,8 @@
 FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# TypeScript is also an optional peer of viem's abitype, so --omit=dev alone would keep it in the image.
+RUN npm ci --omit=dev --omit=optional
 COPY src/ src/
 COPY pools.json ./
 

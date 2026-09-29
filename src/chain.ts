@@ -23,7 +23,8 @@ const TIMEOUT = 5_000; // a request still unanswered is abandoned
  */
 export function hedged(rpcUrls: string[]): Transport {
   return ({ chain }) => {
-    const children = rpcUrls.map((url) => http(url, { batch: true, timeout: TIMEOUT })({ chain, retryCount: 0 }));
+    // mainnet.base.org rejects JSON-RPC batches of more than 10 calls.
+    const children = rpcUrls.map((url) => http(url, { batch: { batchSize: 10 }, timeout: TIMEOUT })({ chain, retryCount: 0 }));
     const slow = new Set<number>();
     const request = ({ method, params }: { method: string; params?: unknown }) =>
       new Promise((resolve, reject) => {

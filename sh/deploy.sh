@@ -25,12 +25,18 @@ set_iam_authoritative "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$(ren
 
 log "== 3/3 schedules"
 while IFS="$TAB" read -r name cron; do
-  if [ -n "$(scheduler_exists "$name")" ]; then verb=update; else verb=create; fi
+  scheduler=$(scheduler_exists "$name") || scheduler=''
+  if [ -n "$scheduler" ]; then verb=update; else verb=create; fi
   gcloud scheduler jobs "$verb" http "$name" --location="$REGION" --project="$KEEPER_PROJECT" \
     --schedule="$cron" --time-zone=Etc/UTC --uri="$RUN_URI" --http-method=POST \
     --oauth-service-account-email="$SCHEDULER_SA" --description="starts $JOB before the Hydrex epoch flip" \
     --max-retry-attempts="$SCHEDULER_RETRIES" --min-backoff="$SCHEDULER_MIN_BACKOFF" --max-backoff="$SCHEDULER_MAX_BACKOFF" \
     --max-doublings="$SCHEDULER_MAX_DOUBLINGS" --max-retry-duration="$SCHEDULER_MAX_RETRY_DURATION"
+  # An update leaves a paused job paused, and check.sh reports it.
+  if [ -n "$scheduler" ] && [ "$(json_field "$scheduler" .state)" = PAUSED ]; then
+    log "resuming $name"
+    gcloud scheduler jobs resume "$name" --location="$REGION" --project="$KEEPER_PROJECT"
+  fi
 done <<LIST
 $(schedules)
 LIST

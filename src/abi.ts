@@ -6,10 +6,16 @@ export const moduleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
   "function vote(address[] pools, uint256[] weights)",
-  "error ZeroAddress()",
-  "error NotAContract()",
   "error NotKeeper()",
   "error ExecutionFailed()",
+  // The module re-raises what the conduit and the Voter revert with, so a failed simulation is decoded against these.
+  "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
+  "error EpochFlipInProgress()",
+  "error VoteDelayNotMet()",
+  "error EpochStale()",
+  "error LengthMismatch()",
+  "error VotedAlready()",
+  "error InsufficientVotingPower()",
 ]);
 
 export const conduitAbi = parseAbi([
@@ -27,12 +33,6 @@ export const voterAbi = parseAbi([
   "function votes(address voter, address pool) view returns (uint256)",
   "function poolVote(address voter, uint256 index) view returns (address)",
   "function lastVoted(address voter) view returns (uint256)",
-  "error EpochFlipInProgress()",
-  "error VoteDelayNotMet()",
-  "error EpochStale()",
-  "error LengthMismatch()",
-  "error VotedAlready()",
-  "error InsufficientVotingPower()",
 ]);
 
 export const veAbi = parseAbi(["function getPastVotes(address account, uint256 timestamp) view returns (uint256)"]);

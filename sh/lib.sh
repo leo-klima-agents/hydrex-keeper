@@ -2,7 +2,12 @@
 # Sourced by every script in sh/.
 # shellcheck disable=SC2034
 
-SERVICES="run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com monitoring.googleapis.com"
+# Off by default in a new project. cloudkms: the job signs with a key in another project, which needs the API in both.
+# iam, cloudresourcemanager, iamcredentials, sts: service accounts, check.sh, and CI's Workload Identity Federation.
+# logging: the start alert.
+SERVICES="artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com
+cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
+logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
 # Cloud Scheduler retries a start that fails (it does not by default): after 15, 30 and 60 s, all within 5 minutes,
@@ -18,7 +23,8 @@ FLIP_WEEKDAY=4 # Thursday 00:00 UTC
 TAB=$(printf '\t')
 # check.sh fails below this: about four weeks of worst-case votes (a vote costs up to 1.5e13 wei, at most 8 a week).
 MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH
-CHECK_RPC=${CHECK_RPC_URL:-https://mainnet.base.org} # read-only, weekly: the public node is enough
+# Read-only, weekly: public nodes are enough (PUBLIC_RPCS in src/main.ts), tried in order after CHECK_RPC_URL if set.
+CHECK_RPCS="${CHECK_RPC_URL:-} https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -73,6 +79,7 @@ load_config() {
   key_project=${key_project%%/*}
   [ "$key_project" != "$KEEPER_PROJECT" ] || die "the key must live in another project than KEEPER_PROJECT"
   case "$MODULE" in
+    0x*[!0-9a-fA-F]*) die "MODULE must be a 20-byte hex address" ;;
     0x*) [ ${#MODULE} -eq 42 ] || die "MODULE must be a 20-byte hex address" ;;
     *) die "MODULE must be a 20-byte hex address" ;;
   esac
@@ -277,11 +284,15 @@ find_stale_schedulers() {
     done)
 }
 
-# rpc METHOD PARAMS: the JSON-RPC result from CHECK_RPC, as a string.
+# rpc METHOD PARAMS: the JSON-RPC result, as a string, from the first of CHECK_RPCS that answers.
 rpc() {
-  rpc_reply=$(curl -sS --max-time 15 -H 'content-type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$CHECK_RPC") || die "$1 failed on $CHECK_RPC"
-  printf '%s\n' "$rpc_reply" | jq -er '.result' 2>/dev/null || die "$1 on $CHECK_RPC: $rpc_reply"
+  for rpc_url in $CHECK_RPCS; do
+    rpc_reply=$(curl -sS --max-time 15 -H 'content-type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$rpc_url" 2>&1) &&
+      printf '%s\n' "$rpc_reply" | jq -er '.result' 2>/dev/null && return 0
+    log "$1 failed on $(printf '%s' "$rpc_url" | sed 's|^\([a-z]*://[^/]*\).*|\1|'): $rpc_reply"
+  done
+  die "$1 failed on every RPC"
 }
 
 # secret_versions SECRET: the number of enabled versions.

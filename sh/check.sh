@@ -109,22 +109,21 @@ fi
 
 # Alerts: a failed execution, and a failed start.
 channel=$(find_channel)
+[ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"
 # expect_alert NAME FILTER
 expect_alert() {
   alert=$(find_alert "$1")
-  if [ -z "$channel" ]; then
-    fail "no email channel for $ALERT_EMAIL"
-  elif [ -z "$alert" ]; then
+  if [ -z "$alert" ]; then
     fail "alert policy \"$1\" missing"
-  else
-    expect "\"$1\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
-    if [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
-      ok "\"$1\" notifies $ALERT_EMAIL"
-    else
-      fail "\"$1\" does not notify $ALERT_EMAIL"
-    fi
-    expect "\"$1\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$2"
+    return 0
   fi
+  expect "\"$1\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
+  if [ -n "$channel" ] && [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
+    ok "\"$1\" notifies $ALERT_EMAIL"
+  else
+    fail "\"$1\" does not notify $ALERT_EMAIL"
+  fi
+  expect "\"$1\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$2"
 }
 expect_alert "$ALERT_NAME" "$ALERT_FILTER"
 expect_alert "$START_ALERT_NAME" "$START_ALERT_FILTER"

@@ -81,14 +81,20 @@ test("prices stops retrying when a retry cannot finish before the deadline", asy
   assert.equal(urls.length, 1);
 });
 
-test("priceFeed serves the last set instead of refreshing when the deadline is near", async () => {
-  const { fetchFn, urls } = fakeFetch([() => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }), () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 } } })]);
+test("near the deadline, priceFeed serves the last set unless a token is new to it", async () => {
+  const { fetchFn, urls } = fakeFetch([
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 2 } } }),
+    () => Response.json({ coins: { [`base:${WETH}`]: { price: 3 }, [`base:${USDC.toLowerCase()}`]: { price: 1 } } }),
+  ]);
   const feed = priceFeed(defillama(fetchFn));
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 2);
   assert.equal((await feed([WETH], Date.now() + 10_000)).get(WETH), 2, "10 s left: no refresh");
-  assert.equal((await feed([WETH, USDC], Date.now() + 10_000)).has(USDC), false, "not even for a new token");
   assert.equal(urls.length, 2);
+  const withNew = await feed([WETH, USDC], Date.now() + 10_000);
+  assert.equal(withNew.get(USDC.toLowerCase() as `0x${string}`), 1, "but a token the last set was not asked for is fetched");
+  assert.equal(urls.length, 3);
 });
 
 /** A source answering from a table, or failing. */
