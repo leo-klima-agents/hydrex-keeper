@@ -1,0 +1,40 @@
+gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com --project=hydrex-keeper-test
+gcloud iam service-accounts describe hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)
+gcloud iam service-accounts create hydrex-keeper --project=hydrex-keeper-test --display-name=hydrex-keeper --description=runs the job and signs with the key
+gcloud iam service-accounts describe hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)
+gcloud iam service-accounts create hydrex-keeper-scheduler --project=hydrex-keeper-test --display-name=hydrex-keeper-scheduler --description=starts the job on schedule
+gcloud secrets describe base-rpc-url --project=hydrex-keeper-test --format=value(name)
+gcloud secrets create base-rpc-url --project=hydrex-keeper-test --replication-policy=automatic
+gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
+gcloud secrets set-iam-policy --project=hydrex-keeper-test base-rpc-url {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"ACAB"}
+gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --format=json
+gcloud secrets describe alchemy-api-key --project=hydrex-keeper-test --format=value(name)
+gcloud secrets create alchemy-api-key --project=hydrex-keeper-test --replication-policy=automatic
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
+gcloud secrets set-iam-policy --project=hydrex-keeper-test alchemy-api-key {"bindings":[{"members":["serviceAccount:hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com"],"role":"roles/secretmanager.secretAccessor"}],"etag":"ACAB"}
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --format=json
+gcloud beta monitoring channels create --project=hydrex-keeper-test --display-name=hydrex-keeper alerts --type=email --channel-labels=email_address=hydrex-admin@example.com --format=value(name)
+gcloud monitoring policies list --project=hydrex-keeper-test --format=json
+gcloud monitoring policies create --project=hydrex-keeper-test {"combiner":"OR","conditions":[{"conditionThreshold":{"aggregations":[{"alignmentPeriod":"300s","perSeriesAligner":"ALIGN_SUM"}],"comparison":"COMPARISON_GT","duration":"0s","filter":"metric.type=\"run.googleapis.com/job/completed_task_attempt_count\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"hydrex-keeper\" AND metric.labels.result=\"failed\"","thresholdValue":0,"trigger":{"count":1}},"displayName":"failed task attempts"}],"displayName":"hydrex-keeper failed","documentation":{"content":"A hydrex-keeper execution failed. Read its logs in Cloud Run before the epoch flips.","mimeType":"text/markdown"},"notificationChannels":["projects/hydrex-keeper-test/notificationChannels/1234567890"]}
+gcloud monitoring policies list --project=hydrex-keeper-test --format=json
+gcloud monitoring policies create --project=hydrex-keeper-test {"alertStrategy":{"notificationRateLimit":{"period":"300s"}},"combiner":"OR","conditions":[{"conditionMatchedLog":{"filter":"resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^hydrex-keeper-[0-9]+$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"},"displayName":"failed start attempts"}],"displayName":"hydrex-keeper start failed","documentation":{"content":"Cloud Scheduler failed to start hydrex-keeper. It retries three times; if all failed, run sh/run.sh before the epoch flips.","mimeType":"text/markdown"},"notificationChannels":["projects/hydrex-keeper-test/notificationChannels/1234567890"]}
+exit=0
+--- output ---
+== 1/4 APIs
+== 2/4 service accounts
+creating hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
+creating hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
+== 3/4 secrets
+creating base-rpc-url
+iam: writing base-rpc-url
+add the RPC URLs: printf '%s' '…' | gcloud secrets versions add base-rpc-url --project=hydrex-keeper-test --data-file=-
+creating alchemy-api-key
+iam: writing alchemy-api-key
+add the Alchemy API key: printf '%s' '…' | gcloud secrets versions add alchemy-api-key --project=hydrex-keeper-test --data-file=-
+== 4/4 alerts
+creating email channel for hydrex-admin@example.com
+creating alert policy: hydrex-keeper failed
+creating alert policy: hydrex-keeper start failed
+set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:
+hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com

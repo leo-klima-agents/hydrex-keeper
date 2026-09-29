@@ -1,0 +1,35 @@
+{
+  "name": "hydrex-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Weekly Hydrex vote through KlimaVeTokenConduitExecutor, signed by a Cloud KMS key",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "26"
+  },
+  "scripts": {
+    "dry-run": "node src/main.ts --dry-run --now",
+    "format": "prettier --write .",
+    "test": "node --test",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "viem": "2.56.9"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "prettier": "3.9.9",
+    "prettier-plugin-sh": "0.20.2",
+    "typescript": "7.0.2"
+  },
+  "prettier": {
+    "printWidth": 120,
+    "proseWrap": "always",
+    "plugins": [
+      "prettier-plugin-sh"
+    ],
+    "binaryNextLine": false,
+    "spaceRedirects": false
+  }
+}
