@@ -6,8 +6,9 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 
 - `src/`: the job, with `viem` as its only dependency. `select.ts` is the strategy, `kms.ts` signs, and `vote.ts` is the
   only place a transaction is built and sent.
-- `pools.json`: the pools it may vote for, by address. Every pool pairing two of cbBTC, WETH, SOL, USDC, USD₮0, EURC,
-  BNKR, VVV, HYDX, kVCM and the ST0x tokenized stocks and ETFs (`wt…`).
+- `pools.json`: the pools it may vote for, by address. Every pool pairing two of ETH or WETH, cbBTC, SOL, USDC, USDT,
+  USD₮0, EURC, BNKR, VVV, HYDX, kVCM and the ST0x tokenized stocks and ETFs (`wt…`), and every single-asset vault
+  holding one of them.
 - `sh/` and `policy/`: the scripts that create the Google Cloud resources and check them for drift, and the IAM policies
   they write in full.
 
