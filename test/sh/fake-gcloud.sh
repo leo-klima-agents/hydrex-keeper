@@ -177,7 +177,11 @@ case "$*" in
     ;;
   "beta monitoring channels list "*)
     log_call "$@"
-    if [ "$has_channel" = yes ]; then printf '[{"name":"%s","type":"email"}]\n' "$channel"; else printf '[]\n'; fi
+    if [ "$has_channel" = yes ]; then
+      printf '[{"name":"%s","type":"email","labels":{"email_address":"%s"}}]\n' "$channel" "$email"
+    else
+      printf '[]\n'
+    fi
     ;;
   "beta monitoring channels create "*)
     log_call "$@"
@@ -185,11 +189,7 @@ case "$*" in
     ;;
   "monitoring policies list "*)
     log_call "$@"
-    if [ "$has_alert" = no ]; then
-      printf '[]\n'
-    else
-      case "$*" in *"start failed"*) printf '[%s]\n' "$(start_alert_json)" ;; *) printf '[%s]\n' "$(alert_json)" ;; esac
-    fi
+    if [ "$has_alert" = no ]; then printf '[]\n'; else printf '[%s,%s]\n' "$(alert_json)" "$(start_alert_json)"; fi
     ;;
   "monitoring policies create "*)
     logged=''

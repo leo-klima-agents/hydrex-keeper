@@ -52,34 +52,50 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-if [ -n "$(find_alert "$ALERT_NAME")" ]; then
-  log "exists: $ALERT_NAME"
-else
-  log "creating alert policy: $ALERT_NAME"
-  gcloud monitoring policies create --project="$KEEPER_PROJECT" --display-name="$ALERT_NAME" \
-    --condition-display-name="failed task attempts" --condition-filter="$ALERT_FILTER" --if="> 0" \
-    --duration="300s" --aggregation='{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_SUM"}' \
-    --combiner="OR" --notification-channels="$channel" \
-    --documentation="A $JOB execution failed. Read its logs in Cloud Run before the epoch flips." >/dev/null
-fi
-if [ -n "$(find_alert "$START_ALERT_NAME")" ]; then
-  log "exists: $START_ALERT_NAME"
-else
-  log "creating alert policy: $START_ALERT_NAME"
-  # A log-based condition needs a policy file, and a notification rate limit.
-  jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
-    displayName: $name,
-    combiner: "OR",
-    conditions: [{displayName: "failed start attempts", conditionMatchedLog: {filter: $filter}}],
-    alertStrategy: {notificationRateLimit: {period: "300s"}},
-    notificationChannels: [$channel],
-    documentation: {
-      mimeType: "text/markdown",
-      content: "Cloud Scheduler failed to start \($job). It retries three times; if all failed, run sh/run.sh before the epoch flips."
+# ensure_alert NAME FILE: creates the alert policy in FILE unless one named NAME exists.
+ensure_alert() {
+  if [ -n "$(find_alert "$1")" ]; then
+    log "exists: $1"
+  else
+    log "creating alert policy: $1"
+    gcloud monitoring policies create --project="$KEEPER_PROJECT" --policy-from-file="$2" >/dev/null
+  fi
+}
+# A single failed attempt in a five-minute window fires it.
+jq -n --arg name "$ALERT_NAME" --arg filter "$ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
+  displayName: $name,
+  combiner: "OR",
+  conditions: [{
+    displayName: "failed task attempts",
+    conditionThreshold: {
+      filter: $filter,
+      aggregations: [{alignmentPeriod: "300s", perSeriesAligner: "ALIGN_SUM"}],
+      comparison: "COMPARISON_GT",
+      thresholdValue: 0,
+      duration: "0s",
+      trigger: {count: 1}
     }
-  }' >"$TMP/start-alert.json"
-  gcloud monitoring policies create --project="$KEEPER_PROJECT" --policy-from-file="$TMP/start-alert.json" >/dev/null
-fi
+  }],
+  notificationChannels: [$channel],
+  documentation: {
+    mimeType: "text/markdown",
+    content: "A \($job) execution failed. Read its logs in Cloud Run before the epoch flips."
+  }
+}' >"$TMP/alert.json"
+ensure_alert "$ALERT_NAME" "$TMP/alert.json"
+# A log-based condition needs a notification rate limit.
+jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
+  displayName: $name,
+  combiner: "OR",
+  conditions: [{displayName: "failed start attempts", conditionMatchedLog: {filter: $filter}}],
+  alertStrategy: {notificationRateLimit: {period: "300s"}},
+  notificationChannels: [$channel],
+  documentation: {
+    mimeType: "text/markdown",
+    content: "Cloud Scheduler failed to start \($job). It retries three times; if all failed, run sh/run.sh before the epoch flips."
+  }
+}' >"$TMP/start-alert.json"
+ensure_alert "$START_ALERT_NAME" "$TMP/start-alert.json"
 
 log "set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:"
 printf '%s\n' "$KEEPER_SA"

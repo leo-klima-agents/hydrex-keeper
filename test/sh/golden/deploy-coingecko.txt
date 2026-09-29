@@ -1,6 +1,6 @@
-gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
-gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
-gcloud secrets versions list coingecko-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --format=json
+gcloud secrets versions list coingecko-api-key --project=hydrex-keeper-test --format=json
 gcloud run jobs deploy hydrex-keeper --source=<repo> --region=us-central1 --project=hydrex-keeper-test --service-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --set-secrets=^|^ALCHEMY_API_KEY=alchemy-api-key:latest|BASE_RPC_URLS=base-rpc-url:latest|COINGECKO_API_KEY=coingecko-api-key:latest --set-env-vars=^|^KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=86400,600,200,70,25,10,5 --task-timeout=5400s --max-retries=3 --tasks=1 --cpu=1 --memory=512Mi --quiet
 gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
 gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json

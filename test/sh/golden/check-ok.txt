@@ -3,18 +3,18 @@ gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test
 gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
-gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
-gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
 gcloud iam service-accounts keys list --iam-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --managed-by=user --format=json
 gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --format=json
 gcloud projects get-iam-policy hydrex-keeper-test --format=json
 curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
 curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
-gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type="email" AND labels.email_address="hydrex-admin@example.com" --format=json
-gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
-gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --format=json
 exit=0
 --- output ---
 ok: job service account is hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com

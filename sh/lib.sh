@@ -181,18 +181,17 @@ set_iam() {
 
 # find_channel: name of the email notification channel for ALERT_EMAIL, or "".
 find_channel() {
-  channels=$(gcloud beta monitoring channels list --project="$KEEPER_PROJECT" \
-    --filter="type=\"email\" AND labels.email_address=\"$ALERT_EMAIL\"" --format=json) || die "cannot list notification channels"
+  channels=$(gcloud beta monitoring channels list --project="$KEEPER_PROJECT" --format=json) || die "cannot list notification channels"
   require_json "$channels" "channel list"
-  printf '%s\n' "$channels" | jq -r 'first(.[] | .name) // ""'
+  printf '%s\n' "$channels" |
+    jq -r --arg email "$ALERT_EMAIL" 'first(.[] | select(.type == "email" and .labels.email_address == $email) | .name) // ""'
 }
 
 # find_alert NAME: the alert policy named NAME as JSON, or "".
 find_alert() {
-  alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" \
-    --filter="displayName=\"$1\"" --format=json) || die "cannot list alert policies"
+  alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" --format=json) || die "cannot list alert policies"
   require_json "$alerts" "alert policy list"
-  printf '%s\n' "$alerts" | jq -c 'first(.[]) // empty'
+  printf '%s\n' "$alerts" | jq -c --arg name "$1" 'first(.[] | select(.displayName == $name)) // empty'
 }
 
 describe_job() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
@@ -201,10 +200,9 @@ describe_scheduler() { gcloud scheduler jobs describe "$1" --location="$REGION" 
 
 # has_version SECRET: whether SECRET has an enabled version.
 has_version() {
-  versions=$(gcloud secrets versions list "$1" --project="$KEEPER_PROJECT" --filter="state=enabled" --format=json) ||
-    die "cannot list versions of $1"
+  versions=$(gcloud secrets versions list "$1" --project="$KEEPER_PROJECT" --format=json) || die "cannot list versions of $1"
   require_json "$versions" "secret version list"
-  [ "$(printf '%s\n' "$versions" | jq 'length')" -gt 0 ]
+  printf '%s\n' "$versions" | jq -e 'any(.[]; .state == "ENABLED")' >/dev/null
 }
 
 # rpc METHOD PARAMS: the result of a JSON-RPC call to the first of PUBLIC_RPCS that answers.
