@@ -1,21 +1,21 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, now, type Chain } from "./chain.ts";
+import { connect, hostOf, now, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
-import { priceFeed } from "./prices.ts";
-import { assertFresh, LayoutChanged, readEpoch, readLayout, readRewards, type Layout } from "./read.ts";
+import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
+import { assertFresh, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
 import { HORIZON, schedule } from "./schedule.ts";
 import { expected, select, type Candidate } from "./select.ts";
 import { castVote, VoteSent } from "./vote.ts";
+import { parseWhitelist, type Whitelist } from "./whitelist.ts";
 
-const PUBLIC_RPC = "https://mainnet.base.org";
+// Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
+const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
 const ATTEMPTS = 3;
 const RETRY_DELAY_MS = 5_000;
 const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
-
-type Whitelist = { pool: Address; name: string }[];
 
 type Run = {
   chain: Chain;
@@ -28,21 +28,21 @@ type Run = {
 
 async function pass(run: Run, until: number): Promise<void> {
   const { chain, whitelist, prices, account, dryRun } = run;
-  const epoch = await readEpoch(chain);
-  assertFresh(epoch);
-  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
-
   const pools = whitelist.map((w) => w.pool);
   run.layout ??= await readLayout(chain, pools);
-  let rewards;
+  let read;
   try {
-    rewards = await readRewards(chain, run.layout, epoch);
+    read = await readPass(chain, run.layout);
   } catch (error) {
     if (!(error instanceof LayoutChanged)) throw error;
     log.info("reward tokens changed, re-reading");
     run.layout = await readLayout(chain, pools);
-    rewards = await readRewards(chain, run.layout, epoch);
+    read = await readPass(chain, run.layout);
   }
+  const { epoch, rewards } = read;
+  assertFresh(epoch);
+  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
+
   const tokens = rewards.flatMap((p) => p.rewards.map((r) => r.token));
   const priced = await prices(tokens, until);
   if (priced.size === 0 && tokens.length > 0) throw new Error("no reward token could be priced");
@@ -88,14 +88,20 @@ async function main(): Promise<number> {
   const offsetFields = immediately ? [] : required("VOTE_OFFSETS").split(",");
   if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
   const offsets = offsetFields.map(BigInt);
-  const listed = JSON.parse(readFileSync(new URL("../pools.json", import.meta.url), "utf8")) as Whitelist;
-  const whitelist = listed.map((w) => ({ pool: getAddress(w.pool), name: String(w.name) }));
-  if (whitelist.length === 0) throw new Error("pools.json is empty");
+  const whitelist = parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8"));
 
-  const rpcUrls = [...required("BASE_RPC_URLS").split(","), PUBLIC_RPC].map((url) => url.trim());
+  const configured = required("BASE_RPC_URLS").split(",");
+  const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
   const chain = await connect(module, rpcUrls);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
-  log.info("keeper", { module, keeper: chain.keeper, conduit: chain.conduit, voter: chain.voter, dryRun });
+  const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
+  const source = combined([
+    defillama(),
+    ...(alchemyKey ? [alchemy(alchemyKey)] : []),
+    ...(coingeckoKey ? [coingecko(coingeckoKey)] : []),
+  ]);
+  const { keeper, conduit, voter } = chain;
+  log.info("keeper", { module, keeper, conduit, voter, rpcs: rpcUrls.map(hostOf), prices: source.name, dryRun });
 
   const epoch = await readEpoch(chain);
   if (!immediately && epoch.flip <= now() && now() - epoch.flip < HORIZON) {
@@ -108,7 +114,7 @@ async function main(): Promise<number> {
   if (note) log.warning(note, { flip });
   if (times.length === 0) return 0;
   const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
-  const run: Run = { chain, whitelist, prices: priceFeed(), account, dryRun };
+  const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
 
   let failed = 0;
   for (const [i, time] of times.entries()) {

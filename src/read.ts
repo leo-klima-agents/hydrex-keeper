@@ -23,15 +23,22 @@ function bribeCall(address: Address, functionName: string, args: readonly unknow
   return { address, abi: bribeAbi, functionName, args };
 }
 
-/** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
-export async function readEpoch(chain: Chain): Promise<Epoch> {
-  const { client, ve, conduit } = chain;
-  const [start, lastVoted, power] = (await readMany<bigint>(client, [
+function epochCalls(chain: Chain, calendar: bigint): Call[] {
+  const { ve, conduit } = chain;
+  return [
     voterCall(chain, "_epochTimestamp"),
     voterCall(chain, "lastVoted", [conduit]),
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendarEpoch()] },
-  ])) as [bigint, bigint, bigint];
-  return { start, flip: start + WEEK, power, votedThisEpoch: lastVoted >= start };
+    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendar] },
+  ];
+}
+
+function toEpoch([start, lastVoted, power]: bigint[]): Epoch {
+  return { start: start!, flip: start! + WEEK, power: power!, votedThisEpoch: lastVoted! >= start! };
+}
+
+/** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
+export async function readEpoch(chain: Chain): Promise<Epoch> {
+  return toEpoch(await readMany<bigint>(chain.client, epochCalls(chain, calendarEpoch())));
 }
 
 export function assertFresh(epoch: Epoch): void {
@@ -83,26 +90,31 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
   return { pools, gauges, bribes, lengths, slots: withTokens };
 }
 
-/** This epoch's bribes and fees and the votes of each pool. */
-export async function readRewards(
+/**
+ * A pass's one read: the epoch, as `readEpoch`, and each pool's liveness, votes, and bribes and fees this epoch. The
+ * epoch and votes come first, so that for up to 199 pools they come from one eth_call, and so from one block.
+ */
+export async function readPass(
   chain: Chain,
   { pools, gauges, bribes, lengths, slots }: Layout,
-  epoch: Epoch,
-): Promise<PoolRewards[]> {
+): Promise<{ epoch: Epoch; rewards: PoolRewards[] }> {
+  const calendar = calendarEpoch();
   const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(chain.client, [
+    ...epochCalls(chain, calendar),
     ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
     ...gauges.flatMap((gauge, i) => [
       voterCall(chain, "isAlive", [gauge]),
       voterCall(chain, "weights", [pools[i]]),
       voterCall(chain, "votes", [chain.conduit, pools[i]]),
     ]),
-    ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, epoch.start])),
+    ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
   ]);
-  if (lengths.some((length, b) => results[b] !== length)) throw new LayoutChanged("reward tokens changed");
-  const perPool = results.slice(bribes.length, bribes.length + 3 * pools.length);
-  const data = results.slice(bribes.length + 3 * pools.length) as [bigint, bigint, bigint][];
+  const epoch = toEpoch(results.slice(0, 3) as bigint[]);
+  if (lengths.some((length, b) => results[3 + b] !== length)) throw new LayoutChanged("reward tokens changed");
+  const perPool = results.slice(3 + bribes.length, 3 + bribes.length + 3 * pools.length);
+  const data = results.slice(3 + bribes.length + 3 * pools.length) as [bigint, bigint, bigint][];
 
-  return pools.map((pool, i) => {
+  const rewards = pools.map((pool, i) => {
     // Voter.votes keeps last epoch's vote until the next vote resets it.
     const ownVotes = epoch.votedThisEpoch ? (perPool[3 * i + 2] as bigint) : 0n;
     return {
@@ -115,4 +127,5 @@ export async function readRewards(
       ),
     };
   });
+  return { epoch, rewards };
 }

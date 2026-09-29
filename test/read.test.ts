@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroAddress, type Address } from "viem";
 import { readMany, WEEK, type Chain, type Client } from "../src/chain.ts";
-import { LayoutChanged, readEpoch, readLayout, readRewards } from "../src/read.ts";
+import { LayoutChanged, readEpoch, readLayout, readPass } from "../src/read.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [VOTER, CONDUIT, VE] = [addr(1), addr(2), addr(97)] as const;
@@ -30,7 +30,8 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
       });
     },
   } as unknown as Client;
-  return { client, module: addr(99), conduit: CONDUIT, keeper: addr(98), voter: VOTER, ve: VE };
+  const broadcast = async () => assert.fail("reads never send");
+  return { client, broadcast, module: addr(99), conduit: CONDUIT, keeper: addr(98), voter: VOTER, ve: VE };
 }
 
 const gauges: Record<string, Address> = { [POOL_A]: GAUGE_A, [POOL_B]: GAUGE_B, [POOL_C]: zeroAddress };
@@ -51,12 +52,12 @@ const amounts: Record<string, bigint> = {
   [INT_B + TOK_1]: 3n,
 };
 const voterState = { start: 1000n, lastVoted: 1000n };
-let pastVotesAt: unknown;
+let calendarAt: unknown;
 
 function table({ address, functionName, args = [] }: Call): unknown {
   const arg = args[0] as string;
   if (address === VE && functionName === "getPastVotes") {
-    pastVotesAt = args[1];
+    calendarAt = args[1];
     return 10n;
   }
   if (address === VOTER) {
@@ -82,7 +83,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
   if (functionName === "rewardsListLength") return BigInt(rewardTokens[address]!.length);
   if (functionName === "rewardTokens") return rewardTokens[address]![Number(args[0])];
   if (functionName === "rewardData") {
-    assert.equal(args[1], 1000n, "reads the epoch start");
+    assert.equal(args[1], calendarAt, "reads the calendar epoch");
     return [1000n, amounts[address + arg], 0n];
   }
   if (functionName === "decimals") {
@@ -107,52 +108,61 @@ test("readLayout drops pools without a gauge and defaults missing decimals", asy
   ]);
 });
 
-test("readRewards maps rewards, liveness and votes per pool", async () => {
+test("readPass reads the epoch, and maps rewards, liveness and votes per pool", async () => {
   const chain = fakeChain(table);
   const s = await readLayout(chain, [POOL_A, POOL_B]);
-  assert.deepEqual(await readRewards(chain, s, epoch), [
-    {
-      pool: POOL_A,
-      alive: true,
-      otherVotes: 900n,
-      ownVotes: 100n,
-      rewards: [{ token: TOK_1, amount: 7n, decimals: 6 }],
-    },
-    {
-      pool: POOL_B,
-      alive: false,
-      otherVotes: 500n,
-      ownVotes: 0n,
-      rewards: [
-        { token: TOK_3, amount: 5n, decimals: 18 },
-        { token: TOK_1, amount: 3n, decimals: 6 },
-      ],
-    },
-  ]);
-  const stale = await readRewards(chain, s, { ...epoch, votedThisEpoch: false });
-  assert.deepEqual(
-    [stale[0]!.otherVotes, stale[0]!.ownVotes],
-    [1000n, 0n],
-    "last epoch's own votes are neither subtracted nor counted",
-  );
+  assert.deepEqual(await readPass(chain, s), {
+    epoch,
+    rewards: [
+      {
+        pool: POOL_A,
+        alive: true,
+        otherVotes: 900n,
+        ownVotes: 100n,
+        rewards: [{ token: TOK_1, amount: 7n, decimals: 6 }],
+      },
+      {
+        pool: POOL_B,
+        alive: false,
+        otherVotes: 500n,
+        ownVotes: 0n,
+        rewards: [
+          { token: TOK_3, amount: 5n, decimals: 18 },
+          { token: TOK_1, amount: 3n, decimals: 6 },
+        ],
+      },
+    ],
+  });
+  voterState.lastVoted = 999n;
+  try {
+    const { epoch: stale, rewards } = await readPass(chain, s);
+    assert.equal(stale.votedThisEpoch, false);
+    assert.deepEqual(
+      [rewards[0]!.otherVotes, rewards[0]!.ownVotes],
+      [1000n, 0n],
+      "last epoch's own votes are neither subtracted nor counted",
+    );
+  } finally {
+    voterState.lastVoted = 1000n;
+  }
 });
 
-test("readRewards is one multicall however many calls it makes; no calls make no request", async () => {
+test("readPass is one multicall however many calls it makes; no calls make no request", async () => {
   const chain = fakeChain(table);
   const s = await readLayout(chain, [POOL_A]);
   multicalls = 0;
-  const [pool] = await readRewards(chain, { ...s, slots: Array.from({ length: 200 }, () => s.slots[0]!) }, epoch);
-  assert.equal(pool!.rewards.length, 200);
+  const { rewards } = await readPass(chain, { ...s, slots: Array.from({ length: 200 }, () => s.slots[0]!) });
+  assert.equal(rewards[0]!.rewards.length, 200);
   assert.deepEqual(await readMany(chain.client, []), []);
   assert.equal(multicalls, 1);
 });
 
-test("readRewards reports a grown reward token list", async () => {
+test("readPass reports a grown reward token list", async () => {
   const chain = fakeChain(table);
   const s = await readLayout(chain, [POOL_A]);
   rewardTokens[INT_A] = [TOK_2];
   try {
-    await assert.rejects(readRewards(chain, s, epoch), LayoutChanged);
+    await assert.rejects(readPass(chain, s), LayoutChanged);
   } finally {
     rewardTokens[INT_A] = [];
   }
@@ -164,11 +174,5 @@ test("readEpoch reads the epoch and the power at the calendar epoch in one round
   multicalls = 0;
   assert.deepEqual(await readEpoch(chain), epoch);
   assert.equal(multicalls, 1);
-  assert.equal(pastVotesAt, 1_790_812_800n);
-  voterState.lastVoted = 999n;
-  try {
-    assert.equal((await readEpoch(chain)).votedThisEpoch, false, "a vote from last epoch");
-  } finally {
-    voterState.lastVoted = 1000n;
-  }
+  assert.equal(calendarAt, 1_790_812_800n);
 });

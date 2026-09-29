@@ -28,7 +28,7 @@ export async function castVote(
   dryRun: boolean,
   until: number,
 ): Promise<void> {
-  const { client, module, keeper, conduit } = chain;
+  const { client, module, keeper, conduit, broadcast } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
@@ -40,23 +40,24 @@ export async function castVote(
     client.getBalance({ address: keeper }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]).then(([, ...rest]) => rest);
-  // A pending vote this process sent is replaced at a quarter higher fees; one of unknown fees is queued behind.
+  // The confirmed nonce, so that a pending vote is replaced, not queued behind: at a quarter more than the one this
+  // process sent, or at twice the estimate over one of unknown fees. If that one paid more, it is mined soon anyway.
   const lastSent = lastSentBy.get(client);
-  const nonce = pending > latest && lastSent?.nonce !== latest ? pending : latest;
-  const floor = lastSent?.nonce === nonce ? lastSent : { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n };
-  const max = (a: bigint, b: bigint) => (a > b ? a : b);
-  const tx: TransactionSerializableEIP1559 = {
+  const own = lastSent?.nonce === latest ? lastSent : undefined;
+  const bump = (fee: bigint, sent?: bigint) =>
+    sent !== undefined ? max(fee, (sent * 5n) / 4n) : pending > latest ? fee * 2n : fee;
+  const tx = {
     chainId: base.id,
     to: module,
     data,
     gas: (gas * 12n) / 10n,
-    maxFeePerGas: max(fees.maxFeePerGas, (floor.maxFeePerGas * 5n) / 4n),
-    maxPriorityFeePerGas: max(fees.maxPriorityFeePerGas, (floor.maxPriorityFeePerGas * 5n) / 4n),
-    nonce,
-  };
-  const cost = tx.gas! * tx.maxFeePerGas! + l1Fee;
+    maxFeePerGas: bump(fees.maxFeePerGas, own?.maxFeePerGas),
+    maxPriorityFeePerGas: bump(fees.maxPriorityFeePerGas, own?.maxPriorityFeePerGas),
+    nonce: latest,
+  } satisfies TransactionSerializableEIP1559;
+  const cost = tx.gas * tx.maxFeePerGas + l1Fee;
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
-  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce });
+  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce: tx.nonce });
 
   if (!account) {
     log.warning("signing skipped: no KMS key configured");
@@ -78,8 +79,8 @@ export async function castVote(
   }
 
   if (Date.now() >= until) throw new Error("out of time before sending");
-  const hash = await client.sendRawTransaction({ serializedTransaction: signed });
-  lastSentBy.set(client, { nonce, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas! });
+  lastSentBy.set(client, tx); // before sending: a send that fails may still have reached a node
+  const hash = await broadcast(signed, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
@@ -114,6 +115,8 @@ export async function castVote(
   }
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
 }
+
+const max = (a: bigint, b: bigint) => (a > b ? a : b);
 
 type Promises<T extends readonly unknown[]> = { [K in keyof T]: Promise<T[K]> };
 
