@@ -7,7 +7,7 @@ gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --filter=
 gcloud secrets describe alchemy-api-key --project=hydrex-keeper-test --format=value(name)
 gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
 gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --filter=state=enabled --format=json
-gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type="email" AND labels.email_address="hydrex-admin@example.com" --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
 exit=0

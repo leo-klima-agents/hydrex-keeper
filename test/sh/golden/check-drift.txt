@@ -14,7 +14,7 @@ curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235a
 curl https://base.drpc.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
 curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
 curl https://base.drpc.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
-gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type=email AND labels.email_address=hydrex-admin@example.com --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --filter=type="email" AND labels.email_address="hydrex-admin@example.com" --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper failed" --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --filter=displayName="hydrex-keeper start failed" --format=json
 exit=1
