@@ -36,7 +36,8 @@ ensure_secret() {
     log "creating $1"
     gcloud secrets create "$1" --project="$KEEPER_PROJECT" --replication-policy=automatic
   fi
-  set_iam "$1" "--project=$KEEPER_PROJECT" "$(render_policy secret.iam.json.tmpl)" secrets
+  secret_policy=$(render_policy secret.iam.json.tmpl)
+  set_iam "$1" "--project=$KEEPER_PROJECT" "$secret_policy" secrets
   has_version "$1" || log "add the $2: printf '%s' '…' | gcloud secrets versions add $1 --project=$KEEPER_PROJECT --data-file=-"
 }
 ensure_secret "$RPC_SECRET" "RPC URLs"
@@ -44,7 +45,7 @@ ensure_secret "$ALCHEMY_SECRET" "Alchemy API key"
 [ -z "$COINGECKO_SECRET" ] || ensure_secret "$COINGECKO_SECRET" "CoinGecko Demo API key"
 
 log "== 4/4 alerts"
-channel=$(find_channel)
+channel=$(find_channel "$KEEPER_PROJECT")
 if [ -n "$channel" ]; then
   log "exists: $channel"
 else
@@ -52,13 +53,14 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-# ensure_alert NAME FILE: creates the alert policy in FILE unless one named NAME exists.
+# ensure_alert PROJECT NAME FILE: creates the alert policy in FILE unless PROJECT has one named NAME.
 ensure_alert() {
-  if [ -n "$(find_alert "$1")" ]; then
-    log "exists: $1"
+  alert=$(find_alert "$1" "$2")
+  if [ -n "$alert" ]; then
+    log "exists: $2"
   else
-    log "creating alert policy: $1"
-    gcloud monitoring policies create --project="$KEEPER_PROJECT" --policy-from-file="$2" >/dev/null
+    log "creating alert policy: $2"
+    gcloud monitoring policies create --project="$1" --policy-from-file="$3" >/dev/null
   fi
 }
 # A single failed attempt in a five-minute window fires it.
@@ -82,7 +84,7 @@ jq -n --arg name "$ALERT_NAME" --arg filter "$ALERT_FILTER" --arg channel "$chan
     content: "A \($job) execution failed. Read its logs in Cloud Run before the epoch flips."
   }
 }' >"$TMP/alert.json"
-ensure_alert "$ALERT_NAME" "$TMP/alert.json"
+ensure_alert "$KEEPER_PROJECT" "$ALERT_NAME" "$TMP/alert.json"
 # A log-based condition needs a notification rate limit.
 jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
   displayName: $name,
@@ -95,7 +97,7 @@ jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg ch
     content: "Cloud Scheduler failed to start \($job). It retries three times; if all failed, run sh/run.sh before the epoch flips."
   }
 }' >"$TMP/start-alert.json"
-ensure_alert "$START_ALERT_NAME" "$TMP/start-alert.json"
+ensure_alert "$KEEPER_PROJECT" "$START_ALERT_NAME" "$TMP/start-alert.json"
 
 log "set KEEPER_SA in hydrex-keeper-key's config.env and run its sh/grant.sh:"
 printf '%s\n' "$KEEPER_SA"

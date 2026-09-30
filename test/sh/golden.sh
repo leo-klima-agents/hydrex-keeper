@@ -60,6 +60,7 @@ golden_case() {
 
 golden_case setup-fresh fresh keeper setup.sh
 golden_case setup-existing existing keeper setup.sh
+golden_case setup-list-fails list-fails keeper setup.sh
 golden_case deploy-no-secret fresh keeper deploy.sh
 golden_case deploy-first first-deploy keeper deploy.sh
 golden_case deploy-existing existing keeper deploy.sh

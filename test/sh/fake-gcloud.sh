@@ -17,7 +17,7 @@ email=hydrex-admin@example.com
 channel=projects/$project/notificationChannels/1234567890
 run_uri=https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/$job:run
 
-# What exists; drift bends the live state; list-fails denies listing scheduler jobs.
+# What exists; drift bends the live state; list-fails denies listing scheduler jobs and alert policies.
 has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no list_fails=no
 case "$FAKE_GCLOUD_SCENARIO" in
   fresh) has_sas=no has_secret=no has_version=no has_channel=no has_alert=no has_job=no has_scheduler=no ;;
@@ -189,6 +189,10 @@ case "$*" in
     ;;
   "monitoring policies list "*)
     log_call "$@"
+    [ "$list_fails" = no ] || {
+      printf 'ERROR: (gcloud.monitoring.policies.list) PERMISSION_DENIED\n' >&2
+      exit 1
+    }
     if [ "$has_alert" = no ]; then printf '[]\n'; else printf '[%s,%s]\n' "$(alert_json)" "$(start_alert_json)"; fi
     ;;
   "monitoring policies create "*)

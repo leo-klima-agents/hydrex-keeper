@@ -20,7 +20,8 @@ gcloud run jobs deploy "$JOB" --source="$REPO_ROOT" --region="$REGION" --project
   --task-timeout="${TASK_TIMEOUT}s" --max-retries="$MAX_RETRIES" --tasks=1 --cpu=1 --memory=512Mi --quiet
 
 log "== 2/3 job IAM"
-set_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$(render_policy job.iam.json.tmpl)" run jobs
+job_policy=$(render_policy job.iam.json.tmpl)
+set_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$job_policy" run jobs
 
 log "== 3/3 schedules"
 while IFS="$TAB" read -r name cron; do

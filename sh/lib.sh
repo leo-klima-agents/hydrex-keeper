@@ -179,19 +179,19 @@ set_iam() {
   gcloud "$@" set-iam-policy $set_iam_flags "$set_iam_resource" "$TMP/policy.json" >/dev/null
 }
 
-# find_channel: name of the email notification channel for ALERT_EMAIL, or "".
+# find_channel PROJECT: name of PROJECT's email notification channel for ALERT_EMAIL, or "".
 find_channel() {
-  channels=$(gcloud beta monitoring channels list --project="$KEEPER_PROJECT" --format=json) || die "cannot list notification channels"
+  channels=$(gcloud beta monitoring channels list --project="$1" --format=json) || die "cannot list notification channels"
   require_json "$channels" "channel list"
   printf '%s\n' "$channels" |
     jq -r --arg email "$ALERT_EMAIL" 'first(.[] | select(.type == "email" and .labels.email_address == $email) | .name) // ""'
 }
 
-# find_alert NAME: the alert policy named NAME as JSON, or "".
+# find_alert PROJECT NAME: PROJECT's alert policy named NAME as JSON, or "".
 find_alert() {
-  alerts=$(gcloud monitoring policies list --project="$KEEPER_PROJECT" --format=json) || die "cannot list alert policies"
+  alerts=$(gcloud monitoring policies list --project="$1" --format=json) || die "cannot list alert policies"
   require_json "$alerts" "alert policy list"
-  printf '%s\n' "$alerts" | jq -c --arg name "$1" 'first(.[] | select(.displayName == $name)) // empty'
+  printf '%s\n' "$alerts" | jq -c --arg name "$2" 'first(.[] | select(.displayName == $name)) // empty'
 }
 
 describe_job() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
@@ -222,13 +222,13 @@ schedule_start() {
   # shellcheck disable=SC2086
   set -- $1
   set +f
-  [ $# -eq 5 ] && [ "$3" = '*' ] && [ "$4" = '*' ] || die "SCHEDULES entries must be 'M H * * D': $*"
+  if [ $# -ne 5 ] || [ "$3" != '*' ] || [ "$4" != '*' ]; then die "SCHEDULES entries must be 'M H * * D': $*"; fi
   case "$1$2$5" in *[!0-9]*) die "SCHEDULES entries must be 'M H * * D': $*" ;; esac
   # Leading zeros would read as octal in arithmetic.
   minute=$(printf '%s' "$1" | sed 's/^0*\([0-9]\)/\1/')
   hour=$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')
   weekday=$(printf '%s' "$5" | sed 's/^0*\([0-9]\)/\1/')
-  [ "$minute" -le 59 ] && [ "$hour" -le 23 ] && [ "$weekday" -le 7 ] || die "SCHEDULES entry out of range: $*"
+  if [ "$minute" -gt 59 ] || [ "$hour" -gt 23 ] || [ "$weekday" -gt 7 ]; then die "SCHEDULES entry out of range: $*"; fi
   schedule_start_seconds=$(((FLIP_WEEKDAY - weekday + 7) % 7 * 86400 - hour * 3600 - minute * 60))
   [ "$schedule_start_seconds" -gt 0 ] || schedule_start_seconds=$((schedule_start_seconds + 604800))
   printf '%s\n' "$schedule_start_seconds"

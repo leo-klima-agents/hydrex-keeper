@@ -45,7 +45,8 @@ secrets=$(json_field "$container_env" '[.[] | select(.valueFrom) | "\(.name)=\(.
 expect "job env" "$env_vars" "$ENV_VARS"
 expect "job secrets" "$secrets" "$SECRETS"
 
-expect_policy job "$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)" job.iam.json.tmpl
+job_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
+expect_policy job "$job_policy" job.iam.json.tmpl
 
 # Schedules
 while IFS="$TAB" read -r name cron; do
@@ -72,7 +73,8 @@ if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler
 # Secrets
 for secret in $SECRET_NAMES; do
   if has_version "$secret"; then ok "$secret has an enabled version"; else fail "$secret has no enabled version"; fi
-  expect_policy "$secret" "$(get_iam "$secret" "--project=$KEEPER_PROJECT" secrets)" secret.iam.json.tmpl
+  secret_policy=$(get_iam "$secret" "--project=$KEEPER_PROJECT" secrets)
+  expect_policy "$secret" "$secret_policy" secret.iam.json.tmpl
 done
 
 # Service accounts
@@ -104,11 +106,11 @@ else
 fi
 
 # Alerts
-channel=$(find_channel)
+channel=$(find_channel "$KEEPER_PROJECT")
 [ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"
 # expect_alert NAME FILTER
 expect_alert() {
-  alert=$(find_alert "$1")
+  alert=$(find_alert "$KEEPER_PROJECT" "$1")
   if [ -z "$alert" ]; then
     fail "alert policy \"$1\" missing"
     return 0

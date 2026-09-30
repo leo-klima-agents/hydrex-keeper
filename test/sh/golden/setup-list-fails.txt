@@ -1,0 +1,26 @@
+gcloud services enable artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com --project=hydrex-keeper-test
+gcloud iam service-accounts describe hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)
+gcloud iam service-accounts describe hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --project=hydrex-keeper-test --format=value(email)
+gcloud secrets describe base-rpc-url --project=hydrex-keeper-test --format=value(name)
+gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
+gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --format=json
+gcloud secrets describe alchemy-api-key --project=hydrex-keeper-test --format=value(name)
+gcloud secrets get-iam-policy --project=hydrex-keeper-test alchemy-api-key --format=json
+gcloud secrets versions list alchemy-api-key --project=hydrex-keeper-test --format=json
+gcloud beta monitoring channels list --project=hydrex-keeper-test --format=json
+gcloud monitoring policies list --project=hydrex-keeper-test --format=json
+exit=1
+--- output ---
+== 1/4 APIs
+== 2/4 service accounts
+exists: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
+exists: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
+== 3/4 secrets
+exists: base-rpc-url
+iam: base-rpc-url unchanged
+exists: alchemy-api-key
+iam: alchemy-api-key unchanged
+== 4/4 alerts
+exists: projects/hydrex-keeper-test/notificationChannels/1234567890
+ERROR: (gcloud.monitoring.policies.list) PERMISSION_DENIED
+error: cannot list alert policies
