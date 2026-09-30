@@ -108,23 +108,23 @@ fi
 # Alerts
 channel=$(find_channel "$KEEPER_PROJECT")
 [ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"
-# expect_alert NAME FILTER
+# expect_alert PROJECT NAME FILTER
 expect_alert() {
-  alert=$(find_alert "$KEEPER_PROJECT" "$1")
+  alert=$(find_alert "$1" "$2")
   if [ -z "$alert" ]; then
-    fail "alert policy \"$1\" missing"
+    fail "alert policy \"$2\" missing"
     return 0
   fi
-  expect "\"$1\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
+  expect "\"$2\" enabled" "$(json_field "$alert" '.enabled | tostring')" "true"
   if [ -n "$channel" ] && [ "$(json_field "$alert" ".notificationChannels | index(\"$channel\") != null")" = true ]; then
-    ok "\"$1\" notifies $ALERT_EMAIL"
+    ok "\"$2\" notifies $ALERT_EMAIL"
   else
-    fail "\"$1\" does not notify $ALERT_EMAIL"
+    fail "\"$2\" does not notify $ALERT_EMAIL"
   fi
-  expect "\"$1\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$2"
+  expect "\"$2\" filter" "$(json_field "$alert" '.conditions[0] | (.conditionThreshold // .conditionMatchedLog).filter')" "$3"
 }
-expect_alert "$ALERT_NAME" "$ALERT_FILTER"
-expect_alert "$START_ALERT_NAME" "$START_ALERT_FILTER"
+expect_alert "$KEEPER_PROJECT" "$ALERT_NAME" "$ALERT_FILTER"
+expect_alert "$KEEPER_PROJECT" "$START_ALERT_NAME" "$START_ALERT_FILTER"
 
 [ "$failed" -ne 0 ] || log "all checks passed"
 exit "$failed"
