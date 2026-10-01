@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { BLOCK_TIME, type Block } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
-import { POST_FLIP_WAIT, type Schedule } from "./schedule.ts";
+import type { Schedule } from "./schedule.ts";
 import { VoteSent } from "./vote.ts";
 
 const ATTEMPTS = 3;
@@ -10,8 +10,8 @@ const RETRY_DELAY_MS = 5_000;
 // would stall the loop behind a stuck vote; shorter would replace a vote about to be mined.
 const PASS_BUDGET_MS = 5_000;
 
-/** What a pass did: voted (or signed, in a dry run), left a vote pending, kept the current one, or could not vote. */
-export type Outcome = "voted" | "pending" | "kept" | "skipped" | "waiting";
+/** What a pass did: voted (or signed, in a dry run), left a vote pending, kept the current one, or could not send. */
+export type Outcome = "voted" | "pending" | "kept" | "skipped";
 
 export type Io = {
   nextBlock: (after: bigint, mintedAt: bigint, until: number) => Promise<Block | undefined>;
@@ -22,7 +22,7 @@ export type Io = {
 
 /**
  * Runs the plan: each pass on the first block minted at or after its time, with the time until the next one, then
- * one on every block until the vote after the flip is in or POST_FLIP_WAIT has passed. Returns the failures.
+ * one on every block up to the last one before the flip. Returns the number of failures.
  */
 export async function runPasses(plan: Schedule, flip: bigint, io: Io): Promise<number> {
   const now = io.now ?? Date.now;
@@ -71,17 +71,19 @@ export async function runPasses(plan: Schedule, flip: bigint, io: Io): Promise<n
   if (plan.everyBlock === undefined) return failed;
   await wait(Math.max(0, ms(plan.everyBlock) - now()));
   log.info("passing on every block", { from: plan.everyBlock, flip });
-  const end = ms(flip + POST_FLIP_WAIT);
+  const lastSend = ms(flip - BLOCK_TIME); // a vote sent later could only be mined after the flip
+  let last: bigint | undefined;
   let passes = 0;
   let succeeded = 0;
-  let voted = false;
   for (;;) {
-    const block = await io.nextBlock(after, 0n, end);
-    if (!block) break;
-    if (after && block.number > after + 1n) log.warning("blocks skipped", { from: after + 1n, to: block.number - 1n });
-    after = block.number;
+    const block = await io.nextBlock(after, 0n, ms(flip + BLOCK_TIME));
+    if (!block || block.timestamp >= flip) break;
+    if (last !== undefined && block.number > last + 1n) {
+      log.warning("blocks skipped", { from: last + 1n, to: block.number - 1n });
+    }
+    last = after = block.number;
     passes++;
-    const until = Math.min(now() + PASS_BUDGET_MS, end);
+    const until = Math.min(now() + PASS_BUDGET_MS, lastSend);
     const started = now();
     try {
       const outcome = await io.pass(block, until);
@@ -92,20 +94,13 @@ export async function runPasses(plan: Schedule, flip: bigint, io: Io): Promise<n
         block: block.number,
         secondsToFlip: flip - block.timestamp,
       });
-      if (block.timestamp >= flip && (outcome === "voted" || outcome === "kept")) {
-        voted = true;
-        break;
-      }
     } catch (error) {
       log.error("pass failed", { ms: now() - started, block: block.number, error: errorMessage(error) });
     }
   }
-  log.info("passed on every block", { passes, failed: passes - succeeded, voted });
+  log.info("passed on every block", { passes, failed: passes - succeeded });
   if (succeeded === 0) {
-    log.error(passes ? "every pass on every block failed" : "no block seen");
-    failed++;
-  } else if (!voted) {
-    log.error(`no vote after the flip within ${POST_FLIP_WAIT} s`, { flip });
+    log.error(passes ? "every pass on every block failed" : "no block seen before the flip");
     failed++;
   }
   return failed;

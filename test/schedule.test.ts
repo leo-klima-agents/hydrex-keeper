@@ -57,9 +57,14 @@ test("schedule runs what is due, a missed pass right away, or nothing", () => {
     "a restart inside the window",
   );
   assert.deepEqual(
-    schedule(flip, offsets, everyBlockFrom, flip + 30n, false),
-    { times: [], everyBlock: flip + 30n, note: "restarted after the flip; finishing the post-flip vote" },
-    "a restart after the flip",
+    schedule(flip, offsets, everyBlockFrom, flip - 50n, false),
+    { times: [flip - 50n], everyBlock: flip - 10n, note: "running the missed pass now" },
+    "a restart after a missed pass, before the window: the pass runs now, then the window",
+  );
+  assert.equal(
+    schedule(flip, offsets, everyBlockFrom, flip + 100n, false).times.length,
+    0,
+    "a restart after the flip does nothing",
   );
   assert.deepEqual(
     schedule(flip, offsets, everyBlockFrom, flip - 86400n + 40n, false),
@@ -73,12 +78,10 @@ test("schedule runs what is due, a missed pass right away, or nothing", () => {
   );
 });
 
-test("passes vote proportionally far from the flip and after it, for the best expected reward in between", () => {
+test("passes vote proportionally far from the flip, for the best expected reward near it", () => {
   assert.equal(modeAt(flip - 86400n, flip), "proportional");
   assert.equal(modeAt(flip - 3601n, flip), "proportional");
   assert.equal(modeAt(flip - 3600n, flip), "optimal");
   assert.equal(modeAt(flip - 60n, flip), "optimal");
   assert.equal(modeAt(flip - 1n, flip), "optimal", "the last block before the flip");
-  assert.equal(modeAt(flip + 1n, flip), "proportional", "the flip block");
-  assert.equal(modeAt(flip + 17n, flip), "proportional");
 });

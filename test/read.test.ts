@@ -106,7 +106,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
 }
 
 const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, votedThisEpoch: true };
-const at = { powerEpoch: 1000n, rewardsEpoch: 1000n };
+const at = { epoch: 1000n };
 
 test("readLayout drops pools without a gauge and defaults missing decimals", async () => {
   const s = await readLayout(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
@@ -192,13 +192,13 @@ test("readEpoch reads the epoch and the power at the calendar epoch in one round
   assert.throws(() => assertFresh(epoch, 1000n + WEEK), /stale/);
 });
 
-test("readPass reads the power and the rewards at the epochs it is given, pinned to a block", async () => {
+test("readPass reads the power and the rewards at the epoch it is given, pinned to a block", async () => {
   const chain = fakeChain(table);
   const s = await readLayout(chain, [POOL_A, POOL_B]);
   rewardsAt = new Set();
-  const { epoch: read } = await readPass(chain, s, { powerEpoch: 1000n + WEEK, rewardsEpoch: 1000n, blockNumber: 42n });
+  const { epoch: read } = await readPass(chain, s, { epoch: 2000n, blockNumber: 42n });
   assert.equal(readAt, 42n, "the multicall is pinned");
-  assert.equal(powerAt, 1000n + WEEK, "the new epoch's power");
-  assert.deepEqual([...rewardsAt], [1000n], "the ended epoch's rewards");
+  assert.equal(powerAt, 2000n);
+  assert.deepEqual([...rewardsAt], [2000n]);
   assert.deepEqual(read, epoch, "the Voter's own epoch, whatever was asked");
 });

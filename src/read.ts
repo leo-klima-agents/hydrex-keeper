@@ -24,12 +24,12 @@ function bribeCall(address: Address, functionName: string, args: readonly unknow
   return { address, abi: bribeAbi, functionName, args };
 }
 
-function epochCalls(chain: Chain, powerEpoch: bigint): Call[] {
+function epochCalls(chain: Chain, epoch: bigint): Call[] {
   const { ve, conduit } = chain;
   return [
     voterCall(chain, "_epochTimestamp"),
     voterCall(chain, "lastVoted", [conduit]),
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, powerEpoch] },
+    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, epoch] },
   ];
 }
 
@@ -91,31 +91,29 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
   return { pools, gauges, bribes, lengths, slots: withTokens };
 }
 
-/** Where a pass reads: the power at `powerEpoch`, the bribes and fees of `rewardsEpoch`, at `blockNumber` or latest. */
-export type PassAt = { powerEpoch: bigint; rewardsEpoch: bigint; blockNumber?: bigint };
+/** Where a pass reads: the power, bribes and fees of `epoch` (its start), as of `blockNumber` or the latest block. */
+export type PassAt = { epoch: bigint; blockNumber?: bigint };
 
 /**
- * A pass's one read: the epoch, as `readEpoch`, and each pool's liveness, votes, and bribes and fees. The epoch and
- * votes come first, so that for up to 199 pools they come from one eth_call, and so from one block. The two epochs
- * differ only after the flip: the vote is then for the new epoch, whose rewards are not posted yet, so the ended
- * epoch's are the basis.
+ * A pass's one read: the epoch, as `readEpoch`, and each pool's liveness, votes, and bribes and fees this epoch. The
+ * epoch and votes come first, so that for up to 199 pools they come from one eth_call, and so from one block.
  */
 export async function readPass(
   chain: Chain,
   { pools, gauges, bribes, lengths, slots }: Layout,
-  { powerEpoch, rewardsEpoch, blockNumber }: PassAt,
+  { epoch: at, blockNumber }: PassAt,
 ): Promise<{ epoch: Epoch; rewards: PoolRewards[] }> {
   const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(
     chain.client,
     [
-      ...epochCalls(chain, powerEpoch),
+      ...epochCalls(chain, at),
       ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
       ...gauges.flatMap((gauge, i) => [
         voterCall(chain, "isAlive", [gauge]),
         voterCall(chain, "weights", [pools[i]]),
         voterCall(chain, "votes", [chain.conduit, pools[i]]),
       ]),
-      ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, rewardsEpoch])),
+      ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, at])),
     ],
     blockNumber === undefined ? {} : { blockNumber },
   );

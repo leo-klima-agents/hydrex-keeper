@@ -6,7 +6,7 @@ import { errorMessage, log } from "./log.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, calendarEpoch, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
 import { runPasses, type Outcome } from "./run.ts";
-import { HORIZON, modeAt, POST_FLIP_WAIT, schedule } from "./schedule.ts";
+import { HORIZON, modeAt, schedule } from "./schedule.ts";
 import { expected, select, type Candidate } from "./select.ts";
 import { castVote } from "./vote.ts";
 import { parseWhitelist, type Whitelist } from "./whitelist.ts";
@@ -27,14 +27,10 @@ type Run = {
 /** One pass at `block`: reads the state there, splits the votes, and votes if that pays, waiting at most until `until` (ms). */
 async function pass(run: Run, block: Block, until: number): Promise<Outcome> {
   const { chain, whitelist, prices, account, dryRun, flip } = run;
-  const postFlip = block.timestamp >= flip;
   const mode = modeAt(block.timestamp, flip);
-  // After the flip the vote is for the new epoch, whose rewards are not posted yet: the ended epoch's are the basis.
-  const rewardsEpoch = flip - WEEK;
-  const powerEpoch = postFlip ? flip : rewardsEpoch;
   log.info("pass", { block: block.number, timestamp: block.timestamp, secondsToFlip: flip - block.timestamp, mode });
   const pools = whitelist.map((w) => w.pool);
-  const at = { powerEpoch, rewardsEpoch, blockNumber: block.number };
+  const at = { epoch: flip - WEEK, blockNumber: block.number };
   run.layout ??= await readLayout(chain, pools);
   let read;
   try {
@@ -46,13 +42,7 @@ async function pass(run: Run, block: Block, until: number): Promise<Outcome> {
     read = await readPass(chain, run.layout, at);
   }
   const { epoch, rewards } = read;
-  if (epoch.start !== powerEpoch) {
-    if (postFlip && epoch.start === rewardsEpoch) {
-      log.info("minter not updated yet; waiting", { block: block.number, start: epoch.start });
-      return "waiting";
-    }
-    throw new Error(`Voter epoch ${epoch.start} is stale at block ${block.number}; minter not updated`);
-  }
+  assertFresh(epoch, at.epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
   const tokens = rewards.flatMap((p) => p.rewards.map((r) => r.token));
@@ -88,14 +78,9 @@ async function pass(run: Run, block: Block, until: number): Promise<Outcome> {
     log.info(reason, { mode, plan, expectedUsd, currentVote });
     return "kept";
   }
-  if (!postFlip && block.timestamp + BLOCK_TIME >= flip) {
-    // The vote would be mined in a block after the flip, where the Voter rejects it until the minter is updated.
-    log.info("not sent: a vote from this block could only land after the flip", {
-      mode,
-      plan,
-      expectedUsd,
-      currentVote,
-    });
+  if (block.timestamp + BLOCK_TIME >= flip || Date.now() >= until) {
+    // The vote would be mined after the flip, where the Voter rejects it until the minter is updated.
+    log.info("not sent: too late to be mined before the flip", { mode, plan, expectedUsd, currentVote });
     return "skipped";
   }
   log.info("voting", { mode, plan, expectedUsd, currentVote, power: epoch.power });
@@ -132,15 +117,12 @@ async function main(): Promise<number> {
   log.info("keeper", { module, keeper, conduit, voter, rpcs: rpcUrls.map(hostOf), prices: source.name, dryRun });
 
   const epoch = await readEpoch(chain);
-  const epochStart = calendarEpoch();
-  const sinceFlip = now() - epochStart;
-  if (!immediately && sinceFlip >= POST_FLIP_WAIT && sinceFlip < HORIZON) {
-    log.warning("restarted after the flip; nothing to do", { flip: epochStart });
+  if (!immediately && epoch.flip <= now() && now() - epoch.flip < HORIZON) {
+    log.warning("restarted after the flip; nothing to do", { flip: epoch.flip });
     return 0;
   }
-  // Within POST_FLIP_WAIT of a flip, an execution finishes that flip's post-flip vote; otherwise it serves the next.
-  const flip = !immediately && sinceFlip < POST_FLIP_WAIT ? epochStart : epochStart + WEEK;
-  if (flip > epochStart) assertFresh(epoch, epochStart);
+  assertFresh(epoch, calendarEpoch());
+  const { flip } = epoch;
   const plan = schedule(flip, offsets, everyBlockFrom, now(), immediately);
   if (plan.note) log.warning(plan.note, { flip });
   const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun, flip };

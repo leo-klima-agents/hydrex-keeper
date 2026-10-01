@@ -2,7 +2,6 @@ import type { Mode } from "./select.ts";
 
 export const HORIZON = 3600n; // an execution runs the passes due within this many seconds; HORIZON in sh/lib.sh
 export const PROPORTIONAL_BEFORE = 3600n; // a pass earlier than this before the flip votes proportionally
-export const POST_FLIP_WAIT = 900n; // seconds after the flip to keep waiting for Hydrex's minter; it has taken 16 s
 
 /** Times (unix seconds) of the passes due within the horizon, earliest first. */
 export function passTimes(flip: bigint, offsets: bigint[], at: bigint, horizon = HORIZON): bigint[] {
@@ -39,15 +38,19 @@ export function schedule(
   immediately: boolean,
 ): Schedule {
   if (immediately) return { times: [at] };
-  if (at >= flip) return { times: [], everyBlock: at, note: "restarted after the flip; finishing the post-flip vote" };
   const times = passTimes(flip, offsets, at);
   const everyBlock = everyBlockStart(flip, everyBlockFrom, at);
-  if (times.length || everyBlock !== undefined) return { times, ...(everyBlock === undefined ? {} : { everyBlock }) };
-  if (missed(flip, offsets, at)) return { times: [at], note: "running the missed pass now" };
+  const loop = everyBlock === undefined ? {} : { everyBlock };
+  // A pass missed within the horizon runs now, unless the pass on every block already runs in its place.
+  const windowOpen = everyBlock !== undefined && everyBlock <= at;
+  if (times.length === 0 && !windowOpen && flip > at && missed(flip, offsets, at)) {
+    return { times: [at], note: "running the missed pass now", ...loop };
+  }
+  if (times.length || everyBlock !== undefined) return { times, ...loop };
   return { times: [], note: `no pass due within ${HORIZON} s: flip at ${flip}, offsets ${offsets.join(",")}` };
 }
 
-/** Proportional far from the flip and after it, when the other voters' final state is unknown or beyond reach. */
+/** Proportional far from the flip, when the other voters have not settled; for the best expected reward near it. */
 export function modeAt(timestamp: bigint, flip: bigint): Mode {
-  return timestamp < flip - PROPORTIONAL_BEFORE || timestamp >= flip ? "proportional" : "optimal";
+  return timestamp < flip - PROPORTIONAL_BEFORE ? "proportional" : "optimal";
 }

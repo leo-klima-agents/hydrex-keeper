@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Block } from "../src/chain.ts";
 import { runPasses, type Outcome } from "../src/run.ts";
-import { POST_FLIP_WAIT } from "../src/schedule.ts";
 import { VoteSent } from "../src/vote.ts";
 
 const flip = 1_790_812_800n;
@@ -49,20 +48,17 @@ function world(startMs: number, outcome: (block: Block) => Outcome | Error) {
 const ms = (seconds: bigint) => Number(seconds) * 1000;
 const timestamps = (passes: Passed[]) => passes.map((p) => p.block.timestamp - flip);
 
-test("a pass runs on the first block minted at or after its time, then one on every block until the post-flip vote", async () => {
-  const minterAt = flip + 17n;
-  const { io, passes } = world(ms(flip - 1200n), ({ timestamp }) =>
-    timestamp < flip ? "kept" : timestamp < minterAt ? "waiting" : "voted",
-  );
+test("a pass runs on the first block minted at or after its time, then one on every block up to the flip", async () => {
+  const { io, passes } = world(ms(flip - 1200n), ({ timestamp }) => (timestamp < flip - 2n ? "kept" : "skipped"));
   const failed = await runPasses({ times: [flip - 60n], everyBlock: flip - 10n }, flip, io);
   assert.equal(failed, 0);
   const [first, ...loop] = passes;
   assert.equal(first!.block.timestamp, flip - 59n, "the first odd second at or after the due time");
   assert.equal(first!.until, ms(flip - 10n), "until the pass on every block starts");
-  assert.deepEqual(timestamps(loop), [-11n, -9n, -7n, -5n, -3n, -1n, 1n, 3n, 5n, 7n, 9n, 11n, 13n, 15n, 17n]);
+  assert.deepEqual(timestamps(loop), [-11n, -9n, -7n, -5n, -3n, -1n], "every block up to the last before the flip");
   assert.ok(
-    loop.every((p) => p.until === p.at + 5_000),
-    "five seconds each",
+    loop.every((p) => p.until === Math.min(p.at + 5_000, ms(flip - 2n))),
+    "five seconds, or until two before the flip",
   );
   assert.ok(
     loop.every((p, i) => i === 0 || p.block.number === loop[i - 1]!.block.number + 1n),
@@ -84,28 +80,12 @@ test("a pass without a block before the next one is skipped; a failing one is re
   assert.equal(sent.passes.length, 1, "a sent vote is not retried");
 });
 
-test("on every block, a failure or a pending vote is left to the next block, and the first post-flip vote ends it", async () => {
-  const { io, passes } = world(ms(flip - 4n), ({ timestamp }) => {
-    if (timestamp === flip - 3n) return new Error("boom");
-    if (timestamp < flip) return "skipped";
-    if (timestamp < flip + 17n) return "waiting";
-    if (timestamp === flip + 17n) return "pending";
-    return "kept";
-  });
-  assert.equal(await runPasses({ times: [], everyBlock: flip - 4n }, flip, io), 0);
-  assert.deepEqual(timestamps(passes).at(-1), 19n, "the pending vote was found recorded on the next block");
-});
-
-test("no vote after the flip in time, or no pass succeeding at all, fails the execution", async () => {
-  const waiting = world(ms(flip - 4n), ({ timestamp }) => (timestamp < flip ? "kept" : "waiting"));
-  assert.equal(await runPasses({ times: [], everyBlock: flip - 4n }, flip, waiting.io), 1);
-  const last = waiting.passes.at(-1)!.block.timestamp;
-  assert.ok(last >= flip + POST_FLIP_WAIT - 4n && last < flip + POST_FLIP_WAIT, `kept trying until ${last - flip}`);
+test("on every block, a failure is left to the next block, and only every pass failing fails the execution", async () => {
+  const once = world(ms(flip - 4n), ({ timestamp }) => (timestamp === flip - 3n ? new Error("boom") : "kept"));
+  assert.equal(await runPasses({ times: [], everyBlock: flip - 4n }, flip, once.io), 0);
+  assert.deepEqual(timestamps(once.passes), [-5n, -3n, -1n], "a restart inside the window passes what is left");
 
   const broken = world(ms(flip - 4n), () => new Error("boom"));
   assert.equal(await runPasses({ times: [], everyBlock: flip - 4n }, flip, broken.io), 1);
-
-  const restarted = world(ms(flip + 30n), () => "voted");
-  assert.equal(await runPasses({ times: [], everyBlock: flip + 30n }, flip, restarted.io), 0);
-  assert.equal(restarted.passes.length, 1, "a restart after the minter's update votes at once");
+  assert.equal(broken.passes.length, 3);
 });

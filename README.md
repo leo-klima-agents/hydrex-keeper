@@ -24,17 +24,14 @@ expected reward: `x` votes on a pool with `V` votes from others and `usd` of rew
 save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for adds two bribe deposits to
 the transaction, and a share that small earns almost nothing. Votes do not carry over, so the first pass of an epoch
 votes; later passes vote again only if that pays at least 1% more, or, when mirroring the rewards, if at least 1% of the
-votes change pool. Base blocks are two seconds apart and stamped on the odd second, and a vote sent after the block one
-second before the flip could only be mined after it, so that pass decides but does not send.
-
-After the flip, the Voter rejects votes until Hydrex's minter is updated, which has taken 16 seconds. The job keeps
-reading every block until the Voter's epoch has advanced, for up to 15 minutes, then casts the new epoch's first vote.
-The new epoch's rewards are not posted yet, so that vote mirrors the ended epoch's.
+votes change pool. Base blocks are two seconds apart and stamped on the odd second, and the Voter rejects a vote mined
+after the flip, so the pass on the block one second before it decides but does not send, and no vote is sent within two
+seconds of the flip.
 
 A failing pass is tried up to three times while there is time; on every block, the next block is the retry. If a pass
-still fails, or no vote could be cast after the flip, the execution exits non-zero, an email alert fires, and Cloud Run
-restarts it up to three times. A restart runs a pass missed within the past hour, finishes the post-flip vote if the
-flip was less than 15 minutes ago, and otherwise does nothing within the hour after the flip.
+still fails, or every pass on every block does, the execution exits non-zero, an email alert fires, and Cloud Run
+restarts it up to three times. A restart runs a pass missed within the past hour, or the passes on every block that are
+left, and does nothing within the hour after the flip.
 
 Every log line is JSON: each pass logs its block, each pool's rewards and votes, the decision, and the recorded vote.
 
@@ -96,8 +93,7 @@ Outside the scripts:
 - **Cloud KMS:** the pass fails. A signature that does not recover to `KEEPER` is never sent.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
-- **Hydrex's minter:** if the Voter's epoch lags the calendar before the flip, the job refuses to vote. After the flip
-  it waits up to 15 minutes for the minter, then gives up with an alert; `sh/run.sh --now` votes once it is updated.
+- **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote.
 
 ## Development
 
@@ -113,7 +109,6 @@ the pinned Actions, npm packages and base images.
 ## Limitations
 
 - The expected reward assumes the other voters stay put; the passes on every block correct for them moving.
-- The vote after the flip mirrors the ended epoch's rewards: the new epoch's are not known yet.
 - Claiming and swapping rewards are not implemented.
 
 ## License
