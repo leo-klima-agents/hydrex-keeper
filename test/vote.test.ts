@@ -168,7 +168,7 @@ test("a failed verification after mining is reported as sent", async () => {
 });
 
 test("the module ABI names the Voter's and the conduit's errors that a simulated vote passes through", () => {
-  for (const name of ["EpochFlipInProgress", "VoteDelayNotMet", "InsufficientVotingPower"]) {
+  for (const name of ["EpochFlipInProgress", "EpochStale", "VoteDelayNotMet", "InsufficientVotingPower"]) {
     assert.equal(decodeErrorResult({ abi: moduleAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
   }
   const role = `0x${"ab".repeat(32)}` as Hex;

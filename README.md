@@ -4,8 +4,8 @@ A Cloud Run job that casts the weekly Hydrex vote of the Klima "Carbon Impact" c
 KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and calls `vote` on the Safe module of
 [hydrex-conduit-executor](https://github.com/ldeso/hydrex-conduit-executor), which forwards it to Hydrex's Voter.
 
-- `src/`: the job, with `viem` as its only dependency. `select.ts` is the strategy, `kms.ts` signs, and `vote.ts` is the
-  only place a transaction is built and sent.
+- `src/`: the job, with `viem` as its only dependency. `select.ts` is the strategy, `run.ts` sequences the passes,
+  `kms.ts` signs, and `vote.ts` is the only place a transaction is built and sent.
 - `pools.json`: the pools it may vote for, by address. Every pool pairing two of ETH or WETH, cbBTC, SOL, USDC, USDT,
   USD₮0, EURC, BNKR, VVV, HYDX, kVCM and the ST0x tokenized stocks and ETFs (`wt…`), and every single-asset vault
   holding one of them.
@@ -16,10 +16,10 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 
 Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. Each execution runs the passes due in the next
 hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600 seconds before it. The execution that covers the flip
-then votes on the last blocks: it measures the block interval over the last hundred blocks, runs a pass thirteen blocks
-before the flip, then one on each new block of the last eleven as it appears, so that a vote can land in each of the
-last ten. Blocks are taken as they come, not predicted, so blocks that are late, early or uneven only change how many
-passes run. The last vote may land after the flip and revert; that costs its gas and is only logged.
+then votes on the last blocks: it measures the block interval over the last hundred blocks, runs a pass eight blocks
+before the flip, then one on each new block of the last six as it appears, so that a vote can land in each of the last
+five. Blocks are taken as they come, not predicted, so blocks that are late, early or uneven only change how many passes
+run. The last vote may land after the flip and revert; that costs its gas and is only logged.
 
 A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes to maximise
 the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn

@@ -3,7 +3,7 @@ import type { Client } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const HORIZON = 3600n; // an execution runs the passes due within this many seconds; HORIZON in sh/lib.sh
-export const LAST_BLOCKS = 10; // a vote can land in each of these blocks before the flip
+export const LAST_BLOCKS = 5; // a vote can land in each of these blocks before the flip
 export const GRACE_MS = 60_000; // how long after the flip to wait for the block that ends it, and for the last receipt
 const SAMPLE = 100n; // blocks over which the block interval is averaged
 const POLL_MS = 100;
@@ -20,7 +20,7 @@ export function missed(flip: bigint, offsets: bigint[], at: bigint): boolean {
   return offsets.some((o) => flip - o <= at && flip - o > at - HORIZON);
 }
 
-type Schedule = { times: bigint[]; last: boolean; note?: string };
+export type Schedule = { times: bigint[]; last: boolean; note?: string };
 
 /**
  * The passes this execution runs: the ones due ahead, or a missed one right now, or none. `last` when the flip is

@@ -66,17 +66,17 @@ test("blockInterval averages the timestamps of the last hundred blocks", async (
         : { number: blockNumber, timestamp: 2000n - ((1000n - blockNumber) * 23n) / 10n },
   } as unknown as Client;
   assert.equal(await blockInterval(client), 2.3);
-  assert.equal(lastBlocksStart(flip, 2), Number(flip) * 1000 - 26_000, "11 blocks of window and 2 of slack");
+  assert.equal(lastBlocksStart(flip, 2), Number(flip) * 1000 - 16_000, "6 blocks of window and 2 of slack");
 });
 
-test("lastBlocks yields each new block of the last eleven, past stale polls and errors, until the flip", async (t) => {
+test("lastBlocks yields each new block of the last six, past stale polls and errors, until the flip", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Number(flip) * 1000 - 30_000 });
   const heads: (Head | Error)[] = [
-    { number: 1n, timestamp: flip - 24n },
-    { number: 2n, timestamp: flip - 22n },
-    { number: 2n, timestamp: flip - 22n },
+    { number: 1n, timestamp: flip - 14n },
+    { number: 2n, timestamp: flip - 12n },
+    { number: 2n, timestamp: flip - 12n },
     new Error("502"),
-    { number: 3n, timestamp: flip - 20n },
+    { number: 3n, timestamp: flip - 10n },
     { number: 5n, timestamp: flip - 1n },
     { number: 6n, timestamp: flip + 1n },
   ];
