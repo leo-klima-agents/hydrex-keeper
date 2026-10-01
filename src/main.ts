@@ -78,8 +78,9 @@ async function pass(run: Run, block: Block, until: number): Promise<Outcome> {
     log.info(reason, { mode, plan, expectedUsd, currentVote });
     return "kept";
   }
-  if (block.timestamp + BLOCK_TIME >= flip || Date.now() >= until) {
-    // The vote would be mined after the flip, where the Voter rejects it until the minter is updated.
+  if (block.timestamp + BLOCK_TIME > flip || Date.now() >= until) {
+    // The vote would be mined after the flip, where the Voter rejects it until the minter is updated; a vote
+    // mined exactly at the flip is still accepted.
     log.info("not sent: too late to be mined before the flip", { mode, plan, expectedUsd, currentVote });
     return "skipped";
   }

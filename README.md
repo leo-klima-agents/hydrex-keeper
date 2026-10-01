@@ -25,8 +25,8 @@ save gas, pools that would get less than 0.1% of the votes are left out: each po
 the transaction, and a share that small earns almost nothing. Votes do not carry over, so the first pass of an epoch
 votes; later passes vote again only if that pays at least 1% more, or, when mirroring the rewards, if at least 1% of the
 votes change pool. Base blocks are two seconds apart and stamped on the odd second, and the Voter rejects a vote mined
-after the flip, so the pass on the block one second before it decides but does not send, and no vote is sent within two
-seconds of the flip.
+after the flip, so the pass on the block one second before it decides but does not send, and a vote is sent only while
+the last block before the flip can still include it, half a second before that block is sealed at its timestamp.
 
 A failing pass is tried up to three times while there is time; on every block, the next block is the retry. If a pass
 still fails, or every pass on every block does, the execution exits non-zero, an email alert fires, and Cloud Run
