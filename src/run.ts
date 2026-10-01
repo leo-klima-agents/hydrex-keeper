@@ -9,7 +9,6 @@ const RETRY_DELAY_MS = 5_000;
 // A pass on every block waits this long for its receipt: a vote sent after block T is mined at T+2 or T+4. Longer
 // would stall the loop behind a stuck vote; shorter would replace a vote about to be mined.
 const PASS_BUDGET_MS = 5_000;
-const SEAL_MARGIN_MS = 500; // a transaction must reach the sequencer this long before its block is sealed
 
 /** What a pass did: voted (or signed, in a dry run), left a vote pending, kept the current one, or could not send. */
 export type Outcome = "voted" | "pending" | "kept" | "skipped";
@@ -83,10 +82,7 @@ export async function runPasses(plan: Schedule, flip: bigint, io: Io): Promise<n
     }
     last = after = block.number;
     passes++;
-    // The last block on this cadence that the Voter accepts is mined at or before the flip and sealed at its
-    // timestamp; a vote must reach the sequencer before that.
-    const lastAccepted = block.timestamp + ((flip - block.timestamp) / BLOCK_TIME) * BLOCK_TIME;
-    const until = Math.min(now() + PASS_BUDGET_MS, ms(lastAccepted) - SEAL_MARGIN_MS);
+    const until = now() + PASS_BUDGET_MS;
     const started = now();
     try {
       const outcome = await io.pass(block, until);

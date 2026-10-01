@@ -57,8 +57,8 @@ test("a pass runs on the first block minted at or after its time, then one on ev
   assert.equal(first!.until, ms(flip - 10n), "until the pass on every block starts");
   assert.deepEqual(timestamps(loop), [-11n, -9n, -7n, -5n, -3n, -1n], "every block up to the last before the flip");
   assert.ok(
-    loop.every((p) => p.until === Math.min(p.at + 5_000, ms(flip - 1n) - 500)),
-    "five seconds, or until the last block before the flip is sealed",
+    loop.every((p) => p.until === p.at + 5_000),
+    "five seconds each",
   );
   assert.ok(
     loop.every((p, i) => i === 0 || p.block.number === loop[i - 1]!.block.number + 1n),
