@@ -14,11 +14,18 @@ import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 const RECEIPT_TIMEOUT_MS = 60_000;
+const RECEIPT_POLL_MS = 250; // a block is two seconds; the client's second would see a receipt late
+const RESEND_AFTER_MS = 6_000; // an identical vote still pending after this long is replaced, not waited for
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
-const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
+/** What happened to the vote: confirmed by the Voter, sent but not seen mined in time, or not sent at all. */
+export type Sent = "confirmed" | "unconfirmed" | "not sent";
+
+type LastSent = { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; data: Hex; sentAt: number };
+
+const lastSentBy = new WeakMap<Client, LastSent>();
 
 /** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
 export async function castVote(
@@ -27,7 +34,7 @@ export async function castVote(
   vote: Vote,
   dryRun: boolean,
   until: number,
-): Promise<void> {
+): Promise<Sent> {
   const { client, module, keeper, conduit, broadcast } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
@@ -44,6 +51,10 @@ export async function castVote(
   // process sent, or at twice the estimate over one of unknown fees. If that one paid more, it is mined soon anyway.
   const lastSent = lastSentBy.get(client);
   const own = lastSent?.nonce === latest ? lastSent : undefined;
+  if (own && pending > latest && own.data === data && Date.now() - own.sentAt < RESEND_AFTER_MS) {
+    log.info("the same vote is already pending", { nonce: latest, ageMs: Date.now() - own.sentAt });
+    return "unconfirmed";
+  }
   const bump = (fee: bigint, sent?: bigint) =>
     sent !== undefined ? max(fee, (sent * 5n) / 4n) : pending > latest ? fee * 2n : fee;
   const tx = {
@@ -61,7 +72,7 @@ export async function castVote(
 
   if (!account) {
     log.warning("signing skipped: no KMS key configured");
-    return;
+    return "not sent";
   }
   let signed: Hex;
   try {
@@ -69,29 +80,29 @@ export async function castVote(
   } catch (error) {
     if (dryRun && error instanceof NoMetadataServer) {
       log.warning("signing skipped: no metadata server", { reason: error.message });
-      return;
+      return "not sent";
     }
     throw error;
   }
   if (dryRun) {
     log.info("dry run: signed, not sent");
-    return;
+    return "not sent";
   }
 
   if (Date.now() >= until) throw new Error("out of time before sending");
-  lastSentBy.set(client, tx); // before sending: a send that fails may still have reached a node
+  lastSentBy.set(client, { ...tx, sentAt: Date.now() }); // before sending: a send that fails may still have reached a node
   const hash = await broadcast(signed, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
   try {
-    receipt = await client.waitForTransactionReceipt({ hash, timeout });
+    receipt = await client.waitForTransactionReceipt({ hash, timeout, pollingInterval: RECEIPT_POLL_MS });
   } catch (error) {
     if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
       throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
     }
     log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
-    return;
+    return "unconfirmed";
   }
   if (receipt.transactionHash !== hash) {
     throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
@@ -114,6 +125,7 @@ export async function castVote(
     throw new VoteSent(`vote ${hash}: Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);
   }
   log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
+  return "confirmed";
 }
 
 const max = (a: bigint, b: bigint) => (a > b ? a : b);

@@ -41,8 +41,17 @@ function fakeChain(b: Behaviour = {}) {
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
-    waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
+    waitForTransactionReceipt: async ({
+      hash,
+      timeout,
+      pollingInterval,
+    }: {
+      hash: Hex;
+      timeout: number;
+      pollingInterval: number;
+    }) => {
       assert.ok(timeout >= 1 && timeout <= 60_000);
+      assert.equal(pollingInterval, 250, "a block is two seconds");
       if (b.receipt === "timeout") throw new WaitForTransactionReceiptTimeoutError({ hash });
       return { status: b.receipt ?? "success", blockNumber: 42n, transactionHash: b.minedHash ?? hash };
     },
@@ -70,11 +79,12 @@ function fakeChain(b: Behaviour = {}) {
 }
 
 const vote = { pools: [POOL], weights: [100n] };
+const other = { pools: [POOL], weights: [200n] };
 const far = Date.now() + 3_600_000;
 
 test("signs with the confirmed nonce and the estimated fees, then verifies at the receipt block", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
-  await castVote(chain, signer, vote, false, far);
+  assert.equal(await castVote(chain, signer, vote, false, far), "confirmed");
   const tx = parseTransaction(sent[0]!);
   assert.equal(tx.nonce, 3);
   assert.equal(tx.maxFeePerGas, 1_000n);
@@ -94,7 +104,7 @@ test("a re-vote under the same nonce pays a quarter more than the pending one", 
 
 test("a receipt that does not arrive in time is left to the next pass", async () => {
   const { chain, sent } = fakeChain({ receipt: "timeout" });
-  await castVote(chain, signer, vote, false, far);
+  assert.equal(await castVote(chain, signer, vote, false, far), "unconfirmed");
   assert.equal(sent.length, 1);
 });
 
@@ -111,7 +121,7 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
 
 test("a dry run signs but never sends", async () => {
   const { chain, sent } = fakeChain();
-  await castVote(chain, signer, vote, true, far);
+  assert.equal(await castVote(chain, signer, vote, true, far), "not sent");
   assert.equal(sent.length, 0);
 });
 
@@ -124,10 +134,24 @@ test("a pending vote of unknown fees is replaced at twice the estimate; one this
   await castVote(own.chain, signer, vote, false, far);
   own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
     blockTag === "pending" ? 4 : 3) as never;
-  await castVote(own.chain, signer, vote, false, far);
+  await castVote(own.chain, signer, other, false, far);
   const tx = parseTransaction(own.sent[1]!);
   assert.equal(tx.nonce, 3);
   assert.equal(tx.maxFeePerGas, 1_250n);
+});
+
+test("the same vote pending for under six seconds is left alone, then replaced at a quarter more", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { chain, sent } = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
+  await castVote(chain, signer, vote, false, far);
+  chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
+    blockTag === "pending" ? 4 : 3) as never;
+  assert.equal(await castVote(chain, signer, vote, false, far), "unconfirmed");
+  assert.equal(sent.length, 1, "not sent again");
+  t.mock.timers.tick(6_000);
+  await castVote(chain, signer, vote, false, far);
+  assert.equal(sent.length, 2, "stuck: replaced");
+  assert.equal(parseTransaction(sent[1]!).maxFeePerGas, 1_250n);
 });
 
 test("a send that fails still counts as this process's vote: it may have reached a node", async () => {
@@ -135,7 +159,7 @@ test("a send that fails still counts as this process's vote: it may have reached
   await assert.rejects(castVote(chain, signer, vote, false, far), /no RPC accepted/);
   chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
     blockTag === "pending" ? 4 : 3) as never;
-  await assert.rejects(castVote(chain, signer, vote, false, far));
+  await assert.rejects(castVote(chain, signer, other, false, far));
   const tx = parseTransaction(sent[1]!);
   assert.deepEqual([tx.nonce, tx.maxFeePerGas], [3, 1_250n], "a quarter more than the recorded fees");
 });
@@ -153,7 +177,7 @@ test("a failed verification after mining is reported as sent", async () => {
 });
 
 test("the module ABI names the Voter's and the conduit's errors that a simulated vote passes through", () => {
-  for (const name of ["EpochFlipInProgress", "VoteDelayNotMet", "InsufficientVotingPower"]) {
+  for (const name of ["EpochFlipInProgress", "EpochStale", "VoteDelayNotMet", "InsufficientVotingPower"]) {
     assert.equal(decodeErrorResult({ abi: moduleAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
   }
   const role = `0x${"ab".repeat(32)}` as Hex;

@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   createPublicClient,
   createTransport,
@@ -14,6 +15,8 @@ import { conduitAbi, moduleAbi, voterAbi } from "./abi.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
+export const BLOCK_TIME = 2n; // seconds between Base blocks
+const BLOCK_POLL_MS = 200; // how often the latest block is asked for while a pass waits for one
 export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and rejects 2,264
 export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
 const TIMEOUT_MS = 5_000;
@@ -166,4 +169,27 @@ export async function readMany<T>(
   const settled = results.flat() as { status: string; result?: unknown; error?: unknown }[];
   if (settled.length && settled.every((r) => r.status === "failure")) throw settled[0]!.error;
   return settled.map((r) => (r.status === "success" ? r.result : undefined)) as T[];
+}
+
+export type Block = { number: bigint; timestamp: bigint };
+
+/**
+ * The first block after `after` minted at or after `mintedAt` (unix seconds), asking for the latest block every
+ * BLOCK_POLL_MS until `until` (ms); undefined if none shows by then. `after` also keeps a lagging URL from handing
+ * back a block already passed.
+ */
+export async function nextBlock(
+  client: Client,
+  { after, mintedAt, until }: { after: bigint; mintedAt: bigint; until: number },
+): Promise<Block | undefined> {
+  for (;;) {
+    try {
+      const { number, timestamp } = await client.getBlock({ blockTag: "latest" });
+      if (number > after && timestamp >= mintedAt) return { number, timestamp };
+    } catch (error) {
+      log.warning("block poll failed", { error: errorMessage(error) });
+    }
+    if (Date.now() + BLOCK_POLL_MS >= until) return undefined;
+    await sleep(BLOCK_POLL_MS);
+  }
 }

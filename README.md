@@ -15,20 +15,25 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 ## How it votes
 
 Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. Each execution runs the passes due in the next
-hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600, 200, 70, 25, 10 and 5 seconds before it.
+hour: 24 hours before the Thursday 00:00 UTC epoch flip, 60 seconds before it, and then one on every block from 10
+seconds before it. A pass runs on the first block minted at or after its time, and reads the state as of that block.
 
-A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes to maximise
-the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn
-`usd × x / (V + x)`. To save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for
-adds two bribe deposits to the transaction, and a share that small earns almost nothing. Votes do not carry over, so the
-first pass of an epoch votes; later passes vote again only if that pays at least 1% more. A pass takes under a second,
-and Base blocks are two seconds apart, so the last pass leaves a block of margin.
+A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes. The day
+before, the other voters have not settled, so the split just mirrors the rewards. Within the last hour it maximises the
+expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn `usd × x / (V + x)`. To
+save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for adds two bribe deposits to
+the transaction, and a share that small earns almost nothing. Votes do not carry over, so the first pass of an epoch
+votes; later passes vote again only if that pays at least 1% more, or, when mirroring the rewards, if at least 1% of the
+votes change pool. Base blocks are two seconds apart and stamped on the odd second, and the Voter rejects a vote mined
+after the flip, so the pass on the block one second before it decides but does not send, and a vote sent too late to be
+mined before the flip reverts and costs its gas.
 
-A failing pass is tried up to three times while there is time. If it still fails, the execution exits non-zero, an email
-alert fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does
-nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway.
+A failing pass is tried up to three times while there is time; on every block, the next block is the retry. If a pass
+still fails, or every pass on every block does, the execution exits non-zero, an email alert fires, and Cloud Run
+restarts it up to three times. A restart runs a pass missed within the past hour, or the passes on every block that are
+left, and does nothing within the hour after the flip.
 
-Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote.
+Every log line is JSON: each pass logs its block, each pool's rewards and votes, the decision, and the recorded vote.
 
 ## Trust
 
@@ -47,8 +52,8 @@ script is safe to re-run.
 
 1. **Configure.** Run `cp config.env.example config.env`, then fill in `KEEPER_PROJECT` (a project for this job only),
    `KMS_KEY_VERSION` (`version` in the key repo's `record/keeper.json`) and `ALERT_EMAIL`. The defaults match the
-   deployed module and the sibling repos. Each `VOTE_OFFSETS` entry must fall within the hour after a `SCHEDULES` entry,
-   and the scripts check it.
+   deployed module and the sibling repos. Each `VOTE_OFFSETS` entry, and `EVERY_BLOCK_FROM`, must fall within the hour
+   after a `SCHEDULES` entry, and the scripts check it.
 2. **Create the resources.** `sh/setup.sh` enables the APIs, and creates the job's service account (the only one allowed
    to sign), the scheduler's (which may only start the job), the secrets, and email alerts on a failed execution and on
    a failed start. It prints the job's service account.
@@ -80,7 +85,8 @@ Outside the scripts:
 ## Failure modes
 
 - **Base RPC:** a call that fails, or gets no answer within 250 ms, also goes to the next URL, and the first answer
-  wins. If all fail, the pass fails. The vote is sent to every URL.
+  wins. If all fail, the pass fails. A block is as fresh as the first URL that answers; a URL that does not have the
+  block a pass reads is skipped for that read. The vote is sent to every URL.
 - **Prices:** DefiLlama, Alchemy, and CoinGecko if set, three attempts each. A price is the median of three quotes, the
   lower of two, or the only one. If every source fails, the last prices are reused. The pass fails if there are none, or
   if no token has a price. Unpriced tokens count as zero.
@@ -102,7 +108,7 @@ the pinned Actions, npm packages and base images.
 
 ## Limitations
 
-- The expected reward assumes the other voters stay put; the late passes correct for them moving.
+- The expected reward assumes the other voters stay put; the passes on every block correct for them moving.
 - Claiming and swapping rewards are not implemented.
 
 ## License

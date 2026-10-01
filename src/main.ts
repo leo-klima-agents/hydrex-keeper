@@ -1,21 +1,18 @@
 import { readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, hostOf, now, type Chain } from "./chain.ts";
+import { BLOCK_TIME, connect, hostOf, nextBlock, now, WEEK, type Block, type Chain } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
-import { assertFresh, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
-import { HORIZON, schedule } from "./schedule.ts";
+import { assertFresh, calendarEpoch, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
+import { runPasses, type Outcome } from "./run.ts";
+import { HORIZON, modeAt, schedule } from "./schedule.ts";
 import { expected, select, type Candidate } from "./select.ts";
-import { castVote, VoteSent } from "./vote.ts";
+import { castVote } from "./vote.ts";
 import { parseWhitelist, type Whitelist } from "./whitelist.ts";
 
 // Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
 const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
-const ATTEMPTS = 3;
-const RETRY_DELAY_MS = 5_000;
-const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
 
 type Run = {
   chain: Chain;
@@ -24,23 +21,28 @@ type Run = {
   prices: ReturnType<typeof priceFeed>;
   account: LocalAccount | undefined;
   dryRun: boolean;
+  flip: bigint;
 };
 
-async function pass(run: Run, until: number): Promise<void> {
-  const { chain, whitelist, prices, account, dryRun } = run;
+/** One pass at `block`: reads the state there, splits the votes, and votes if that pays, waiting at most until `until` (ms). */
+async function pass(run: Run, block: Block, until: number): Promise<Outcome> {
+  const { chain, whitelist, prices, account, dryRun, flip } = run;
+  const mode = modeAt(block.timestamp, flip);
+  log.info("pass", { block: block.number, timestamp: block.timestamp, secondsToFlip: flip - block.timestamp, mode });
   const pools = whitelist.map((w) => w.pool);
+  const at = { epoch: flip - WEEK, blockNumber: block.number };
   run.layout ??= await readLayout(chain, pools);
   let read;
   try {
-    read = await readPass(chain, run.layout);
+    read = await readPass(chain, run.layout, at);
   } catch (error) {
     if (!(error instanceof LayoutChanged)) throw error;
     log.info("reward tokens changed, re-reading");
     run.layout = await readLayout(chain, pools);
-    read = await readPass(chain, run.layout);
+    read = await readPass(chain, run.layout, at);
   }
   const { epoch, rewards } = read;
-  assertFresh(epoch);
+  assertFresh(epoch, at.epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
 
   const tokens = rewards.flatMap((p) => p.rewards.map((r) => r.token));
@@ -65,7 +67,7 @@ async function pass(run: Run, until: number): Promise<void> {
   }
 
   if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
-  const { fractions, vote } = select(candidates, epoch.power);
+  const { fractions, vote } = select(candidates, epoch.power, mode);
   const plan = (fractions ?? [])
     .map((f, i) => ({ pool: nameOf(candidates[i]!.pool), share: Math.round(f * 10_000) / 100 }))
     .filter((p) => p.share > 0);
@@ -73,11 +75,19 @@ async function pass(run: Run, until: number): Promise<void> {
   const currentVote = rewards.filter((p) => p.ownVotes > 0n).map((p) => ({ pool: nameOf(p.pool), votes: p.ownVotes }));
   if (!vote) {
     const reason = fractions ? "keeping the current vote" : "no pool pays anything; keeping the current vote";
-    log.info(reason, { plan, expectedUsd, currentVote });
-    return;
+    log.info(reason, { mode, plan, expectedUsd, currentVote });
+    return "kept";
   }
-  log.info("voting", { plan, expectedUsd, currentVote, power: epoch.power });
-  await castVote(chain, account, vote, dryRun, until);
+  if (block.timestamp + BLOCK_TIME > flip) {
+    // The vote could only be mined after the flip, where the Voter rejects it until the minter is updated (one mined
+    // exactly at the flip is still accepted). A vote sent from an earlier block but mined late reverts and costs its
+    // gas; that is accepted for the chance of landing in the last block.
+    log.info("not sent: too late to be mined before the flip", { mode, plan, expectedUsd, currentVote });
+    return "skipped";
+  }
+  log.info("voting", { mode, plan, expectedUsd, currentVote, power: epoch.power });
+  const sent = await castVote(chain, account, vote, dryRun, until);
+  return sent === "unconfirmed" ? "pending" : "voted";
 }
 
 async function main(): Promise<number> {
@@ -88,6 +98,11 @@ async function main(): Promise<number> {
   const offsetFields = immediately ? [] : required("VOTE_OFFSETS").split(",");
   if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
   const offsets = offsetFields.map(BigInt);
+  const everyBlockField = immediately ? "0" : required("EVERY_BLOCK_FROM");
+  if (!/^[0-9]+$/.test(everyBlockField)) throw new Error("EVERY_BLOCK_FROM must be seconds");
+  const everyBlockFrom = BigInt(everyBlockField);
+  if (offsets.some((o) => o <= everyBlockFrom))
+    throw new Error("VOTE_OFFSETS entries must be larger than EVERY_BLOCK_FROM");
   const whitelist = parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8"));
 
   const configured = required("BASE_RPC_URLS").split(",");
@@ -108,41 +123,15 @@ async function main(): Promise<number> {
     log.warning("restarted after the flip; nothing to do", { flip: epoch.flip });
     return 0;
   }
-  assertFresh(epoch);
+  assertFresh(epoch, calendarEpoch());
   const { flip } = epoch;
-  const { times, note } = schedule(flip, offsets, now(), immediately);
-  if (note) log.warning(note, { flip });
-  if (times.length === 0) return 0;
-  const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
-  const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
-
-  let failed = 0;
-  for (const [i, time] of times.entries()) {
-    await sleep(Math.max(0, Number(time) * 1000 - Date.now()));
-    const until = i + 1 < times.length ? Number(times[i + 1]!) * 1000 : deadline;
-    if (Date.now() >= until) {
-      log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
-      continue;
-    }
-    log.info("pass", { at: time, flip, secondsToFlip: flip - now() });
-    for (let attempt = 1; ; attempt++) {
-      const started = Date.now();
-      try {
-        await pass(run, until);
-        log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
-        break;
-      } catch (error) {
-        const ms = Date.now() - started;
-        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
-        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
-        if (!retry) {
-          failed++;
-          break;
-        }
-        await sleep(RETRY_DELAY_MS);
-      }
-    }
-  }
+  const plan = schedule(flip, offsets, everyBlockFrom, now(), immediately);
+  if (plan.note) log.warning(plan.note, { flip });
+  const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun, flip };
+  const failed = await runPasses(plan, flip, {
+    nextBlock: (after, mintedAt, until) => nextBlock(chain.client, { after, mintedAt, until }),
+    pass: (block, until) => pass(run, block, until),
+  });
   return failed ? 1 : 0;
 }
 

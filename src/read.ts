@@ -17,18 +17,19 @@ export type Layout = { pools: Address[]; gauges: Address[]; bribes: Address[]; l
 /** A bribe contract gained a reward token since `readLayout`. */
 export class LayoutChanged extends Error {}
 
-const calendarEpoch = () => (now() / WEEK) * WEEK;
+/** The start of the calendar epoch: Thursday 00:00 UTC. The Voter's epoch follows it once the minter is updated. */
+export const calendarEpoch = () => (now() / WEEK) * WEEK;
 
 function bribeCall(address: Address, functionName: string, args: readonly unknown[] = []): Call {
   return { address, abi: bribeAbi, functionName, args };
 }
 
-function epochCalls(chain: Chain, calendar: bigint): Call[] {
+function epochCalls(chain: Chain, epoch: bigint): Call[] {
   const { ve, conduit } = chain;
   return [
     voterCall(chain, "_epochTimestamp"),
     voterCall(chain, "lastVoted", [conduit]),
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, calendar] },
+    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [conduit, epoch] },
   ];
 }
 
@@ -41,8 +42,8 @@ export async function readEpoch(chain: Chain): Promise<Epoch> {
   return toEpoch(await readMany<bigint>(chain.client, epochCalls(chain, calendarEpoch())));
 }
 
-export function assertFresh(epoch: Epoch): void {
-  if (epoch.start !== calendarEpoch()) {
+export function assertFresh(epoch: Epoch, start: bigint): void {
+  if (epoch.start !== start) {
     throw new Error(`Voter epoch ${epoch.start} is stale at ${now()}; minter not updated`);
   }
 }
@@ -90,6 +91,9 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
   return { pools, gauges, bribes, lengths, slots: withTokens };
 }
 
+/** Where a pass reads: the power, bribes and fees of `epoch` (its start), as of `blockNumber` or the latest block. */
+export type PassAt = { epoch: bigint; blockNumber?: bigint };
+
 /**
  * A pass's one read: the epoch, as `readEpoch`, and each pool's liveness, votes, and bribes and fees this epoch. The
  * epoch and votes come first, so that for up to 199 pools they come from one eth_call, and so from one block.
@@ -97,18 +101,22 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
 export async function readPass(
   chain: Chain,
   { pools, gauges, bribes, lengths, slots }: Layout,
+  { epoch: at, blockNumber }: PassAt,
 ): Promise<{ epoch: Epoch; rewards: PoolRewards[] }> {
-  const calendar = calendarEpoch();
-  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(chain.client, [
-    ...epochCalls(chain, calendar),
-    ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
-    ...gauges.flatMap((gauge, i) => [
-      voterCall(chain, "isAlive", [gauge]),
-      voterCall(chain, "weights", [pools[i]]),
-      voterCall(chain, "votes", [chain.conduit, pools[i]]),
-    ]),
-    ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
-  ]);
+  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(
+    chain.client,
+    [
+      ...epochCalls(chain, at),
+      ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
+      ...gauges.flatMap((gauge, i) => [
+        voterCall(chain, "isAlive", [gauge]),
+        voterCall(chain, "weights", [pools[i]]),
+        voterCall(chain, "votes", [chain.conduit, pools[i]]),
+      ]),
+      ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, at])),
+    ],
+    blockNumber === undefined ? {} : { blockNumber },
+  );
   const epoch = toEpoch(results.slice(0, 3) as bigint[]);
   if (lengths.some((length, b) => results[3 + b] !== length)) throw new LayoutChanged("reward tokens changed");
   const perPool = results.slice(3 + bribes.length, 3 + bribes.length + 3 * pools.length);
