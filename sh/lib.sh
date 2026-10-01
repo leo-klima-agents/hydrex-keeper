@@ -56,7 +56,7 @@ load_config() {
   KEEPER_SA_NAME=${KEEPER_SA_NAME:-hydrex-keeper}
   SCHEDULER_SA_NAME=${SCHEDULER_SA_NAME:-hydrex-keeper-scheduler}
   MODULE=${MODULE:-0x750973E0CB728C3112561Bc8E9b235afA9B17E81}
-  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
+  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600}
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
@@ -234,15 +234,18 @@ schedule_start() {
   printf '%s\n' "$schedule_start_seconds"
 }
 
-# Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
+# Every offset, and the flip for the last blocks, must fall strictly within HORIZON after some schedule start, or the
+# job never runs that pass.
 check_offsets_covered() {
   starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
-  for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
+  for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' ') 0; do
     covered=no
     for start in $starts; do
       [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
     done
-    [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
+    [ "$covered" = yes ] && continue
+    [ "$offset" -ne 0 ] || die "the flip is not within $HORIZON s after any SCHEDULES entry"
+    die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
   done
 }
 

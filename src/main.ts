@@ -6,16 +6,15 @@ import { kmsAccount } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
-import { HORIZON, schedule } from "./schedule.ts";
+import { blockInterval, GRACE_MS, HORIZON, lastBlocks, lastBlocksStart, schedule } from "./schedule.ts";
 import { expected, select, type Candidate } from "./select.ts";
-import { castVote, VoteSent } from "./vote.ts";
+import { castVote, confirmVote, VoteSent, type Sent } from "./vote.ts";
 import { parseWhitelist, type Whitelist } from "./whitelist.ts";
 
 // Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
 const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
 const ATTEMPTS = 3;
 const RETRY_DELAY_MS = 5_000;
-const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
 
 type Run = {
   chain: Chain;
@@ -26,7 +25,7 @@ type Run = {
   dryRun: boolean;
 };
 
-async function pass(run: Run, until: number): Promise<void> {
+async function pass(run: Run, until: number): Promise<Sent | undefined> {
   const { chain, whitelist, prices, account, dryRun } = run;
   const pools = whitelist.map((w) => w.pool);
   run.layout ??= await readLayout(chain, pools);
@@ -77,7 +76,53 @@ async function pass(run: Run, until: number): Promise<void> {
     return;
   }
   log.info("voting", { plan, expectedUsd, currentVote, power: epoch.power });
-  await castVote(chain, account, vote, dryRun, until);
+  return castVote(chain, account, vote, dryRun, until);
+}
+
+/**
+ * Runs a pass two blocks before the last ones, then one on each of them as it appears, and confirms the last vote
+ * sent. False if the last pass or that vote failed before the flip, or if no block was seen.
+ */
+async function voteLastBlocks(run: Run, flip: bigint, interval: number): Promise<boolean> {
+  const until = Number(flip) * 1000 + GRACE_MS;
+  let sent: Sent | undefined;
+  let ok = true;
+  const attempt = async (fields: Record<string, unknown>) => {
+    const started = Date.now();
+    log.info("pass", { ...fields, flip, secondsToFlip: flip - now() });
+    try {
+      sent = (await pass(run, until)) ?? sent;
+      log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
+      ok = true;
+    } catch (error) {
+      const failure = { ms: Date.now() - started, error: errorMessage(error) };
+      if (now() >= flip) {
+        log.warning("pass failed after the flip", failure);
+      } else {
+        ok = false;
+        log.error("pass failed", failure);
+      }
+    }
+  };
+  await sleep(Math.max(0, lastBlocksStart(flip, interval) - Date.now()));
+  await attempt({ interval });
+  let blocks = 0;
+  for await (const head of lastBlocks(run.chain.client, flip, interval)) {
+    blocks++;
+    await attempt({ block: head.number, timestamp: head.timestamp });
+  }
+  if (!blocks) {
+    log.error("no block seen in the last window");
+    ok = false;
+  }
+  if (!sent) return ok;
+  try {
+    await confirmVote(run.chain, sent, flip, until);
+    return ok;
+  } catch (error) {
+    log.error("last vote failed", { error: errorMessage(error) });
+    return false;
+  }
 }
 
 async function main(): Promise<number> {
@@ -110,16 +155,17 @@ async function main(): Promise<number> {
   }
   assertFresh(epoch);
   const { flip } = epoch;
-  const { times, note } = schedule(flip, offsets, now(), immediately);
+  const { times, last, note } = schedule(flip, offsets, now(), immediately);
   if (note) log.warning(note, { flip });
-  if (times.length === 0) return 0;
-  const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
+  if (times.length === 0 && !last) return 0;
+  const interval = last ? await blockInterval(chain.client) : 0;
+  const start = last ? lastBlocksStart(flip, interval) : Infinity;
   const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
 
   let failed = 0;
   for (const [i, time] of times.entries()) {
     await sleep(Math.max(0, Number(time) * 1000 - Date.now()));
-    const until = i + 1 < times.length ? Number(times[i + 1]!) * 1000 : deadline;
+    const until = Math.min(i + 1 < times.length ? Number(times[i + 1]!) * 1000 : Infinity, start);
     if (Date.now() >= until) {
       log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
       continue;
@@ -128,7 +174,8 @@ async function main(): Promise<number> {
     for (let attempt = 1; ; attempt++) {
       const started = Date.now();
       try {
-        await pass(run, until);
+        const sent = await pass(run, until);
+        if (sent) await confirmVote(chain, sent, flip, until);
         log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
         break;
       } catch (error) {
@@ -143,6 +190,7 @@ async function main(): Promise<number> {
       }
     }
   }
+  if (last && !(await voteLastBlocks(run, flip, interval))) failed++;
   return failed ? 1 : 0;
 }
 

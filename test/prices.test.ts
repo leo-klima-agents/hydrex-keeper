@@ -66,7 +66,7 @@ test("retries on failure, then gives up", async () => {
   assert.equal(failing.urls.length, 3);
 });
 
-test("priceFeed refreshes at every call with time and serves the last set near the deadline", async (t) => {
+test("priceFeed refreshes a set over a minute old with time and serves the last set near the deadline", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
   const { fetchFn, urls } = fakeFetch([
     () => Response.json({ coins: { [`base:${WETH}`]: { price: 1 } } }),
@@ -74,6 +74,8 @@ test("priceFeed refreshes at every call with time and serves the last set near t
   ]);
   const feed = priceFeed(defillama(fetchFn));
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1);
+  assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 1, "under a minute old: the last set");
+  t.mock.timers.tick(60_000);
   assert.equal((await feed([WETH], Date.now() + 60_000)).get(WETH), 2, "refreshed");
   assert.equal((await feed([WETH], Date.now() + 10_000)).get(WETH), 2, "10 s left: the last set");
   assert.equal(urls.length, 2);

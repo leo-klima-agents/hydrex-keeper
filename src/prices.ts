@@ -5,6 +5,7 @@ import { errorMessage, log } from "./log.ts";
 const ATTEMPTS = 3;
 const TIMEOUT_MS = 15_000;
 const REFRESH_BUDGET_MS = 20_000; // how close to `until` the last set is reused
+const REUSE_AGE_MS = 60_000; // how long the last set is reused regardless
 const SPREAD = 1.2; // quotes further apart than this ratio are logged
 
 export type Prices = Map<Address, number>;
@@ -157,13 +158,16 @@ export function combined(sources: PriceSource[]): PriceSource {
   };
 }
 
-/** Fetches at every call; reuses the last set near `until` if it covers every token, or if the fetch fails. */
+/**
+ * Fetches at every call; reuses the last set while it is under a minute old or near `until`, if it covers every token,
+ * or if the fetch fails.
+ */
 export function priceFeed(source: PriceSource): (tokens: Address[], until?: number) => Promise<Prices> {
   let last: { at: number; requested: Set<Address>; map: Prices } | undefined;
   return async (tokens, until = Infinity) => {
     const requested = lower(tokens);
-    if (last && until - Date.now() < REFRESH_BUDGET_MS && requested.every((t) => last!.requested.has(t)))
-      return last.map;
+    const reuse = last && (Date.now() - last.at < REUSE_AGE_MS || until - Date.now() < REFRESH_BUDGET_MS);
+    if (reuse && requested.every((t) => last!.requested.has(t))) return last!.map;
     try {
       last = { at: Date.now(), requested: new Set(requested), map: await source.get(requested, until) };
     } catch (error) {
