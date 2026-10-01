@@ -18,17 +18,19 @@ const RECEIPT_TIMEOUT_MS = 60_000;
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
+export type Sent = { hash: Hex; vote: Vote };
+
 const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
 
-/** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
+/** Simulates, signs and sends module.vote, giving the send until `until` (ms). Nothing is sent on a dry run. */
 export async function castVote(
   chain: Chain,
   account: LocalAccount | undefined,
   vote: Vote,
   dryRun: boolean,
   until: number,
-): Promise<void> {
-  const { client, module, keeper, conduit, broadcast } = chain;
+): Promise<Sent | undefined> {
+  const { client, module, keeper, broadcast } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
@@ -78,10 +80,27 @@ export async function castVote(
     return;
   }
 
-  if (Date.now() >= until) throw new Error("out of time before sending");
   lastSentBy.set(client, tx); // before sending: a send that fails may still have reached a node
-  const hash = await broadcast(signed, until);
+  let hash: Hex;
+  try {
+    hash = await broadcast(signed, until);
+  } catch (error) {
+    if (own && (await client.getTransactionCount({ address: keeper, blockTag: "latest" })) > tx.nonce) {
+      log.warning("the pending vote was mined meanwhile; the next pass re-checks the Voter", { nonce: tx.nonce });
+      return;
+    }
+    throw error;
+  }
   log.info("vote sent", { hash });
+  return { hash, vote };
+}
+
+/**
+ * Waits for the receipt until `until` (ms) and checks that the Voter recorded the vote. A vote mined at or after
+ * `flip` reverts; that is expected and only logged.
+ */
+export async function confirmVote(chain: Chain, { hash, vote }: Sent, flip: bigint, until: number): Promise<void> {
+  const { client, conduit } = chain;
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
   try {
@@ -90,13 +109,18 @@ export async function castVote(
     if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
       throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
     }
-    log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
+    log.warning("receipt not seen in time", { hash, timeout });
     return;
   }
   if (receipt.transactionHash !== hash) {
     throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
   }
-  if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
+  if (receipt.status !== "success") {
+    const { timestamp } = await client.getBlock({ blockNumber: receipt.blockNumber });
+    if (timestamp < flip) throw new VoteSent(`vote ${hash} reverted`);
+    log.warning("vote landed after the flip and reverted", { hash, block: receipt.blockNumber, timestamp });
+    return;
+  }
   const calls = [
     ...vote.pools.map((_, i) => voterCall(chain, "poolVote", [conduit, BigInt(i)])),
     ...vote.pools.map((pool) => voterCall(chain, "votes", [conduit, pool])),

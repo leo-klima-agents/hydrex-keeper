@@ -4,8 +4,8 @@ A Cloud Run job that casts the weekly Hydrex vote of the Klima "Carbon Impact" c
 KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and calls `vote` on the Safe module of
 [hydrex-conduit-executor](https://github.com/ldeso/hydrex-conduit-executor), which forwards it to Hydrex's Voter.
 
-- `src/`: the job, with `viem` as its only dependency. `select.ts` is the strategy, `kms.ts` signs, and `vote.ts` is the
-  only place a transaction is built and sent.
+- `src/`: the job, with `viem` as its only dependency. `select.ts` is the strategy, `run.ts` sequences the passes,
+  `kms.ts` signs, and `vote.ts` is the only place a transaction is built and sent.
 - `pools.json`: the pools it may vote for, by address. Every pool pairing two of ETH or WETH, cbBTC, SOL, USDC, USDT,
   USD₮0, EURC, BNKR, VVV, HYDX, kVCM and the ST0x tokenized stocks and ETFs (`wt…`), and every single-asset vault
   holding one of them.
@@ -15,18 +15,22 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 ## How it votes
 
 Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. Each execution runs the passes due in the next
-hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600, 200, 70, 25, 10 and 5 seconds before it.
+hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600 seconds before it. The execution that covers the flip
+then votes on the last blocks: it measures the block interval over the last hundred blocks, runs a pass eight blocks
+before the flip, then one on each new block of the last six as it appears, so that a vote can land in each of the last
+five. Blocks are taken as they come, not predicted, so blocks that are late, early or uneven only change how many passes
+run. The last vote may land after the flip and revert; that costs its gas and is only logged.
 
 A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes to maximise
 the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn
 `usd × x / (V + x)`. To save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for
 adds two bribe deposits to the transaction, and a share that small earns almost nothing. Votes do not carry over, so the
-first pass of an epoch votes; later passes vote again only if that pays at least 1% more. A pass takes under a second,
-and Base blocks are two seconds apart, so the last pass leaves a block of margin.
+first pass of an epoch votes; later passes vote again only if that pays at least 1% more.
 
-A failing pass is tried up to three times while there is time. If it still fails, the execution exits non-zero, an email
-alert fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does
-nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway.
+A failing pass is tried up to three times while there is time; in the last blocks, the next block is the retry, and the
+job fails if the last pass or the last vote does. If a pass still fails, the execution exits non-zero, an email alert
+fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does nothing
+within the hour after the flip.
 
 Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote.
 
