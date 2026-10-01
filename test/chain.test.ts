@@ -4,7 +4,17 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { keccak256, type Hex } from "viem";
 import { base } from "viem/chains";
-import { broadcaster, CHUNK, HEDGE_DELAY_MS, hedged, hostOf, readMany, type Call, type Client } from "../src/chain.ts";
+import {
+  broadcaster,
+  CHUNK,
+  HEDGE_DELAY_MS,
+  hedged,
+  hostOf,
+  nextBlock,
+  readMany,
+  type Call,
+  type Client,
+} from "../src/chain.ts";
 import { errorMessage } from "../src/log.ts";
 
 type Answer = { delay?: number; hang?: boolean; status?: number; error?: { code: number; message: string } };
@@ -167,4 +177,41 @@ test("readMany sends one multicall per CHUNK calls and keeps their order", async
     results,
     calls.map((_, i) => i),
   );
+});
+
+test("hedged: a block a node does not have yet is asked of the next URL at once", async (t) => {
+  const behind = rpc(
+    () => null,
+    () => ({ error: { code: -32001, message: "block not found: 0x2" } }),
+  );
+  const nodes = [await behind, await rpc(block(2))];
+  t.after(() => nodes.forEach((n) => n.close()));
+  const [a] = await blockNumbers(nodes);
+  assert.equal(a!.result, "0x2");
+  assert.ok(a!.ms < HEDGE_DELAY_MS, `${a!.ms} ms`);
+});
+
+test("nextBlock waits for a block after `after` minted at or after `mintedAt`, past a failed poll, until `until`", async () => {
+  const headers = [
+    { number: 5n, timestamp: 101n },
+    new Error("boom"),
+    { number: 5n, timestamp: 101n },
+    { number: 6n, timestamp: 103n },
+    { number: 7n, timestamp: 105n },
+  ];
+  let polls = 0;
+  const client = {
+    getBlock: async () => {
+      const header = headers[Math.min(polls++, headers.length - 1)]!;
+      if (header instanceof Error) throw header;
+      return header;
+    },
+  } as unknown as Client;
+  const far = Date.now() + 5_000;
+  assert.deepEqual(await nextBlock(client, { after: 5n, mintedAt: 103n, until: far }), { number: 6n, timestamp: 103n });
+  assert.equal(polls, 4);
+  assert.deepEqual(await nextBlock(client, { after: 6n, mintedAt: 0n, until: far }), { number: 7n, timestamp: 105n });
+  const started = Date.now();
+  assert.equal(await nextBlock(client, { after: 7n, mintedAt: 0n, until: Date.now() + 500 }), undefined);
+  assert.ok(Date.now() - started < 1_000);
 });

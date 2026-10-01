@@ -47,8 +47,8 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES \
-    RPC_SECRET ALCHEMY_SECRET COINGECKO_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS \
+    EVERY_BLOCK_FROM SCHEDULES RPC_SECRET ALCHEMY_SECRET COINGECKO_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -56,7 +56,8 @@ load_config() {
   KEEPER_SA_NAME=${KEEPER_SA_NAME:-hydrex-keeper}
   SCHEDULER_SA_NAME=${SCHEDULER_SA_NAME:-hydrex-keeper-scheduler}
   MODULE=${MODULE:-0x750973E0CB728C3112561Bc8E9b235afA9B17E81}
-  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
+  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,60}
+  EVERY_BLOCK_FROM=${EVERY_BLOCK_FROM:-10}
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
@@ -81,6 +82,12 @@ load_config() {
   case "$VOTE_OFFSETS" in
     "" | *[!0-9,]* | *,,* | ,* | *,) die "VOTE_OFFSETS must be comma-separated seconds" ;;
   esac
+  case "$EVERY_BLOCK_FROM" in
+    "" | *[!0-9]*) die "EVERY_BLOCK_FROM must be seconds" ;;
+  esac
+  for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
+    [ "$offset" -gt "$EVERY_BLOCK_FROM" ] || die "VOTE_OFFSETS entry $offset is not larger than EVERY_BLOCK_FROM"
+  done
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
     *) die "ALERT_EMAIL must be an email address" ;;
@@ -94,7 +101,7 @@ load_config() {
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
   # Sorted by name, as check.sh reads them back; `|`-separated since VOTE_OFFSETS contains commas.
-  ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
+  ENV_VARS="EVERY_BLOCK_FROM=$EVERY_BLOCK_FROM|KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
   SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest|BASE_RPC_URLS=$RPC_SECRET:latest"
   SECRET_NAMES="$RPC_SECRET $ALCHEMY_SECRET"
   if [ -n "$COINGECKO_SECRET" ]; then
@@ -234,16 +241,22 @@ schedule_start() {
   printf '%s\n' "$schedule_start_seconds"
 }
 
-# Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
+# Every offset, and the start of the pass on every block, must fall strictly within HORIZON after some schedule
+# start, or the job never runs that pass.
 check_offsets_covered() {
   starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
-    covered=no
-    for start in $starts; do
-      [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
-    done
-    [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
+    offset_covered "$offset" || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
   done
+  offset_covered "$EVERY_BLOCK_FROM" || die "EVERY_BLOCK_FROM $EVERY_BLOCK_FROM is not within $HORIZON s after any SCHEDULES entry"
+}
+
+# offset_covered SECONDS: whether SECONDS before the flip is within HORIZON after one of $starts.
+offset_covered() {
+  for start in $starts; do
+    if [ "$1" -lt "$start" ] && [ "$1" -gt $((start - HORIZON)) ]; then return 0; fi
+  done
+  return 1
 }
 
 # schedules: one "NAME<TAB>CRON" line per entry of SCHEDULES; NAME is $JOB-1, $JOB-2, ...

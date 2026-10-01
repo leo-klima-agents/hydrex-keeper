@@ -10,6 +10,7 @@ export const moduleAbi = parseAbi([
   // Raised by the conduit or the Voter; the module re-raises them.
   "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
   "error EpochFlipInProgress()",
+  "error EpochStale()",
   "error VoteDelayNotMet()",
   "error InsufficientVotingPower()",
 ]);

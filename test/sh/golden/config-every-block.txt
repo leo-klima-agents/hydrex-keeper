@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: VOTE_OFFSETS entry 60 is not larger than EVERY_BLOCK_FROM

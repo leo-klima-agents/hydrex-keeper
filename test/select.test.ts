@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
-import { allocate, expected, select, type Candidate } from "../src/select.ts";
+import { allocate, expected, proportional, select, type Candidate } from "../src/select.ts";
 
 const A = "0x000000000000000000000000000000000000000a" as Address;
 const B = "0x000000000000000000000000000000000000000b" as Address;
@@ -61,4 +61,31 @@ test("keeps the current vote unless the gain is at least one percent", () => {
   assert.equal(voted(26n, 24n), null, "within one percent");
   assert.deepEqual(voted(50n, 0n), { pools: [A, B], weights: [5000n, 5000n] }, "clearly better");
   assert.deepEqual(voted(0n, 0n)?.weights, [5000n, 5000n], "first vote of the epoch");
+});
+
+test("proportional mirrors the rewards, drops shares under a tenth of a percent, and is null when nothing pays", () => {
+  const [a, b, c] = [candidate(A, 30, 1n), candidate(B, 10, 1_000_000n), candidate(C, 0, 1n)];
+  assert.deepEqual(proportional([a, b, c]), [0.75, 0.25, 0], "the other voters do not matter");
+  assert.deepEqual(proportional([candidate(A, 999, 1n), candidate(B, 0.5, 1n), candidate(C, 999, 1n)]), [0.5, 0, 0.5]);
+  assert.equal(proportional([candidate(A, 0, 1n), candidate(B, -1, 1n)]), null);
+});
+
+test("a proportional vote moves at least one percent of the power, whatever that does to the expected reward", () => {
+  const candidates = [candidate(A, 100, 1_000n), candidate(B, 100, 1n)];
+  const power = 1_000n;
+  const half = { pools: [A, B], weights: [5000n, 5000n] };
+  assert.deepEqual(select(candidates, power, "proportional").vote, half, "first vote of the epoch");
+  const optimal = select(candidates, power, "optimal").vote!;
+  const voted = candidates.map((c, i) => ({ ...c, ownVotes: (power * optimal.weights[i]!) / 10_000n }));
+  const current = voted.map((c) => Number(c.ownVotes) / Number(power));
+  assert.ok(expected(voted, [0.5, 0.5], power) < expected(voted, current, power), "pays less than the optimum");
+  assert.equal(select(voted, power, "optimal").vote, null, "the optimal vote stands");
+  assert.deepEqual(select(voted, power, "proportional").vote, half, "but a proportional pass moves anyway");
+  const at = (a: bigint, b: bigint) => [
+    { ...candidates[0]!, ownVotes: a },
+    { ...candidates[1]!, ownVotes: b },
+  ];
+  assert.equal(select(at(500n, 500n), power, "proportional").vote, null, "already proportional");
+  assert.equal(select(at(505n, 495n), power, "proportional").vote, null, "within one percent");
+  assert.deepEqual(select(at(520n, 480n), power, "proportional").vote, half, "two percent off");
 });
