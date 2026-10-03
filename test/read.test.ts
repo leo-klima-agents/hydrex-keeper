@@ -15,10 +15,21 @@ type Call = { address: Address; functionName: string; args?: readonly unknown[] 
 let multicalls = 0;
 
 /** A client whose multicall answers from a table and counts round trips; unknown calls fail. */
+let lastBlockTag: unknown;
+
 function fakeChain(answer: (call: Call) => unknown): Chain {
   const client = {
-    multicall: async ({ contracts, allowFailure }: { contracts: Call[]; allowFailure: boolean }) => {
+    multicall: async ({
+      contracts,
+      allowFailure,
+      blockTag,
+    }: {
+      contracts: Call[];
+      allowFailure: boolean;
+      blockTag?: unknown;
+    }) => {
       multicalls++;
+      lastBlockTag = blockTag;
       return contracts.map((call) => {
         try {
           const result = answer(call);
@@ -93,7 +104,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
   throw new Error(`unexpected call ${functionName} on ${address}`);
 }
 
-const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, votedThisEpoch: true };
+const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, lastVoted: 1000n, votedThisEpoch: true };
 
 test("readLayout drops pools without a gauge and defaults missing decimals", async () => {
   const s = await readLayout(fakeChain(table), [POOL_A, POOL_B, POOL_C]);
@@ -135,8 +146,9 @@ test("readPass reads the epoch, and maps rewards, liveness and votes per pool", 
   });
   voterState.lastVoted = 999n;
   try {
-    const { epoch: stale, rewards } = await readPass(chain, s);
-    assert.equal(stale.votedThisEpoch, false);
+    const { epoch: stale, rewards } = await readPass(chain, s, { blockTag: "pending" });
+    assert.equal(lastBlockTag, "pending", "reads the pending state when asked");
+    assert.deepEqual([stale.votedThisEpoch, stale.lastVoted], [false, 999n]);
     assert.deepEqual(
       [rewards[0]!.otherVotes, rewards[0]!.ownVotes],
       [1000n, 0n],

@@ -13,7 +13,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { castVote, VoteSent } from "../src/vote.ts";
+import { castVote, confirmVote, feesFrom, prepareVote, VoteSent } from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -24,19 +24,35 @@ type Behaviour = {
   pending?: number;
   receipt?: "success" | "reverted" | "timeout";
   recorded?: Address;
-  fee?: bigint;
+  baseFee?: bigint;
+  gasUsedRatio?: number;
   minedHash?: Hex;
   verifyFails?: boolean;
   sendFails?: boolean;
+  noFeeHistory?: boolean;
 };
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
   const client = {
-    simulateContract: async () => ({ result: undefined }),
-    estimateGas: async () => 100_000n,
-    estimateFeesPerGas: async () => ({ maxFeePerGas: b.fee ?? 1_000n, maxPriorityFeePerGas: (b.fee ?? 1_000n) / 10n }),
+    simulateContract: async ({ blockTag }: { blockTag: string }) => (
+      assert.equal(blockTag, "pending"),
+      { result: undefined }
+    ),
+    estimateGas: async ({ blockTag }: { blockTag: string }) => (assert.equal(blockTag, "pending"), 100_000n),
+    getFeeHistory: async ({ blockTag }: { blockTag: string }) => {
+      assert.equal(blockTag, "pending");
+      if (b.noFeeHistory) throw new Error("pending not supported");
+      return {
+        baseFeePerGas: [b.baseFee ?? 450n],
+        gasUsedRatio: [b.gasUsedRatio ?? 0.1],
+        oldestBlock: 1n,
+        reward: [[900n]],
+      };
+    },
+    getBlock: async () => ({ baseFeePerGas: 470n }),
+    estimateMaxPriorityFeePerGas: async () => 100n,
     getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
     getBalance: async () => 10n ** 18n,
@@ -72,14 +88,41 @@ function fakeChain(b: Behaviour = {}) {
 const vote = { pools: [POOL], weights: [100n] };
 const far = Date.now() + 3_600_000;
 
-test("signs with the confirmed nonce and the estimated fees, then verifies at the receipt block", async () => {
+test("signs with the confirmed nonce at twice the pending base fee plus the tip, then verifies at the receipt block", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
   await castVote(chain, signer, vote, false, far);
   const tx = parseTransaction(sent[0]!);
   assert.equal(tx.nonce, 3);
   assert.equal(tx.maxFeePerGas, 1_000n);
+  assert.equal(tx.maxPriorityFeePerGas, 100n);
   assert.equal(tx.gas, 120_000n);
   assert.equal(tx.to, MODULE);
+});
+
+test("a pending block at least half full raises the tip to its 90th percentile", async () => {
+  const { chain, sent } = fakeChain({ gasUsedRatio: 0.5 });
+  await castVote(chain, signer, vote, false, far);
+  const tx = parseTransaction(sent[0]!);
+  assert.deepEqual([tx.maxPriorityFeePerGas, tx.maxFeePerGas], [900n, 1_800n]);
+  const fees = feesFrom({ baseFeePerGas: [5n], gasUsedRatio: [0.49], oldestBlock: 1n, reward: [[900n]] }, 100n)!;
+  assert.deepEqual(fees, { baseFee: 5n, tip: 100n, busy: undefined });
+  assert.equal(feesFrom({ baseFeePerGas: [], gasUsedRatio: [], oldestBlock: 1n }, 100n), undefined);
+  const tx4 = prepareVote(chain, vote, 1n, { latest: 1, pending: 1 }, fees, 4n);
+  assert.deepEqual([tx4.maxFeePerGas, tx4.maxPriorityFeePerGas, tx4.nonce], [120n, 100n, 1]);
+});
+
+test("a node without the pending block's fees falls back to the latest block's base fee", async () => {
+  const { chain, sent } = fakeChain({ noFeeHistory: true });
+  await castVote(chain, signer, vote, false, far);
+  assert.equal(parseTransaction(sent[0]!).maxFeePerGas, 2n * 470n + 100n);
+});
+
+test("a receipt of another own vote under the same nonce confirms quietly", async () => {
+  const other = `0x${"cd".repeat(32)}` as Hex;
+  const { chain } = fakeChain({ minedHash: other });
+  const hash = `0x${"ab".repeat(32)}` as Hex;
+  await confirmVote(chain, vote, hash, new Set([hash, other]));
+  await assert.rejects(confirmVote(chain, vote, hash), /replaced/);
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {
@@ -92,7 +135,7 @@ test("a re-vote under the same nonce pays a quarter more than the pending one", 
   assert.equal(parseTransaction(later.sent[0]!).maxFeePerGas, 1_000n, "a new nonce starts from the estimate");
 });
 
-test("a receipt that does not arrive in time is left to the next pass", async () => {
+test("a receipt that does not arrive in time is left to a later check", async () => {
   const { chain, sent } = fakeChain({ receipt: "timeout" });
   await castVote(chain, signer, vote, false, far);
   assert.equal(sent.length, 1);

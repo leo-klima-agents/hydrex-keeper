@@ -13,6 +13,7 @@ MAX_RETRIES=3
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600                   # seconds; HORIZON in src/schedule.ts
+MIN_LEAD=120                   # seconds; over PREPARE_S in src/main.ts: the last blocks' execution starts this long before the flip
 FLIP_WEEKDAY=4                 # Thursday 00:00 UTC
 MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH: weeks of votes; check.sh fails below it
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
@@ -56,7 +57,7 @@ load_config() {
   KEEPER_SA_NAME=${KEEPER_SA_NAME:-hydrex-keeper}
   SCHEDULER_SA_NAME=${SCHEDULER_SA_NAME:-hydrex-keeper-scheduler}
   MODULE=${MODULE:-0x750973E0CB728C3112561Bc8E9b235afA9B17E81}
-  VOTE_OFFSETS=${VOTE_OFFSETS:-86400,600,200,70,25,10,5}
+  VOTE_OFFSETS=${VOTE_OFFSETS:-86400}
   SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
@@ -88,7 +89,9 @@ load_config() {
   case "$SCHEDULES" in
     "" | *";;"* | ";"* | *";") die "SCHEDULES must be cron expressions separated by ;" ;;
   esac
-  check_offsets_covered
+  starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
+  check_offsets_covered "$starts"
+  check_flip_covered "$starts"
 
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
@@ -234,16 +237,29 @@ schedule_start() {
   printf '%s\n' "$schedule_start_seconds"
 }
 
-# Every offset must fall strictly within HORIZON after some schedule start, or the job never runs that pass.
+# check_offsets_covered STARTS: every offset must fall strictly within HORIZON after some schedule start (seconds
+# before the flip, one per line), or the job never runs that pass, and at least MIN_LEAD before the flip, which the
+# last blocks' vote keeps for itself.
 check_offsets_covered() {
-  starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
+  starts=$1
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
+    [ "$offset" -ge "$MIN_LEAD" ] || die "VOTE_OFFSETS entry $offset is within $MIN_LEAD s of the flip, kept for the last blocks"
     covered=no
     for start in $starts; do
       [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
     done
     [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
   done
+}
+
+# check_flip_covered STARTS: some schedule must start between MIN_LEAD and HORIZON before the flip, as that execution
+# votes in the last blocks.
+check_flip_covered() {
+  covered=no
+  for start in $1; do
+    [ "$start" -ge "$MIN_LEAD" ] && [ "$start" -le "$HORIZON" ] && covered=yes
+  done
+  [ "$covered" = yes ] || die "no SCHEDULES entry starts between $MIN_LEAD and $HORIZON s before the flip"
 }
 
 # schedules: one "NAME<TAB>CRON" line per entry of SCHEDULES; NAME is $JOB-1, $JOB-2, ...

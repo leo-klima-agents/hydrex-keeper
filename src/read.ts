@@ -1,13 +1,13 @@
 import { erc20Abi, zeroAddress, type Address } from "viem";
-import { bribeAbi, veAbi } from "./abi.ts";
-import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
+import { bribeAbi, veAbi, votedEvent } from "./abi.ts";
+import { now, readMany, voterCall, WEEK, type Call, type Chain, type ReadOptions } from "./chain.ts";
 import { log } from "./log.ts";
 
-export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean };
+export type Epoch = { start: bigint; flip: bigint; power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
 
 type Reward = { token: Address; amount: bigint; decimals: number };
 
-type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; ownVotes: bigint; rewards: Reward[] };
+export type PoolRewards = { pool: Address; alive: boolean; otherVotes: bigint; ownVotes: bigint; rewards: Reward[] };
 
 type Slot = { pool: number; bribe: Address; token: Address; decimals: number };
 
@@ -33,7 +33,13 @@ function epochCalls(chain: Chain, calendar: bigint): Call[] {
 }
 
 function toEpoch([start, lastVoted, power]: bigint[]): Epoch {
-  return { start: start!, flip: start! + WEEK, power: power!, votedThisEpoch: lastVoted! >= start! };
+  return {
+    start: start!,
+    flip: start! + WEEK,
+    power: power!,
+    lastVoted: lastVoted!,
+    votedThisEpoch: lastVoted! >= start!,
+  };
 }
 
 /** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
@@ -97,18 +103,23 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
 export async function readPass(
   chain: Chain,
   { pools, gauges, bribes, lengths, slots }: Layout,
+  at: ReadOptions = {},
 ): Promise<{ epoch: Epoch; rewards: PoolRewards[] }> {
   const calendar = calendarEpoch();
-  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(chain.client, [
-    ...epochCalls(chain, calendar),
-    ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
-    ...gauges.flatMap((gauge, i) => [
-      voterCall(chain, "isAlive", [gauge]),
-      voterCall(chain, "weights", [pools[i]]),
-      voterCall(chain, "votes", [chain.conduit, pools[i]]),
-    ]),
-    ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
-  ]);
+  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(
+    chain.client,
+    [
+      ...epochCalls(chain, calendar),
+      ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
+      ...gauges.flatMap((gauge, i) => [
+        voterCall(chain, "isAlive", [gauge]),
+        voterCall(chain, "weights", [pools[i]]),
+        voterCall(chain, "votes", [chain.conduit, pools[i]]),
+      ]),
+      ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
+    ],
+    at,
+  );
   const epoch = toEpoch(results.slice(0, 3) as bigint[]);
   if (lengths.some((length, b) => results[3 + b] !== length)) throw new LayoutChanged("reward tokens changed");
   const perPool = results.slice(3 + bribes.length, 3 + bribes.length + 3 * pools.length);
@@ -128,4 +139,14 @@ export async function readPass(
     };
   });
   return { epoch, rewards };
+}
+
+/** Who voted in the block being built, and how much. */
+export async function readVoted({ client, voter }: Chain): Promise<{ voter: Address; weight: bigint }[]> {
+  const logs = await client.getLogs({ address: voter, event: votedEvent, fromBlock: "pending", toBlock: "pending" });
+  const byVoter = new Map<Address, bigint>();
+  for (const { args } of logs) {
+    if (args.voter) byVoter.set(args.voter, (byVoter.get(args.voter) ?? 0n) + (args.weight ?? 0n));
+  }
+  return [...byVoter].map(([voter, weight]) => ({ voter, weight }));
 }
