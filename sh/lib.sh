@@ -13,7 +13,7 @@ MAX_RETRIES=3
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 HORIZON=3600                   # seconds; HORIZON in src/schedule.ts
-MIN_LEAD=120                   # seconds; the execution that votes the last blocks must start this long before the flip
+MIN_LEAD=120                   # seconds; over PREPARE_S in src/main.ts: the last blocks' execution starts this long before the flip
 FLIP_WEEKDAY=4                 # Thursday 00:00 UTC
 MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH: weeks of votes; check.sh fails below it
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
@@ -238,10 +238,12 @@ schedule_start() {
 }
 
 # check_offsets_covered STARTS: every offset must fall strictly within HORIZON after some schedule start (seconds
-# before the flip, one per line), or the job never runs that pass.
+# before the flip, one per line), or the job never runs that pass, and at least MIN_LEAD before the flip, which the
+# last blocks' vote keeps for itself.
 check_offsets_covered() {
   starts=$1
   for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
+    [ "$offset" -ge "$MIN_LEAD" ] || die "VOTE_OFFSETS entry $offset is within $MIN_LEAD s of the flip, kept for the last blocks"
     covered=no
     for start in $starts; do
       [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
@@ -255,7 +257,7 @@ check_offsets_covered() {
 check_flip_covered() {
   covered=no
   for start in $1; do
-    [ "$start" -gt "$MIN_LEAD" ] && [ "$start" -le "$HORIZON" ] && covered=yes
+    [ "$start" -ge "$MIN_LEAD" ] && [ "$start" -le "$HORIZON" ] && covered=yes
   done
   [ "$covered" = yes ] || die "no SCHEDULES entry starts between $MIN_LEAD and $HORIZON s before the flip"
 }

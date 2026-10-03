@@ -1,19 +1,19 @@
 import type { Hex } from "viem";
-import { decideAt, sealAt, slots, timing, type Observed, type Pending, type Timing } from "./blocks.ts";
+import { decideAt, LEAD_MS, sealAt, slots, timing, type Observed, type Pending, type Timing } from "./blocks.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 const POLL_TIMEOUT_MS = 500;
+const POLL_BACKOFF_MS = 2_000; // a poll past its timeout is given this long to settle before the next one
 const POLL_GAP_MS = 50;
 const TICK_MS = 100;
-const SEND_MARGIN_MS = 300;
 const MIN_BUDGET_MS = 700; // a decision always gets this long, even once its block was expected to seal
 
 export type Deps<R extends { epoch: { lastVoted: bigint } }, S> = {
   poll: () => Promise<Pending>;
-  read: (until: number) => Promise<R>;
+  read: () => Promise<R>;
   decide: (read: R, slot: number) => Vote | null;
-  sign: (vote: Vote, read: R, until: number) => Promise<S>;
+  sign: (vote: Vote, read: R) => Promise<S | undefined>;
   send: (signed: S, until: number) => Promise<Hex | undefined>;
 };
 
@@ -21,7 +21,8 @@ export type Prepared<R, S> = { snapshot?: R; fallback?: { vote: Vote; signed: S 
 
 export type Sent = { vote: Vote; hash: Hex };
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+// The global timer, which node's mock timers replace, unlike an import of timers/promises.
+export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Rejects at `until` (ms) unless `promise` settled first. */
 export function within<T>(promise: Promise<T>, until: number): Promise<T> {
@@ -48,15 +49,24 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
   const poller = (async () => {
     while (!stop) {
       const started = Date.now();
+      const request = deps.poll();
       try {
-        const block = await within(deps.poll(), started + POLL_TIMEOUT_MS);
+        const block = await within(request, started + POLL_TIMEOUT_MS);
         const rtt = Date.now() - started;
         observed.rtts.push(rtt);
         if (block.timestamp > (latest?.timestamp ?? 0)) {
           latest = block;
           observed.seen.push({ timestamp: block.timestamp, seen: Date.now(), rtt });
         }
-      } catch {}
+      } catch {
+        await Promise.race([
+          request.then(
+            () => {},
+            () => {},
+          ),
+          sleep(POLL_BACKOFF_MS),
+        ]);
+      }
       await sleep(POLL_GAP_MS);
     }
   })();
@@ -82,13 +92,12 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       log.warning("flipped before deciding", { slot, pending });
       break;
     }
-    const deadline = Math.max(sealAt(slot, t) - SEND_MARGIN_MS, Date.now() + MIN_BUDGET_MS);
+    const deadline = Math.max(sealAt(slot, t) - LEAD_MS, Date.now() + MIN_BUDGET_MS);
     log.info("deciding", { slot, pending, budgetMs: deadline - Date.now(), timing: t });
     let read = snapshot;
     let started = Date.now();
     try {
-      const until = deadline - signMs - t.rtt;
-      read = snapshot = await within(deps.read(until), until);
+      read = snapshot = await within(deps.read(), deadline - signMs - t.rtt);
       readMs = Math.max(readMs, Date.now() - started);
     } catch (error) {
       if (sent.length) {
@@ -113,10 +122,10 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       continue;
     }
     if (!vote) continue;
-    let signed: S;
+    let signed: S | undefined;
     started = Date.now();
     try {
-      signed = await within(deps.sign(vote, read, deadline), deadline);
+      signed = await within(deps.sign(vote, read), deadline);
       signMs = Math.max(signMs, Date.now() - started);
     } catch (error) {
       if (!fallback || sent.length) {
@@ -126,6 +135,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       log.warning("signing failed; sending the rehearsed vote", { slot, error: errorMessage(error) });
       ({ vote, signed } = fallback);
     }
+    if (signed === undefined) continue;
     if (futile(current())) {
       log.warning("block sealed before sending", { slot, pending: latest?.timestamp });
       continue;

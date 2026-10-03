@@ -73,6 +73,7 @@ golden_case run-bad-arg existing keeper run.sh --later
 golden_case config-uncovered existing uncovered run.sh --now
 golden_case config-zeros existing zeros run.sh --now
 golden_case config-late existing late run.sh --now
+golden_case config-close existing close run.sh --now
 golden_case config-bad-module existing bad-module run.sh --now
 golden_case check-ok existing keeper check.sh
 golden_case check-drift drift keeper check.sh

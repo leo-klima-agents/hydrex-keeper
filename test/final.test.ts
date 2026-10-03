@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import type { Address, Hex } from "viem";
-import { runFinal, within, type Deps, type Prepared, type Sent } from "../src/final.ts";
+import { runFinal, sleep, within, type Deps, type Prepared, type Sent } from "../src/final.ts";
 
 const flip = 1_790_812_800;
 const arm = (flip - 20) * 1000;
 const vote = { pools: ["0x0000000000000000000000000000000000000004" as Address], weights: [100n] };
 
 type Read = { epoch: { lastVoted: bigint }; tag: string };
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 type Chain = {
   skew?: number; // ms after its timestamp at which a block seals
@@ -19,6 +17,7 @@ type Chain = {
   burst?: boolean; // stalled, then caught up past the flip 2 s before it
   readDead?: boolean;
   signFails?: boolean;
+  signSkips?: boolean;
   lastVoted?: (now: number) => bigint;
 };
 
@@ -48,7 +47,7 @@ function harness(c: Chain) {
     sign: async () => {
       await sleep(200);
       if (c.signFails) throw new Error("KMS down");
-      return "signed";
+      return c.signSkips ? undefined : "signed";
     },
     send: async (signed) => {
       await sleep(100);
@@ -140,6 +139,13 @@ test("a signature that fails sends the rehearsed vote once", async (t) => {
     ["rehearsed"],
   );
   assert.equal(sent.length, 1);
+});
+
+test("a signature skipped sends nothing, not even the rehearsed vote", async (t) => {
+  clock(t);
+  const { deps, sends, decided } = harness({ signSkips: true });
+  await drive(t, runFinal(flip, deps, prepared({ fallback: { vote, signed: "rehearsed" } })));
+  assert.deepEqual([decided.length, sends.length], [2, 0]);
 });
 
 test("a signature that fails with nothing rehearsed sends nothing", async (t) => {

@@ -38,10 +38,56 @@ const lastSentBy = new WeakMap<Client, Tx>();
 const max = (a: bigint, b: bigint) => (a > b ? a : b);
 
 /** The pending block's base fee and, when it is at least half full, the tip of its 90th percentile. */
-export function feesFrom(history: FeeHistory, tip: bigint): Fees {
+export function feesFrom(history: FeeHistory, tip: bigint): Fees | undefined {
+  const baseFee = history.baseFeePerGas[0];
+  if (baseFee === undefined) return undefined;
   const busy = (history.gasUsedRatio[0] ?? 0) >= BUSY ? history.reward?.[0]?.[0] : undefined;
-  return { baseFee: history.baseFeePerGas[0] ?? 0n, tip, busy };
+  return { baseFee, tip, busy };
 }
+
+/** The fees of the pending block, or of the latest one from a node that does not serve the pending one. */
+export async function readFees(client: Client): Promise<Fees> {
+  const [tip, history] = await Promise.all([
+    client.estimateMaxPriorityFeePerGas(),
+    client.getFeeHistory({ blockCount: 1, blockTag: "pending", rewardPercentiles: [90] }).catch(() => undefined),
+  ]);
+  const fees = history && feesFrom(history, tip);
+  if (fees) return fees;
+  const { baseFeePerGas } = await client.getBlock();
+  if (baseFeePerGas === null) throw new Error("no base fee");
+  return { baseFee: baseFeePerGas, tip, busy: undefined };
+}
+
+export async function readNonces({ client, keeper }: Chain): Promise<Nonces> {
+  const [latest, pending] = await Promise.all([
+    client.getTransactionCount({ address: keeper, blockTag: "latest" }),
+    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
+  ]);
+  return { latest, pending };
+}
+
+export type Rehearsal = { gas: bigint; balance: bigint; l1Fee: bigint };
+
+/** Simulates `plan` against the pending state, and sizes the gas, a fifth over the estimate, and the L1 fee on `sized`. */
+export async function rehearse({ client, module, keeper }: Chain, plan: Vote, sized = plan): Promise<Rehearsal> {
+  const data = voteData(sized);
+  const [, gas, balance, l1Fee] = await allOrFirstFailure([
+    client.simulateContract({
+      address: module,
+      abi: moduleAbi,
+      functionName: "vote",
+      args: [plan.pools, plan.weights],
+      account: keeper,
+      blockTag: "pending",
+    }),
+    client.estimateGas({ account: keeper, to: module, data, blockTag: "pending" }),
+    client.getBalance({ address: keeper }),
+    client.estimateL1Fee({ account: keeper, to: module, data }),
+  ]);
+  return { gas: (gas * 12n) / 10n, balance, l1Fee };
+}
+
+export const costOf = (tx: Tx, l1Fee: bigint) => tx.gas * tx.maxFeePerGas + l1Fee;
 
 export const voteData = (vote: Vote) =>
   encodeFunctionData({ abi: moduleAbi, functionName: "vote", args: [vote.pools, vote.weights] });
@@ -132,28 +178,14 @@ export async function castVote(
   dryRun: boolean,
   until: number,
 ): Promise<void> {
-  const { client, module, keeper } = chain;
-  const data = voteData(vote);
-  const args = [vote.pools, vote.weights] as const;
-  const [gas, history, tip, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateContract({
-      address: module,
-      abi: moduleAbi,
-      functionName: "vote",
-      args,
-      account: keeper,
-      blockTag: "pending",
-    }),
-    client.estimateGas({ account: keeper, to: module, data, blockTag: "pending" }),
-    client.getFeeHistory({ blockCount: 1, blockTag: "pending", rewardPercentiles: [90] }),
-    client.estimateMaxPriorityFeePerGas(),
-    client.getTransactionCount({ address: keeper, blockTag: "latest" }),
-    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
-    client.getBalance({ address: keeper }),
-    client.estimateL1Fee({ account: keeper, to: module, data }),
-  ]).then(([, ...rest]) => rest);
-  const tx = prepareVote(chain, vote, (gas * 12n) / 10n, { latest, pending }, feesFrom(history, tip));
-  const cost = tx.gas * tx.maxFeePerGas + l1Fee;
+  const { client, keeper } = chain;
+  const [{ gas, balance, l1Fee }, nonces, fees] = await allOrFirstFailure([
+    rehearse(chain, vote),
+    readNonces(chain),
+    readFees(client),
+  ]);
+  const tx = prepareVote(chain, vote, gas, nonces, fees);
+  const cost = costOf(tx, l1Fee);
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce: tx.nonce });
 

@@ -60,8 +60,9 @@ script is safe to re-run.
 
 1. **Configure.** Run `cp config.env.example config.env`, then fill in `KEEPER_PROJECT` (a project for this job only),
    `KMS_KEY_VERSION` (`version` in the key repo's `record/keeper.json`) and `ALERT_EMAIL`. The defaults match the
-   deployed module and the sibling repos. Each `VOTE_OFFSETS` entry must fall within the hour after a `SCHEDULES` entry,
-   and one `SCHEDULES` entry must fall between 2 and 60 minutes before the flip; the scripts check both.
+   deployed module and the sibling repos. Each `VOTE_OFFSETS` entry must fall within the hour after a `SCHEDULES` entry
+   and at least 2 minutes before the flip, and one `SCHEDULES` entry must fall between 2 and 60 minutes before the flip;
+   the scripts check all three.
 2. **Create the resources.** `sh/setup.sh` enables the APIs, and creates the job's service account (the only one allowed
    to sign), the scheduler's (which may only start the job), the secrets, and email alerts on a failed execution and on
    a failed start. It prints the job's service account.
@@ -100,6 +101,8 @@ Outside the scripts:
   if no token has a price. Unpriced tokens count as zero.
 - **Cloud KMS:** the pass fails; in the last blocks, the vote signed a minute earlier is sent instead. A signature that
   does not recover to `KEEPER` is never sent.
+- **Keeper balance:** a pass refuses to vote with less than twice the cost of a vote; the last blocks are voted while
+  the balance covers one.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote.

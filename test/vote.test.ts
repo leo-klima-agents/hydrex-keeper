@@ -29,6 +29,7 @@ type Behaviour = {
   minedHash?: Hex;
   verifyFails?: boolean;
   sendFails?: boolean;
+  noFeeHistory?: boolean;
 };
 
 /** A client that answers castVote's reads and records what it is asked to send. */
@@ -40,10 +41,17 @@ function fakeChain(b: Behaviour = {}) {
       { result: undefined }
     ),
     estimateGas: async ({ blockTag }: { blockTag: string }) => (assert.equal(blockTag, "pending"), 100_000n),
-    getFeeHistory: async ({ blockTag }: { blockTag: string }) => (
-      assert.equal(blockTag, "pending"),
-      { baseFeePerGas: [b.baseFee ?? 450n], gasUsedRatio: [b.gasUsedRatio ?? 0.1], oldestBlock: 1n, reward: [[900n]] }
-    ),
+    getFeeHistory: async ({ blockTag }: { blockTag: string }) => {
+      assert.equal(blockTag, "pending");
+      if (b.noFeeHistory) throw new Error("pending not supported");
+      return {
+        baseFeePerGas: [b.baseFee ?? 450n],
+        gasUsedRatio: [b.gasUsedRatio ?? 0.1],
+        oldestBlock: 1n,
+        reward: [[900n]],
+      };
+    },
+    getBlock: async () => ({ baseFeePerGas: 470n }),
     estimateMaxPriorityFeePerGas: async () => 100n,
     getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
@@ -96,10 +104,17 @@ test("a pending block at least half full raises the tip to its 90th percentile",
   await castVote(chain, signer, vote, false, far);
   const tx = parseTransaction(sent[0]!);
   assert.deepEqual([tx.maxPriorityFeePerGas, tx.maxFeePerGas], [900n, 1_800n]);
-  const fees = feesFrom({ baseFeePerGas: [5n], gasUsedRatio: [0.49], oldestBlock: 1n, reward: [[900n]] }, 100n);
+  const fees = feesFrom({ baseFeePerGas: [5n], gasUsedRatio: [0.49], oldestBlock: 1n, reward: [[900n]] }, 100n)!;
   assert.deepEqual(fees, { baseFee: 5n, tip: 100n, busy: undefined });
+  assert.equal(feesFrom({ baseFeePerGas: [], gasUsedRatio: [], oldestBlock: 1n }, 100n), undefined);
   const tx4 = prepareVote(chain, vote, 1n, { latest: 1, pending: 1 }, fees, 4n);
   assert.deepEqual([tx4.maxFeePerGas, tx4.maxPriorityFeePerGas, tx4.nonce], [120n, 100n, 1]);
+});
+
+test("a node without the pending block's fees falls back to the latest block's base fee", async () => {
+  const { chain, sent } = fakeChain({ noFeeHistory: true });
+  await castVote(chain, signer, vote, false, far);
+  assert.equal(parseTransaction(sent[0]!).maxFeePerGas, 2n * 470n + 100n);
 });
 
 test("a receipt of another own vote under the same nonce confirms quietly", async () => {
