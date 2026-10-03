@@ -15,14 +15,27 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 ## How it votes
 
 Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. Each execution runs the passes due in the next
-hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600, 200, 70, 25, 10 and 5 seconds before it.
+hour: 24 hours before the Thursday 00:00 UTC epoch flip, as a fallback. The execution started within the hour before the
+flip then votes again in the last two blocks before it, each at the last moment, to see as much as possible of the other
+votes.
 
 A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes to maximise
 the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn
 `usd × x / (V + x)`. To save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for
 adds two bribe deposits to the transaction, and a share that small earns almost nothing. Votes do not carry over, so the
-first pass of an epoch votes; later passes vote again only if that pays at least 1% more. A pass takes under a second,
-and Base blocks are two seconds apart, so the last pass leaves a block of margin.
+first pass of an epoch votes; later passes vote again only if that pays at least 1% more.
+
+The last blocks are voted as follows. A minute before the flip, the job prices the rewards, reads the state of the block
+being built, estimates the gas of a vote over every pool, and signs a vote it keeps as a fallback. From 20 seconds
+before the flip it polls the block being built (Base publishes it as it grows, every 200 ms) to measure the block
+spacing, which second the blocks fall on, when a block seals relative to its timestamp, and the round trip. From these
+it names the two last blocks before the flip, and decides each one just before it seals, leaving time for one read, one
+signature and the send. Nothing waits on the polls: a poll that fails leaves the timing at its last estimate, or at
+2-second blocks sealing as early as they could. A decision reads the state of the block being built, including the votes
+already in it, and the votes it logs by voter; a read that fails decides on the last one, unless a vote is already out.
+A signature that fails sends the fallback vote once. A block at least half full pays the tip of its 90th percentile. A
+vote is sent as long as the chain is not seen past the flip, so a sequencer that stalls still gets it. The execution
+fails if the conduit has not voted this epoch afterwards.
 
 A failing pass is tried up to three times while there is time. If it still fails, the execution exits non-zero, an email
 alert fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does
@@ -48,7 +61,7 @@ script is safe to re-run.
 1. **Configure.** Run `cp config.env.example config.env`, then fill in `KEEPER_PROJECT` (a project for this job only),
    `KMS_KEY_VERSION` (`version` in the key repo's `record/keeper.json`) and `ALERT_EMAIL`. The defaults match the
    deployed module and the sibling repos. Each `VOTE_OFFSETS` entry must fall within the hour after a `SCHEDULES` entry,
-   and the scripts check it.
+   and one `SCHEDULES` entry must fall between 2 and 60 minutes before the flip; the scripts check both.
 2. **Create the resources.** `sh/setup.sh` enables the APIs, and creates the job's service account (the only one allowed
    to sign), the scheduler's (which may only start the job), the secrets, and email alerts on a failed execution and on
    a failed start. It prints the job's service account.
@@ -80,11 +93,13 @@ Outside the scripts:
 ## Failure modes
 
 - **Base RPC:** a call that fails, or gets no answer within 250 ms, also goes to the next URL, and the first answer
-  wins. If all fail, the pass fails. The vote is sent to every URL.
+  wins. If all fail, the pass fails. In the last blocks, a failed read decides on the last one. The vote is sent to
+  every URL.
 - **Prices:** DefiLlama, Alchemy, and CoinGecko if set, three attempts each. A price is the median of three quotes, the
   lower of two, or the only one. If every source fails, the last prices are reused. The pass fails if there are none, or
   if no token has a price. Unpriced tokens count as zero.
-- **Cloud KMS:** the pass fails. A signature that does not recover to `KEEPER` is never sent.
+- **Cloud KMS:** the pass fails; in the last blocks, the vote signed a minute earlier is sent instead. A signature that
+  does not recover to `KEEPER` is never sent.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote.
@@ -102,7 +117,8 @@ the pinned Actions, npm packages and base images.
 
 ## Limitations
 
-- The expected reward assumes the other voters stay put; the late passes correct for them moving.
+- The expected reward assumes the other voters stay put; the last blocks' votes correct for them moving, except for
+  votes landing in the last block after the keeper's.
 - Claiming and swapping rewards are not implemented.
 
 ## License

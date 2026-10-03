@@ -1,4 +1,4 @@
-import { parseAbi } from "viem";
+import { parseAbi, parseAbiItem } from "viem";
 
 // Sources: hydrex-conduit-executor, and Hydrex's KlimaVeTokenConduit, VoterV5, BribeV2 and VotingEscrow on Base.
 export const moduleAbi = parseAbi([
@@ -30,6 +30,8 @@ export const voterAbi = parseAbi([
   "function poolVote(address voter, uint256 index) view returns (address)",
   "function lastVoted(address voter) view returns (uint256)",
 ]);
+
+export const votedEvent = parseAbiItem("event Voted(address indexed voter, uint256 weight)");
 
 export const veAbi = parseAbi(["function getPastVotes(address account, uint256 timestamp) view returns (uint256)"]);
 

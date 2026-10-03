@@ -24,7 +24,7 @@ ok: job task timeout is 5400
 FAIL: job max retries is 0, expected 3
 ok: job task count is 1
 ok: job containers is 1
-FAIL: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81, expected KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=86400,600,200,70,25,10,5
+FAIL: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81, expected KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1|MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81|VOTE_OFFSETS=86400
 ok: job secrets is ALCHEMY_API_KEY=alchemy-api-key:latest|BASE_RPC_URLS=base-rpc-url:latest
 FAIL: job IAM policy differs from template
 @@ -1,10 +1,3 @@
