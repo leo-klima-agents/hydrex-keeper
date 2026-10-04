@@ -24,7 +24,10 @@ export function timing({ seeds, seen, rtts }: Observed): Timing {
   const stamps = [...seeds, ...seen.map((s) => s.timestamp)].slice(-WINDOW - 1);
   const diffs = stamps.slice(1).map((t, i) => t - stamps[i]!);
   const spacing = median(diffs.filter((d) => d > 0)) ?? DEFAULT_SPACING;
-  const skews = seen.slice(1, WINDOW + 1).map((s) => s.seen - s.rtt - (s.timestamp - spacing) * 1000);
+  const skews = seen
+    .slice(1)
+    .slice(-WINDOW)
+    .map((s) => s.seen - s.rtt - (s.timestamp - spacing) * 1000);
   return {
     spacing,
     phase: stamps.length ? stamps.at(-1)! % spacing : undefined,

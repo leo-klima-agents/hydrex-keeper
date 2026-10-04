@@ -45,17 +45,20 @@ export function feesFrom(history: FeeHistory, tip: bigint): Fees | undefined {
   return { baseFee, tip, busy };
 }
 
-/** The fees of the pending block, or of the latest one from a node that does not serve the pending one. */
+/** The fees of the pending block, or its base fee as the latest block sets it on a node without the pending one. */
 export async function readFees(client: Client): Promise<Fees> {
-  const [tip, history] = await Promise.all([
+  const history = (blockTag: "pending" | "latest") =>
+    client.getFeeHistory({ blockCount: 1, blockTag, rewardPercentiles: [90] });
+  const [tip, pending, latest] = await Promise.all([
     client.estimateMaxPriorityFeePerGas(),
-    client.getFeeHistory({ blockCount: 1, blockTag: "pending", rewardPercentiles: [90] }).catch(() => undefined),
+    history("pending").catch(() => undefined),
+    history("latest"),
   ]);
-  const fees = history && feesFrom(history, tip);
+  const fees = pending && feesFrom(pending, tip);
   if (fees) return fees;
-  const { baseFeePerGas } = await client.getBlock();
-  if (baseFeePerGas === null) throw new Error("no base fee");
-  return { baseFee: baseFeePerGas, tip, busy: undefined };
+  const baseFee = latest.baseFeePerGas[1] ?? latest.baseFeePerGas[0];
+  if (baseFee === undefined) throw new Error("no base fee");
+  return { baseFee, tip, busy: undefined };
 }
 
 export async function readNonces({ client, keeper }: Chain): Promise<Nonces> {
@@ -118,6 +121,17 @@ export function prepareVote(
     maxPriorityFeePerGas: bump(tip, own?.maxPriorityFeePerGas),
     nonce: nonces.latest,
   };
+}
+
+/** The signed transaction, or nothing without a key, or without a metadata server in a dry run. */
+export async function signVote(account: LocalAccount | undefined, tx: Tx, dryRun: boolean): Promise<Hex | undefined> {
+  if (!account) return (log.warning("signing skipped: no KMS key configured"), undefined);
+  try {
+    return await account.signTransaction(tx);
+  } catch (error) {
+    if (!dryRun || !(error instanceof NoMetadataServer)) throw error;
+    return (log.warning("signing skipped: no metadata server", { reason: error.message }), undefined);
+  }
 }
 
 /** Sends a signed transaction before `until` (ms); recorded first, as a send that fails may still have reached a node. */
@@ -189,20 +203,8 @@ export async function castVote(
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce: tx.nonce });
 
-  if (!account) {
-    log.warning("signing skipped: no KMS key configured");
-    return;
-  }
-  let signed: Hex;
-  try {
-    signed = await account.signTransaction(tx);
-  } catch (error) {
-    if (dryRun && error instanceof NoMetadataServer) {
-      log.warning("signing skipped: no metadata server", { reason: error.message });
-      return;
-    }
-    throw error;
-  }
+  const signed = await signVote(account, tx, dryRun);
+  if (!signed) return;
   if (dryRun) {
     log.info("dry run: signed, not sent");
     return;

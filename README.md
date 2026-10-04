@@ -35,7 +35,7 @@ signature and the send. Nothing waits on the polls: a poll that fails leaves the
 already in it, and the votes it logs by voter; a read that fails decides on the last one, unless a vote is already out.
 A signature that fails sends the fallback vote once. A block at least half full pays the tip of its 90th percentile. A
 vote is sent as long as the chain is not seen past the flip, so a sequencer that stalls still gets it. The execution
-fails if the conduit has not voted this epoch afterwards.
+fails if the conduit has not voted this epoch afterwards, or if a decision failed.
 
 A failing pass is tried up to three times while there is time. If it still fails, the execution exits non-zero, an email
 alert fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does

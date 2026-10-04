@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import type { Address, Hex } from "viem";
-import { runFinal, sleep, within, type Deps, type Prepared, type Sent } from "../src/final.ts";
+import { runFinal, sleep, within, type Deps, type Outcome, type Prepared } from "../src/final.ts";
 
 const flip = 1_790_812_800;
 const arm = (flip - 20) * 1000;
@@ -13,6 +13,7 @@ type Chain = {
   skew?: number; // ms after its timestamp at which a block seals
   rtt?: number;
   dead?: boolean; // polls never answer
+  frozenAt?: number; // polls answer with the block pending at this wall time
   stalled?: boolean; // the pending block stays at flip - 19
   burst?: boolean; // stalled, then caught up past the flip 2 s before it
   readDead?: boolean;
@@ -34,7 +35,7 @@ function harness(c: Chain) {
   const deps: Deps<Read, string> = {
     poll: async () => {
       if (c.dead) return new Promise(() => {});
-      const timestamp = pendingAt(Date.now());
+      const timestamp = pendingAt(Math.min(Date.now(), c.frozenAt ?? Infinity));
       await sleep(rtt);
       return { timestamp };
     },
@@ -65,7 +66,7 @@ const prepared = (extra: Partial<Prepared<Read, string>> = {}): Prepared<Read, s
 });
 
 /** Ticks the mocked clock 10 ms at a time until `promise` settles, at most `ms`. */
-async function drive(t: TestContext, promise: Promise<Sent[]>, ms = 25_000): Promise<Sent[]> {
+async function drive(t: TestContext, promise: Promise<Outcome>, ms = 25_000): Promise<Outcome> {
   let done = false;
   const result = promise.then((r) => ((done = true), r));
   for (let i = 0; i < ms / 10 && !done; i++) {
@@ -83,12 +84,12 @@ const inBlock = (at: number, timestamp: number) => at > (timestamp - 2) * 1000 &
 test("votes in the two last blocks, each shortly before it seals, from what it sees of the chain", async (t) => {
   clock(t);
   const { deps, sends, decided } = harness({ skew: 60 });
-  const sent = await drive(t, runFinal(flip, deps, prepared()));
+  const { sent, errors } = await drive(t, runFinal(flip, deps, prepared()));
   assert.deepEqual(
     decided.map((d) => d.slot),
     [flip - 3, flip - 1],
   );
-  assert.equal(sent.length, 2);
+  assert.deepEqual([sent.length, errors], [2, 0]);
   assert.ok(inBlock(sends[0]!.at - 60, flip - 3), `first sent at ${sends[0]!.at - (flip - 3) * 1000}`);
   assert.ok(inBlock(sends[1]!.at - 60, flip - 1), `second sent at ${sends[1]!.at - (flip - 1) * 1000}`);
   assert.ok(sends[1]!.at > (flip - 1) * 1000 - 1200, "the last vote goes out within the last second");
@@ -133,25 +134,25 @@ test("a read that hangs decides on the last read in time, and once a vote is out
 test("a signature that fails sends the rehearsed vote once", async (t) => {
   clock(t);
   const { deps, sends } = harness({ signFails: true });
-  const sent = await drive(t, runFinal(flip, deps, prepared({ fallback: { vote, signed: "rehearsed" } })));
+  const { sent, errors } = await drive(t, runFinal(flip, deps, prepared({ fallback: { vote, signed: "rehearsed" } })));
   assert.deepEqual(
     sends.map((s) => s.signed),
     ["rehearsed"],
   );
-  assert.equal(sent.length, 1);
+  assert.deepEqual([sent.length, errors], [1, 1], "the second block has nothing left to send");
 });
 
 test("a signature skipped sends nothing, not even the rehearsed vote", async (t) => {
   clock(t);
   const { deps, sends, decided } = harness({ signSkips: true });
-  await drive(t, runFinal(flip, deps, prepared({ fallback: { vote, signed: "rehearsed" } })));
-  assert.deepEqual([decided.length, sends.length], [2, 0]);
+  const { errors } = await drive(t, runFinal(flip, deps, prepared({ fallback: { vote, signed: "rehearsed" } })));
+  assert.deepEqual([decided.length, sends.length, errors], [2, 0, 0]);
 });
 
 test("a signature that fails with nothing rehearsed sends nothing", async (t) => {
   clock(t);
   const none = harness({ signFails: true });
-  assert.deepEqual(await drive(t, runFinal(flip, none.deps, prepared())), []);
+  assert.deepEqual(await drive(t, runFinal(flip, none.deps, prepared())), { sent: [], errors: 2 });
 });
 
 test("a vote that spilled into the block is not repeated", async (t) => {
@@ -159,6 +160,26 @@ test("a vote that spilled into the block is not repeated", async (t) => {
   const { deps, sends } = harness({ lastVoted: (now) => (now > (flip - 3) * 1000 ? BigInt(flip - 1) : 0n) });
   await drive(t, runFinal(flip, deps, prepared()));
   assert.equal(sends.length, 1);
+});
+
+test("a node whose view froze leaves the clock to tell a sealed block", async (t) => {
+  clock(t, (flip - 3) * 1000 + 200);
+  const { deps, decided, sends } = harness({ frozenAt: (flip - 8) * 1000 });
+  await drive(t, runFinal(flip, deps, prepared(), [flip - 9]), 5_000);
+  assert.deepEqual(
+    decided.map((d) => d.slot),
+    [flip - 1],
+    "the penultimate block is over by the clock, whatever the frozen node says",
+  );
+  assert.equal(sends.length, 1);
+  assert.ok(sends[0]!.at < (flip - 1) * 1000, "the last vote still goes out in time");
+});
+
+test("with no poll answering, nothing is sent once the last block could have sealed", async (t) => {
+  clock(t, (flip - 1) * 1000 + 300);
+  const { deps, decided, sends } = harness({ dead: true });
+  await drive(t, runFinal(flip, deps, prepared(), [flip - 3]), 5_000);
+  assert.deepEqual([decided.length, sends.length], [0, 0]);
 });
 
 test("a stalled chain is voted on by the clock", async (t) => {

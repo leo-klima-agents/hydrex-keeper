@@ -42,7 +42,7 @@ function fakeChain(b: Behaviour = {}) {
     ),
     estimateGas: async ({ blockTag }: { blockTag: string }) => (assert.equal(blockTag, "pending"), 100_000n),
     getFeeHistory: async ({ blockTag }: { blockTag: string }) => {
-      assert.equal(blockTag, "pending");
+      if (blockTag === "latest") return { baseFeePerGas: [440n, 470n], gasUsedRatio: [0.9], oldestBlock: 1n };
       if (b.noFeeHistory) throw new Error("pending not supported");
       return {
         baseFeePerGas: [b.baseFee ?? 450n],
@@ -51,7 +51,6 @@ function fakeChain(b: Behaviour = {}) {
         reward: [[900n]],
       };
     },
-    getBlock: async () => ({ baseFeePerGas: 470n }),
     estimateMaxPriorityFeePerGas: async () => 100n,
     getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
@@ -111,7 +110,7 @@ test("a pending block at least half full raises the tip to its 90th percentile",
   assert.deepEqual([tx4.maxFeePerGas, tx4.maxPriorityFeePerGas, tx4.nonce], [120n, 100n, 1]);
 });
 
-test("a node without the pending block's fees falls back to the latest block's base fee", async () => {
+test("a node without the pending block's fees takes the base fee the latest block sets, without a tip bump", async () => {
   const { chain, sent } = fakeChain({ noFeeHistory: true });
   await castVote(chain, signer, vote, false, far);
   assert.equal(parseTransaction(sent[0]!).maxFeePerGas, 2n * 470n + 100n);

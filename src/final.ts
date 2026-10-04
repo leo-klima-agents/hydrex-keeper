@@ -21,6 +21,8 @@ export type Prepared<R, S> = { snapshot?: R; fallback?: { vote: Vote; signed: S 
 
 export type Sent = { vote: Vote; hash: Hex };
 
+export type Outcome = { sent: Sent[]; errors: number };
+
 // The global timer, which node's mock timers replace, unlike an import of timers/promises.
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -42,9 +44,10 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
   deps: Deps<R, S>,
   { snapshot, fallback, readMs, signMs }: Prepared<R, S>,
   seeds: number[] = [],
-): Promise<Sent[]> {
+): Promise<Outcome> {
   const observed: Observed = { seeds, seen: [], rtts: [] };
   let latest: Pending | undefined;
+  let polled = 0;
   let stop = false;
   const poller = (async () => {
     while (!stop) {
@@ -53,6 +56,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       try {
         const block = await within(request, started + POLL_TIMEOUT_MS);
         const rtt = Date.now() - started;
+        polled = Date.now();
         observed.rtts.push(rtt);
         if (block.timestamp > (latest?.timestamp ?? 0)) {
           latest = block;
@@ -71,9 +75,15 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
     }
   })();
   const current = () => timing(observed);
-  const due = (i: 0 | 1, t: Timing) => decideAt(slots(flip, t)[i], t, readMs + signMs) - Date.now();
-  const futile = (t: Timing) => (latest?.timestamp ?? 0) >= flip || Date.now() >= sealAt(flip, t);
+  const pipeline = () => ((readMs + signMs) * 5) / 4;
+  const due = (i: 0 | 1, t: Timing) => decideAt(slots(flip, t)[i], t, pipeline()) - Date.now();
+  // With the poll alive, a stalled chain still takes a vote; without, the last block can seal no later than flip - 1.
+  const futile = (t: Timing) =>
+    (latest?.timestamp ?? 0) >= flip ||
+    (Date.now() - polled > 2 * t.spacing * 1000 && Date.now() >= sealAt(flip - 1, t));
   const sent: Sent[] = [];
+  let errors = 0;
+  const fail = (message: string, fields: Record<string, unknown>) => (errors++, log.error(message, fields));
 
   for (const i of [0, 1] as const) {
     let t = current();
@@ -83,7 +93,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
     }
     const slot = slots(flip, t)[i];
     const pending = latest?.timestamp;
-    const sealed = latest ? latest.timestamp > slot : Date.now() >= sealAt(slot, t);
+    const sealed = (latest?.timestamp ?? 0) > slot || Date.now() >= sealAt(slot, t);
     if (i === 0 && (sealed || due(1, t) <= 0)) {
       log.warning("penultimate block skipped", { slot, pending, sealed });
       continue;
@@ -107,7 +117,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       log.warning("read failed; deciding on the last one", { slot, error: errorMessage(error) });
     }
     if (!read) {
-      log.error("nothing to decide on", { slot });
+      fail("nothing to decide on", { slot });
       continue;
     }
     if (read.epoch.lastVoted >= BigInt(slot)) {
@@ -118,7 +128,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
     try {
       vote = deps.decide(read, slot);
     } catch (error) {
-      log.error("decision failed", { slot, error: errorMessage(error) });
+      fail("decision failed", { slot, error: errorMessage(error) });
       continue;
     }
     if (!vote) continue;
@@ -129,7 +139,7 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       signMs = Math.max(signMs, Date.now() - started);
     } catch (error) {
       if (!fallback || sent.length) {
-        log.error("signing failed; nothing to send", { slot, error: errorMessage(error) });
+        fail("signing failed; nothing to send", { slot, error: errorMessage(error) });
         continue;
       }
       log.warning("signing failed; sending the rehearsed vote", { slot, error: errorMessage(error) });
@@ -146,10 +156,10 @@ export async function runFinal<R extends { epoch: { lastVoted: bigint } }, S>(
       if (hash) sent.push({ vote, hash });
       if (signed === fallback?.signed) fallback = undefined;
     } catch (error) {
-      log.error("send failed", { slot, error: errorMessage(error) });
+      fail("send failed", { slot, error: errorMessage(error) });
     }
   }
   stop = true;
   await poller;
-  return sent;
+  return { sent, errors };
 }

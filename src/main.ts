@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
 import { connect, hostOf, now, readMany, voterCall, WEEK, type Chain, type ReadOptions } from "./chain.ts";
 import { runFinal, sleep, within, type Prepared } from "./final.ts";
-import { kmsAccount, NoMetadataServer } from "./kms.ts";
+import { kmsAccount } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed, type Prices } from "./prices.ts";
 import {
@@ -27,6 +27,7 @@ import {
   readNonces,
   rehearse,
   sendVote,
+  signVote,
   voteData,
   VoteSent,
   type Fees,
@@ -42,7 +43,7 @@ const RETRY_DELAY_MS = 5_000;
 const LAST_MARGIN_MS = 2_000;
 const PREPARE_S = 60; // prices, a rehearsal and a signed fallback vote this long before the flip; under MIN_LEAD in sh/lib.sh
 const ARM_S = 20; // the pending block is watched from this long before the flip
-const PRICES_MS = 20_000;
+const PRICES_MS = 30_000; // over REFRESH_BUDGET_MS in prices.ts, so the rehearsal fetches afresh
 const MIN_READ_MS = 150;
 const MIN_SIGN_MS = 200;
 
@@ -57,7 +58,9 @@ type Run = {
 
 type Rewards = { epoch: Epoch; rewards: PoolRewards[] };
 
-type Read = Rewards & { nonces: Nonces; fees: Fees; balance: bigint; gas: bigint | undefined };
+type Read = Rewards & { nonces: Nonces; fees: Fees; balance: bigint };
+
+type Signature = Signed & { before: bigint }; // the conduit's lastVoted when signed
 
 async function readRewards(run: Run, at: ReadOptions): Promise<Rewards> {
   const { chain, whitelist } = run;
@@ -73,41 +76,31 @@ async function readRewards(run: Run, at: ReadOptions): Promise<Rewards> {
   }
 }
 
-/** A vote over every pool with a gauge: no vote costs more gas. */
-const sized = ({ layout }: Run): Vote | undefined =>
-  layout && { pools: layout.pools, weights: layout.pools.map(() => 1n) };
-
-/** One round trip: the pending state, the nonces, the fees, the balance and the gas of the largest vote. */
+/** One round trip: the pending state, the nonces, the fees and the balance; who voted in the block being built is logged. */
 async function readAll(run: Run): Promise<Read> {
   const { chain } = run;
-  const { client, keeper, module } = chain;
+  const { client, keeper } = chain;
   void readVoted(chain).then(
     (voted) => voted.length && log.info("votes in the block being built", { voted }),
     (error: unknown) => log.warning("pending votes unread", { error: errorMessage(error) }),
   );
-  const largest = sized(run);
-  const [rewards, nonces, fees, balance, gas] = await Promise.all([
+  const [rewards, nonces, fees, balance] = await Promise.all([
     readRewards(run, { blockTag: "pending" }),
     readNonces(chain),
     readFees(client),
     client.getBalance({ address: keeper }),
-    largest &&
-      client.estimateGas({ account: keeper, to: module, data: voteData(largest), blockTag: "pending" }).then(
-        (gas) => (gas * 12n) / 10n,
-        () => undefined,
-      ),
   ]);
-  return { ...rewards, nonces, fees, balance, gas };
+  return { ...rewards, nonces, fees, balance };
 }
 
+const tokensOf = ({ rewards }: Rewards) => rewards.flatMap((p) => p.rewards.map((r) => r.token));
+
 /** The candidates and the vote to cast, if any. */
-function evaluate(
-  run: Run,
-  { epoch, rewards }: Rewards,
-  priced: Prices,
-): { vote: Vote | null; candidates: Candidate[] } {
+function evaluate(run: Run, read: Rewards, priced: Prices): { vote: Vote | null; candidates: Candidate[] } {
+  const { epoch, rewards } = read;
   assertFresh(epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
+  if (priced.size === 0 && tokensOf(read).length > 0) throw new Error("no reward token could be priced");
   const { whitelist } = run;
   const candidates: Candidate[] = [];
   const nameOf = (pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
@@ -141,25 +134,23 @@ function evaluate(
   return { vote, candidates };
 }
 
-const tokensOf = ({ rewards }: Rewards) => rewards.flatMap((p) => p.rewards.map((r) => r.token));
-
 async function pass(run: Run, until: number): Promise<void> {
   const read = await readRewards(run, { blockTag: "pending" });
-  const tokens = tokensOf(read);
-  const priced = await run.prices(tokens, until);
-  if (priced.size === 0 && tokens.length > 0) throw new Error("no reward token could be priced");
+  const priced = await run.prices(tokensOf(read), until);
   const { vote } = evaluate(run, read, priced);
   if (vote) await castVote(run.chain, run.account, vote, run.dryRun, until);
 }
 
-type Rehearsed = Prepared<Read, Signed> & { priced: Prices; gasMax?: bigint; l1Fee?: bigint };
+type Rehearsed = Prepared<Read, Signature> & { priced: Prices; gasMax?: bigint; l1Fee?: bigint };
 
-/** A first read, its rewards' prices, the gas of the largest vote, and a signed vote to fall back on; each best effort. */
+/**
+ * A first read, its rewards' prices, the gas of a vote over every live candidate, which no vote exceeds, and a signed
+ * vote to fall back on, or a signature for its timing alone; each best effort.
+ */
 async function prepare(run: Run, flip: bigint): Promise<Rehearsed> {
-  const { chain, account } = run;
+  const { chain, account, dryRun } = run;
   const until = (Number(flip) - ARM_S) * 1000;
   const out: Rehearsed = { readMs: MIN_READ_MS, signMs: MIN_SIGN_MS, priced: new Map() };
-  let started = Date.now();
   try {
     run.layout ??= await within(
       readLayout(
@@ -168,31 +159,32 @@ async function prepare(run: Run, flip: bigint): Promise<Rehearsed> {
       ),
       until,
     );
+    let started = Date.now();
     out.snapshot = await within(readAll(run), until);
     out.readMs = Math.max(MIN_READ_MS, Date.now() - started);
     out.priced = await run.prices(tokensOf(out.snapshot), Math.min(until, Date.now() + PRICES_MS));
-    const { vote } = evaluate(run, out.snapshot, out.priced);
-    const largest = sized(run)!;
+    const { vote, candidates } = evaluate(run, out.snapshot, out.priced);
+    const largest = { pools: candidates.map((c) => c.pool), weights: candidates.map(() => 1n) };
     const { gas, balance, l1Fee } = await within(rehearse(chain, vote ?? largest, largest), until);
     out.gasMax = gas;
     out.l1Fee = l1Fee;
-    const { fees, nonces } = out.snapshot;
-    const cost = gas * (fees.baseFee * 2n + fees.tip) + l1Fee;
+    const { fees, nonces, epoch } = out.snapshot;
+    const tx = prepareVote(chain, vote ?? largest, gas, nonces, fees, 4n);
+    const cost = costOf(tx, l1Fee);
     if (balance < 2n * cost) log.error("fund the keeper", { keeper: chain.keeper, balance, cost });
-    log.info("rehearsed", { gasMax: gas, readMs: out.readMs, fallback: Boolean(vote && account) });
-    if (!vote || !account) return out;
-    const tx = prepareVote(chain, vote, gas, nonces, fees, 4n);
+    log.info("rehearsed", { gasMax: gas, readMs: out.readMs, fallback: Boolean(vote) });
     started = Date.now();
-    const signed = await within(account.signTransaction(tx), until);
+    const signed = await within(signVote(account, tx, dryRun), until);
+    if (!signed) return out;
     out.signMs = Math.max(MIN_SIGN_MS, Date.now() - started);
-    out.fallback = { vote, signed: { tx, signed } };
+    if (vote) out.fallback = { vote, signed: { tx, signed, before: epoch.lastVoted } };
   } catch (error) {
     log.error("rehearsal cut short", { error: errorMessage(error) });
   }
   return out;
 }
 
-/** Votes in the last two blocks before the flip; true if the conduit has voted this epoch afterwards. */
+/** Votes in the last two blocks before the flip; true if the conduit then has a vote this epoch and nothing failed. */
 async function finalPhase(run: Run, flip: bigint): Promise<boolean> {
   const { chain, account, dryRun } = run;
   const { client, keeper, module, conduit } = chain;
@@ -203,9 +195,8 @@ async function finalPhase(run: Run, flip: bigint): Promise<boolean> {
     (block) => [Number(block.timestamp)],
     () => [],
   );
-  let signedOver = 0n; // the conduit's lastVoted at the last signature
-  let last: { nonce: number; lastVoted: bigint } | undefined; // the vote sent, and lastVoted before it
-  const sent = await runFinal<Read, Signed>(
+  let last: { nonce: number; before: bigint } | undefined; // the vote sent
+  const { sent, errors } = await runFinal<Read, Signature>(
     Number(flip),
     {
       poll: async () => {
@@ -216,16 +207,16 @@ async function finalPhase(run: Run, flip: bigint): Promise<boolean> {
       read: () => readAll(run),
       decide: (read) => evaluate(run, read, prepared.priced).vote,
       sign: async (vote, read) => {
-        if (!account) return (log.warning("signing skipped: no KMS key configured"), undefined);
         const estimate = () =>
           client.estimateGas({ account: keeper, to: module, data: voteData(vote), blockTag: "pending" });
-        const gas = read.gas ?? prepared.gasMax ?? ((await estimate()) * 12n) / 10n;
-        const mined = last !== undefined && read.epoch.lastVoted > last.lastVoted ? last.nonce + 1 : 0;
+        const gas = prepared.gasMax ?? ((await estimate()) * 12n) / 10n;
+        // The vote sent is mined once lastVoted moved, whatever a lagging node says.
+        const mined = last && read.epoch.lastVoted > last.before ? last.nonce + 1 : 0;
         const nonces = { latest: Math.max(read.nonces.latest, mined), pending: Math.max(read.nonces.pending, mined) };
         const tx = prepareVote(chain, vote, gas, nonces, read.fees);
         const cost = costOf(tx, prepared.l1Fee ?? 0n);
         if (read.balance < cost)
-          throw new Error(`fund the keeper: ${keeper} has ${read.balance} wei, the vote costs ${cost}`);
+          return (log.error("fund the keeper", { keeper, balance: read.balance, cost }), undefined);
         const { nonce, maxFeePerGas, maxPriorityFeePerGas } = tx;
         log.info("vote prepared", {
           pools: vote.pools,
@@ -235,17 +226,12 @@ async function finalPhase(run: Run, flip: bigint): Promise<boolean> {
           maxFeePerGas,
           maxPriorityFeePerGas,
         });
-        signedOver = read.epoch.lastVoted;
-        try {
-          return { tx, signed: await account.signTransaction(tx) };
-        } catch (error) {
-          if (!dryRun || !(error instanceof NoMetadataServer)) throw error;
-          return (log.warning("signing skipped: no metadata server", { reason: error.message }), undefined);
-        }
+        const signed = await signVote(account, tx, dryRun);
+        return signed && { tx, signed, before: read.epoch.lastVoted };
       },
       send: async (signed, until) => {
         if (dryRun) return (log.info("dry run: signed, not sent"), undefined);
-        last = { nonce: signed.tx.nonce, lastVoted: signedOver };
+        last = { nonce: signed.tx.nonce, before: signed.before };
         const hash = await sendVote(chain, signed, until);
         log.info("vote sent", { hash });
         return hash;
@@ -263,11 +249,11 @@ async function finalPhase(run: Run, flip: bigint): Promise<boolean> {
   try {
     const [lastVoted] = await readMany<bigint>(client, [voterCall(chain, "lastVoted", [conduit])]);
     voted = lastVoted! >= flip - WEEK && lastVoted! < flip;
-    log[voted ? "info" : "error"](voted ? "voted this epoch" : "no vote this epoch", { lastVoted, flip });
+    log[voted ? "info" : "error"](voted ? "voted this epoch" : "no vote this epoch", { lastVoted, flip, errors });
   } catch (error) {
     log.warning("lastVoted unread; going by the confirmations", { voted, error: errorMessage(error) });
   }
-  return dryRun || voted;
+  return dryRun || (voted && errors === 0);
 }
 
 async function main(): Promise<number> {
