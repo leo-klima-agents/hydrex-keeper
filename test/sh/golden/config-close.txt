@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: VOTE_OFFSETS entry 25 is within 120 s of the flip, kept for the last blocks

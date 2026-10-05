@@ -1,10 +1,10 @@
-import { setTimeout as sleep } from "node:timers/promises";
 import { keccak256, serializeTransaction, TransactionReceiptNotFoundError, type Hex } from "viem";
-import { Blocks, watch } from "./blocks.ts";
+import { Blocks, sleep, watch } from "./blocks.ts";
+import { readMany, voterCall, WEEK } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Prices } from "./prices.ts";
 import { decide, nameOf, readState, type Run, type State } from "./pass.ts";
-import type { Layout } from "./read.ts";
+import { readVoted, type Layout } from "./read.ts";
 import type { Vote } from "./select.ts";
 import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
@@ -141,7 +141,8 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     if (!vote) return base;
     if (Number(state.epoch.lastVoted) * 1000 >= time) return { ...base, note: "already voted in this block" };
     if (best?.prepared && best.time === time && same(best.vote, vote)) return { ...best, readAt };
-    return { ...base, prepared: await prepareVote(chain, account, vote, dryRun, BigInt(Math.floor(time / 1000))) };
+    const target = { time: BigInt(Math.floor(time / 1000)), lastVoted: state.epoch.lastVoted };
+    return { ...base, prepared: await prepareVote(chain, account, vote, dryRun, target) };
   };
 
   let first: Plan | undefined;
@@ -168,14 +169,21 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   const sending: Promise<void>[] = [];
   const send = (best: Plan | undefined, time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
+    void readVoted(chain).then(
+      (voted) => {
+        if (voted.length) log.info("votes in the block being built", { ...at, voted });
+      },
+      (error: unknown) => log.warning("votes in the block being built unread", { error: errorMessage(error) }),
+    );
     if (!best) {
       failures++;
       log.error("nothing planned in time", at);
       return;
     }
     const fields = { ...at, ageMs: Date.now() - best.readAt, ...best.summary };
-    const { tx, signed } = best.prepared ?? {};
-    if (!tx) return log.info(best.note, fields);
+    const { prepared } = best;
+    if (!prepared) return log.info(best.note, fields);
+    const { tx, signed } = prepared;
     if (!signed) return log.info("not signed, not sent", fields);
     if (dryRun) return log.info("dry run: signed, not sent", fields);
     const id = keccak256(serializeTransaction(tx));
@@ -183,7 +191,7 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     sent.set(id, { hash: keccak256(signed), vote: best.vote! });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
-      broadcastVote(chain, { tx, signed }, flipMs).then(
+      broadcastVote(chain, { ...prepared, signed }, flipMs).then(
         (hash) => log.info("vote sent", { hash }),
         (error: unknown) => {
           failures++;
@@ -200,13 +208,15 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     log.error("no block left to vote in before the flip");
   }
   await Promise.all(sending);
-  if (sent.size === 0) return failures;
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
   return failures + (await outcome(run, flip, [...sent.values()]));
 }
 
-/** Logs where each sent vote landed and checks the last one before the flip. Returns the number of failures. */
-async function outcome({ chain }: Run, flip: bigint, sent: { hash: Hex; vote: Vote }[]): Promise<number> {
+/**
+ * Logs where each sent vote landed, checks the last one before the flip, and that the Voter shows a vote this epoch.
+ * Returns the number of failures.
+ */
+async function outcome({ chain, dryRun }: Run, flip: bigint, sent: { hash: Hex; vote: Vote }[]): Promise<number> {
   let failures = 0;
   let last: { hash: Hex; vote: Vote; block: bigint } | undefined;
   for (const { hash, vote } of sent) {
@@ -236,6 +246,17 @@ async function outcome({ chain }: Run, flip: bigint, sent: { hash: Hex; vote: Vo
       failures++;
       log.error("vote not confirmed", { error: errorMessage(error) });
     });
+  }
+  try {
+    const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [chain.conduit])]);
+    if (lastVoted! >= flip - WEEK && lastVoted! < flip) log.info("voted this epoch", { lastVoted });
+    else if (dryRun) log.warning("no vote this epoch", { lastVoted });
+    else {
+      failures++;
+      log.error("no vote this epoch", { lastVoted });
+    }
+  } catch (error) {
+    log.warning("lastVoted unread", { error: errorMessage(error) });
   }
   return failures;
 }

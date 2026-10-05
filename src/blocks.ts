@@ -1,4 +1,3 @@
-import { setTimeout as sleep } from "node:timers/promises";
 import type { Client } from "./chain.ts";
 
 const HISTORY = 30; // blocks the timing is learned from
@@ -15,6 +14,9 @@ export type Timing = { gap: number; maxGap: number; seal: number; lead: number }
 type Seen = { time: number; txs: number; changes: number[] };
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
+
+// On the global setTimeout, which node:test's mock timers replace, unlike that of node:timers/promises.
+export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Block timing, learned from polls of the block being built; times are in ms. A block is built in sub-blocks that
@@ -81,7 +83,7 @@ export async function watch(client: Client, blocks: Blocks, stop: () => boolean)
     try {
       const block = await Promise.race([
         client.request({ method: "eth_getBlockByNumber", params: ["pending", false] }),
-        sleep(POLL_TIMEOUT_MS, null),
+        sleep(POLL_TIMEOUT_MS).then(() => null),
       ]);
       if (block?.number) {
         const header = {

@@ -5,7 +5,6 @@ import {
   type Address,
   type Hex,
   type LocalAccount,
-  type TransactionSerializableEIP1559,
 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi } from "./abi.ts";
@@ -22,60 +21,76 @@ const MAX_TIP = parseGwei("0.1");
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
-type Tx = Required<
-  Pick<
-    TransactionSerializableEIP1559,
-    "chainId" | "to" | "data" | "gas" | "maxFeePerGas" | "maxPriorityFeePerGas" | "nonce"
-  >
->;
+type Tx = {
+  chainId: number;
+  to: Address;
+  data: Hex;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  nonce: number;
+};
 
-export type Prepared = { tx: Tx; signed?: Hex };
+/** The block a vote is for: its timestamp (s), and the conduit's `lastVoted` as read on it. */
+export type Target = { time: bigint; lastVoted: bigint };
 
-const lastSentBy = new WeakMap<Client, Tx>();
+export type Prepared = { tx: Tx; signed?: Hex | undefined; lastVoted?: bigint | undefined };
+
+const lastSentBy = new WeakMap<Client, Tx & { lastVoted?: bigint | undefined }>();
 
 /**
- * Simulates module.vote just after `time` (s), the timestamp of the block it is for, by default the latest block, and
- * signs it unless there is no key. If either of the last two blocks was congested, the tip rises to the 99th
- * percentile of their tips, up to MAX_TIP.
+ * Simulates module.vote just after the block it is for, by default the latest, and signs it unless there is no key.
+ * The max fee is twice the base fee plus the tip; if either of the last two blocks was congested, the tip rises to the
+ * 99th percentile of their tips, up to MAX_TIP.
  */
 export async function prepareVote(
   chain: Chain,
   account: LocalAccount | undefined,
   vote: Vote,
   dryRun: boolean,
-  time?: bigint,
+  target?: Target,
 ): Promise<Prepared> {
   const { client, module, keeper } = chain;
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const call = { account: keeper, to: module, abi: moduleAbi, functionName: "vote", args } as const;
-  time ??= (await client.getBlock()).timestamp;
+  const time = target?.time ?? (await client.getBlock()).timestamp;
   // The simulated block builds on the latest one, which may already be the one at `time`.
   const blockOverrides = { time: time + 1n };
-  const [[block], fees, history, nonce, balance, l1Fee] = await allOrFirstFailure([
+  const [[block], suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
     client.simulateBlocks({ blocks: [{ blockOverrides, calls: [call] }] }),
-    client.estimateFeesPerGas(),
+    client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
+    client.getTransactionCount({ address: keeper, blockTag: "latest" }),
     client.getTransactionCount({ address: keeper, blockTag: "pending" }),
     client.getBalance({ address: keeper, blockTag: "pending" }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]);
   const simulated = block!.calls[0]!;
   if (simulated.status !== "success") throw simulated.error ?? new Error("the vote would revert");
+  const baseFee = history.baseFeePerGas.at(-1); // the next block's
+  if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  const tip = congested ? max(fees.maxPriorityFeePerGas, min(top, MAX_TIP)) : fees.maxPriorityFeePerGas;
-  // A vote this process sent that is not yet in a block is replaced at a quarter more.
+  const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
+  // The confirmed nonce, so that a pending vote is replaced, not queued behind: at a quarter more than the one this
+  // process sent, or at twice the fees over one of unknown fees. Once the Voter shows a later vote than the one the sent
+  // vote was decided on, that vote is in a block, whatever the node says.
   const lastSent = lastSentBy.get(client);
+  const known = lastSent?.lastVoted;
+  const mined = lastSent && known !== undefined && target && target.lastVoted > known ? lastSent.nonce + 1 : 0;
+  const nonce = Math.max(latest, mined);
+  const queued = Math.max(pending, mined) > nonce;
   const own = lastSent?.nonce === nonce ? lastSent : undefined;
-  const bump = (fee: bigint, sent?: bigint) => (sent === undefined ? fee : max(fee, (sent * 5n) / 4n));
+  const bump = (fee: bigint, sent?: bigint) =>
+    sent !== undefined ? max(fee, (sent * 5n) / 4n) : queued ? fee * 2n : fee;
   const tx = {
     chainId: base.id,
     to: module,
     data,
     // Refunds and the 63/64 rule make the gas needed exceed the gas used, by up to about a third.
     gas: (simulated.gasUsed * 3n) / 2n,
-    maxFeePerGas: bump(fees.maxFeePerGas - fees.maxPriorityFeePerGas + tip, own?.maxFeePerGas),
+    maxFeePerGas: bump(2n * baseFee + tip, own?.maxFeePerGas),
     maxPriorityFeePerGas: bump(tip, own?.maxPriorityFeePerGas),
     nonce,
   } satisfies Tx;
@@ -83,25 +98,30 @@ export async function prepareVote(
   if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce, tip, congested });
 
+  const lastVoted = target?.lastVoted;
   if (!account) {
     log.warning("signing skipped: no KMS key configured");
-    return { tx };
+    return { tx, lastVoted };
   }
   try {
-    return { tx, signed: await account.signTransaction(tx) };
+    return { tx, signed: await account.signTransaction(tx), lastVoted };
   } catch (error) {
     if (dryRun && error instanceof NoMetadataServer) {
       log.warning("signing skipped: no metadata server", { reason: error.message });
-      return { tx };
+      return { tx, lastVoted };
     }
     throw error;
   }
 }
 
 /** Sends a signed vote to every RPC; resolves with its hash once one accepts it before `until` (ms). */
-export async function broadcastVote(chain: Chain, { tx, signed }: Required<Prepared>, until: number): Promise<Hex> {
+export async function broadcastVote(
+  chain: Chain,
+  { tx, signed, lastVoted }: Prepared & { signed: Hex },
+  until: number,
+): Promise<Hex> {
   if (Date.now() >= until) throw new Error("out of time before sending");
-  lastSentBy.set(chain.client, tx); // before sending: a send that fails may still have reached a node
+  lastSentBy.set(chain.client, { ...tx, lastVoted }); // before sending: a send that fails may still have reached a node
   return chain.broadcast(signed, until);
 }
 
@@ -113,13 +133,14 @@ export async function castVote(
   dryRun: boolean,
   until: number,
 ): Promise<void> {
-  const { tx, signed } = await prepareVote(chain, account, vote, dryRun);
+  const prepared = await prepareVote(chain, account, vote, dryRun);
+  const { signed } = prepared;
   if (!signed) return;
   if (dryRun) {
     log.info("dry run: signed, not sent");
     return;
   }
-  const hash = await broadcastVote(chain, { tx, signed }, until);
+  const hash = await broadcastVote(chain, { ...prepared, signed }, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;

@@ -12,13 +12,18 @@ export function missed(flip: bigint, offsets: bigint[], at: bigint): boolean {
   return offsets.some((o) => flip - o <= at && flip - o > at - HORIZON);
 }
 
-type Schedule = { times: bigint[]; note?: string };
+type Schedule = { times: bigint[]; last: boolean; note?: string };
 
-/** The passes this execution runs: the ones due ahead, or a missed one right now, or none. */
+/**
+ * The passes this execution runs: the ones due ahead, or a missed one right now, or none; and whether it votes in the
+ * last blocks, which it does when the flip is within the horizon.
+ */
 export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediately: boolean): Schedule {
-  if (immediately) return { times: [at] };
+  const last = !immediately && flip > at && flip - at <= HORIZON;
+  if (immediately) return { times: [at], last };
   const times = passTimes(flip, offsets, at);
-  if (times.length) return { times };
-  if (flip > at && missed(flip, offsets, at)) return { times: [at], note: "running the missed pass now" };
-  return { times: [], note: `no pass due within ${HORIZON} s: flip at ${flip}, offsets ${offsets.join(",")}` };
+  if (times.length) return { times, last };
+  if (flip > at && missed(flip, offsets, at)) return { times: [at], last, note: "running the missed pass now" };
+  if (last) return { times, last };
+  return { times, last, note: `no pass due within ${HORIZON} s: flip at ${flip}, offsets ${offsets.join(",")}` };
 }

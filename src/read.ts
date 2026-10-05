@@ -1,5 +1,5 @@
 import { erc20Abi, zeroAddress, type Address } from "viem";
-import { bribeAbi, veAbi } from "./abi.ts";
+import { bribeAbi, veAbi, votedEvent } from "./abi.ts";
 import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
@@ -144,4 +144,14 @@ export async function readPass(
     };
   });
   return { epoch, rewards };
+}
+
+/** Who voted in the block being built, and how much. */
+export async function readVoted({ client, voter }: Chain): Promise<{ voter: Address; weight: bigint }[]> {
+  const logs = await client.getLogs({ address: voter, event: votedEvent, fromBlock: "pending", toBlock: "pending" });
+  const byVoter = new Map<Address, bigint>();
+  for (const { args } of logs) {
+    if (args.voter) byVoter.set(args.voter, (byVoter.get(args.voter) ?? 0n) + (args.weight ?? 0n));
+  }
+  return [...byVoter].map(([voter, weight]) => ({ voter, weight }));
 }

@@ -48,21 +48,19 @@ async function main(): Promise<number> {
   }
   assertFresh(epoch);
   const { flip } = epoch;
-  const { times, note } = schedule(flip, offsets, now(), immediately);
+  const { times: due, last, note } = schedule(flip, offsets, now(), immediately);
   if (note) log.warning(note, { flip });
-  if (times.length === 0) return 0;
-  const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
+  const deadline = Number(flip) * 1000 - (last ? WARMUP_MS : LAST_MARGIN_MS);
+  const times = due.filter((time) => Number(time) * 1000 < deadline);
+  if (times.length < due.length)
+    log.warning("passes in the last blocks' warm-up skipped", { at: due.slice(times.length) });
+  if (times.length === 0 && !last) return 0;
   const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
 
-  const start = (time: bigint) => Number(time) * 1000 - (time === flip ? WARMUP_MS : 0);
   let failed = 0;
   for (const [i, time] of times.entries()) {
-    if (time === flip) {
-      failed += await lastBlocks(run, flip);
-      continue;
-    }
-    const until = i + 1 < times.length ? start(times[i + 1]!) : deadline;
-    await sleep(Math.max(0, Math.min(start(time), until) - Date.now()));
+    await sleep(Math.max(0, Number(time) * 1000 - Date.now()));
+    const until = i + 1 < times.length ? Number(times[i + 1]!) * 1000 : deadline;
     if (Date.now() >= until) {
       log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
       continue;
@@ -86,6 +84,7 @@ async function main(): Promise<number> {
       }
     }
   }
+  if (last) failed += await lastBlocks(run, flip);
   return failed ? 1 : 0;
 }
 

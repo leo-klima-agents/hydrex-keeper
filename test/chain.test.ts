@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { keccak256, type Hex } from "viem";
 import { base } from "viem/chains";
 import { broadcaster, CHUNK, HEDGE_DELAY_MS, hedged, hostOf, readMany, type Call, type Client } from "../src/chain.ts";
@@ -127,6 +128,7 @@ test("hedged: a hung primary costs the delay once, then is asked together with t
   assert.equal(first!.result, "0x2");
   assert.ok(first!.ms >= HEDGE_DELAY_MS, `${first!.ms} ms`);
   assert.ok(second!.ms < 100 && third!.ms < 100, `${second!.ms}, ${third!.ms} ms`);
+  for (let i = 0; i < 50 && nodes[0]!.received.length < 3; i++) await sleep(10); // the hung node may see it last
   assert.equal(nodes[0]!.received.length, 3, "still asked, in case it recovers");
 });
 
