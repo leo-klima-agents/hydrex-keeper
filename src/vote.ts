@@ -1,5 +1,6 @@
 import {
   encodeFunctionData,
+  parseGwei,
   WaitForTransactionReceiptTimeoutError,
   type Address,
   type Hex,
@@ -14,13 +15,97 @@ import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 const RECEIPT_TIMEOUT_MS = 60_000;
+const CONGESTED = 0.9; // in a block this full, the builder picks by tip
+const TIP_PERCENTILE = 99;
+const MAX_TIP = parseGwei("0.1");
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
-const lastSentBy = new WeakMap<Client, { nonce: number; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>();
+type Tx = Required<
+  Pick<
+    TransactionSerializableEIP1559,
+    "chainId" | "to" | "data" | "gas" | "maxFeePerGas" | "maxPriorityFeePerGas" | "nonce"
+  >
+>;
 
-/** Simulates, signs and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
+export type Prepared = { tx: Tx; signed?: Hex };
+
+const lastSentBy = new WeakMap<Client, Tx>();
+
+/**
+ * Simulates module.vote on top of the block being built, whose timestamp is `time` (s), and signs it unless there is
+ * no key. If either of the last two blocks was congested, the tip rises to the 99th percentile of their tips, up to
+ * MAX_TIP.
+ */
+export async function prepareVote(
+  chain: Chain,
+  account: LocalAccount | undefined,
+  vote: Vote,
+  dryRun: boolean,
+  time?: bigint,
+): Promise<Prepared> {
+  const { client, module, keeper } = chain;
+  const args = [vote.pools, vote.weights] as const;
+  const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
+  const call = { account: keeper, to: module, abi: moduleAbi, functionName: "vote", args } as const;
+  time ??= (await client.getBlock({ blockTag: "pending" })).timestamp;
+  // A simulated block must come after the one it builds on, which can be the block being built.
+  const blockOverrides = { time: time + 1n };
+  const [[block], fees, history, nonce, balance, l1Fee] = await allOrFirstFailure([
+    client.simulateBlocks({ blocks: [{ blockOverrides, calls: [call] }], blockTag: "pending" }),
+    client.estimateFeesPerGas(),
+    client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
+    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
+    client.getBalance({ address: keeper, blockTag: "pending" }),
+    client.estimateL1Fee({ account: keeper, to: module, data }),
+  ]);
+  const simulated = block!.calls[0]!;
+  if (simulated.status !== "success") throw simulated.error;
+  const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
+  const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
+  const tip = congested ? max(fees.maxPriorityFeePerGas, min(top, MAX_TIP)) : fees.maxPriorityFeePerGas;
+  // A vote this process sent that is not yet in a block is replaced at a quarter more.
+  const lastSent = lastSentBy.get(client);
+  const own = lastSent?.nonce === nonce ? lastSent : undefined;
+  const bump = (fee: bigint, sent?: bigint) => (sent === undefined ? fee : max(fee, (sent * 5n) / 4n));
+  const tx = {
+    chainId: base.id,
+    to: module,
+    data,
+    // Refunds and the 63/64 rule make the gas needed exceed the gas used, by up to about a third.
+    gas: (simulated.gasUsed * 3n) / 2n,
+    maxFeePerGas: bump(fees.maxFeePerGas - fees.maxPriorityFeePerGas + tip, own?.maxFeePerGas),
+    maxPriorityFeePerGas: bump(tip, own?.maxPriorityFeePerGas),
+    nonce,
+  } satisfies Tx;
+  const cost = tx.gas * tx.maxFeePerGas + l1Fee;
+  if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
+  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce, tip, congested });
+
+  if (!account) {
+    log.warning("signing skipped: no KMS key configured");
+    return { tx };
+  }
+  try {
+    return { tx, signed: await account.signTransaction(tx) };
+  } catch (error) {
+    if (dryRun && error instanceof NoMetadataServer) {
+      log.warning("signing skipped: no metadata server", { reason: error.message });
+      return { tx };
+    }
+    throw error;
+  }
+}
+
+/** Sends a signed vote to every RPC; resolves with its hash once one accepts it before `until` (ms). */
+export async function broadcastVote(chain: Chain, { tx, signed }: Required<Prepared>, until: number): Promise<Hex> {
+  if (Date.now() >= until) throw new Error("out of time before sending");
+  lastSentBy.set(chain.client, tx); // before sending: a send that fails may still have reached a node
+  return chain.broadcast(signed, until);
+}
+
+/** Prepares and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
 export async function castVote(
   chain: Chain,
   account: LocalAccount | undefined,
@@ -28,64 +113,18 @@ export async function castVote(
   dryRun: boolean,
   until: number,
 ): Promise<void> {
-  const { client, module, keeper, conduit, broadcast } = chain;
-  const args = [vote.pools, vote.weights] as const;
-  const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
-  const [gas, fees, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateContract({ address: module, abi: moduleAbi, functionName: "vote", args, account: keeper }),
-    client.estimateGas({ account: keeper, to: module, data }),
-    client.estimateFeesPerGas(),
-    client.getTransactionCount({ address: keeper, blockTag: "latest" }),
-    client.getTransactionCount({ address: keeper, blockTag: "pending" }),
-    client.getBalance({ address: keeper }),
-    client.estimateL1Fee({ account: keeper, to: module, data }),
-  ]).then(([, ...rest]) => rest);
-  // The confirmed nonce, so that a pending vote is replaced, not queued behind: at a quarter more than the one this
-  // process sent, or at twice the estimate over one of unknown fees. If that one paid more, it is mined soon anyway.
-  const lastSent = lastSentBy.get(client);
-  const own = lastSent?.nonce === latest ? lastSent : undefined;
-  const bump = (fee: bigint, sent?: bigint) =>
-    sent !== undefined ? max(fee, (sent * 5n) / 4n) : pending > latest ? fee * 2n : fee;
-  const tx = {
-    chainId: base.id,
-    to: module,
-    data,
-    gas: (gas * 12n) / 10n,
-    maxFeePerGas: bump(fees.maxFeePerGas, own?.maxFeePerGas),
-    maxPriorityFeePerGas: bump(fees.maxPriorityFeePerGas, own?.maxPriorityFeePerGas),
-    nonce: latest,
-  } satisfies TransactionSerializableEIP1559;
-  const cost = tx.gas * tx.maxFeePerGas + l1Fee;
-  if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
-  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce: tx.nonce });
-
-  if (!account) {
-    log.warning("signing skipped: no KMS key configured");
-    return;
-  }
-  let signed: Hex;
-  try {
-    signed = await account.signTransaction(tx);
-  } catch (error) {
-    if (dryRun && error instanceof NoMetadataServer) {
-      log.warning("signing skipped: no metadata server", { reason: error.message });
-      return;
-    }
-    throw error;
-  }
+  const { tx, signed } = await prepareVote(chain, account, vote, dryRun);
+  if (!signed) return;
   if (dryRun) {
     log.info("dry run: signed, not sent");
     return;
   }
-
-  if (Date.now() >= until) throw new Error("out of time before sending");
-  lastSentBy.set(client, tx); // before sending: a send that fails may still have reached a node
-  const hash = await broadcast(signed, until);
+  const hash = await broadcastVote(chain, { tx, signed }, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
   try {
-    receipt = await client.waitForTransactionReceipt({ hash, timeout });
+    receipt = await chain.client.waitForTransactionReceipt({ hash, timeout });
   } catch (error) {
     if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
       throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
@@ -97,26 +136,30 @@ export async function castVote(
     throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
   }
   if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
+  await verifyVote(chain, vote, hash, receipt.blockNumber);
+}
+
+/** Checks that the Voter recorded `vote` as of block `blockNumber`. */
+export async function verifyVote(chain: Chain, vote: Vote, hash: Hex, blockNumber: bigint): Promise<void> {
   const calls = [
-    ...vote.pools.map((_, i) => voterCall(chain, "poolVote", [conduit, BigInt(i)])),
-    ...vote.pools.map((pool) => voterCall(chain, "votes", [conduit, pool])),
+    ...vote.pools.map((_, i) => voterCall(chain, "poolVote", [chain.conduit, BigInt(i)])),
+    ...vote.pools.map((pool) => voterCall(chain, "votes", [chain.conduit, pool])),
   ];
   let recorded: (Address | bigint)[];
   try {
-    recorded = await readMany<Address | bigint>(client, calls, { blockNumber: receipt.blockNumber });
+    recorded = await readMany<Address | bigint>(chain.client, calls, { blockNumber });
   } catch (error) {
-    throw new VoteSent(
-      `vote ${hash} mined in block ${receipt.blockNumber}, verification failed: ${errorMessage(error)}`,
-    );
+    throw new VoteSent(`vote ${hash} mined in block ${blockNumber}, verification failed: ${errorMessage(error)}`);
   }
   const pools = recorded.slice(0, vote.pools.length) as Address[];
   if (pools.some((pool, i) => pool.toLowerCase() !== vote.pools[i]!.toLowerCase())) {
     throw new VoteSent(`vote ${hash}: Voter recorded ${pools.join(",")}, expected ${vote.pools.join(",")}`);
   }
-  log.info("vote confirmed", { hash, block: receipt.blockNumber, pools, votes: recorded.slice(vote.pools.length) });
+  log.info("vote confirmed", { hash, block: blockNumber, pools, votes: recorded.slice(vote.pools.length) });
 }
 
 const max = (a: bigint, b: bigint) => (a > b ? a : b);
+const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
 type Promises<T extends readonly unknown[]> = { [K in keyof T]: Promise<T[K]> };
 

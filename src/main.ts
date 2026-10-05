@@ -1,84 +1,22 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { formatUnits, getAddress, type Address, type LocalAccount } from "viem";
-import { connect, hostOf, now, type Chain } from "./chain.ts";
+import { getAddress } from "viem";
+import { connect, hostOf, now } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
+import { lastBlocks, WARMUP_MS } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
+import { pass, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
-import { assertFresh, LayoutChanged, readEpoch, readLayout, readPass, type Layout } from "./read.ts";
+import { assertFresh, readEpoch } from "./read.ts";
 import { HORIZON, schedule } from "./schedule.ts";
-import { expected, select, type Candidate } from "./select.ts";
-import { castVote, VoteSent } from "./vote.ts";
-import { parseWhitelist, type Whitelist } from "./whitelist.ts";
+import { VoteSent } from "./vote.ts";
+import { parseWhitelist } from "./whitelist.ts";
 
 // Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
 const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
 const ATTEMPTS = 3;
 const RETRY_DELAY_MS = 5_000;
 const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
-
-type Run = {
-  chain: Chain;
-  whitelist: Whitelist;
-  layout?: Layout;
-  prices: ReturnType<typeof priceFeed>;
-  account: LocalAccount | undefined;
-  dryRun: boolean;
-};
-
-async function pass(run: Run, until: number): Promise<void> {
-  const { chain, whitelist, prices, account, dryRun } = run;
-  const pools = whitelist.map((w) => w.pool);
-  run.layout ??= await readLayout(chain, pools);
-  let read;
-  try {
-    read = await readPass(chain, run.layout);
-  } catch (error) {
-    if (!(error instanceof LayoutChanged)) throw error;
-    log.info("reward tokens changed, re-reading");
-    run.layout = await readLayout(chain, pools);
-    read = await readPass(chain, run.layout);
-  }
-  const { epoch, rewards } = read;
-  assertFresh(epoch);
-  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
-
-  const tokens = rewards.flatMap((p) => p.rewards.map((r) => r.token));
-  const priced = await prices(tokens, until);
-  if (priced.size === 0 && tokens.length > 0) throw new Error("no reward token could be priced");
-  const candidates: Candidate[] = [];
-  const nameOf = (pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
-  for (const p of rewards) {
-    const pool = nameOf(p.pool);
-    const detail = p.rewards.map((r) => {
-      const price = priced.get(r.token.toLowerCase() as Address);
-      const amount = Number(formatUnits(r.amount, r.decimals));
-      return { token: r.token, amount, usd: price === undefined ? null : amount * price };
-    });
-    const unpriced = detail.filter((d) => d.usd === null);
-    if (unpriced.length) log.warning("unpriced rewards count as zero", { pool, unpriced });
-    const rewardsUsd = detail.reduce((sum, d) => sum + (d.usd ?? 0), 0);
-    const candidate = { pool: p.pool, rewardsUsd, otherVotes: p.otherVotes, ownVotes: p.ownVotes };
-    if (p.alive) candidates.push(candidate);
-    else log.warning("gauge is dead, skipping", { pool });
-    log.info("candidate", { ...candidate, pool, alive: p.alive, rewards: detail });
-  }
-
-  if (candidates.length === 0) throw new Error("no whitelisted pool has a live gauge");
-  const { fractions, vote } = select(candidates, epoch.power);
-  const plan = (fractions ?? [])
-    .map((f, i) => ({ pool: nameOf(candidates[i]!.pool), share: Math.round(f * 10_000) / 100 }))
-    .filter((p) => p.share > 0);
-  const expectedUsd = fractions ? expected(candidates, fractions, epoch.power) : 0;
-  const currentVote = rewards.filter((p) => p.ownVotes > 0n).map((p) => ({ pool: nameOf(p.pool), votes: p.ownVotes }));
-  if (!vote) {
-    const reason = fractions ? "keeping the current vote" : "no pool pays anything; keeping the current vote";
-    log.info(reason, { plan, expectedUsd, currentVote });
-    return;
-  }
-  log.info("voting", { plan, expectedUsd, currentVote, power: epoch.power });
-  await castVote(chain, account, vote, dryRun, until);
-}
 
 async function main(): Promise<number> {
   const dryRun = process.argv.includes("--dry-run");
@@ -116,10 +54,15 @@ async function main(): Promise<number> {
   const deadline = Number(flip) * 1000 - LAST_MARGIN_MS;
   const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
 
+  const start = (time: bigint) => Number(time) * 1000 - (time === flip ? WARMUP_MS : 0);
   let failed = 0;
   for (const [i, time] of times.entries()) {
-    await sleep(Math.max(0, Number(time) * 1000 - Date.now()));
-    const until = i + 1 < times.length ? Number(times[i + 1]!) * 1000 : deadline;
+    if (time === flip) {
+      failed += await lastBlocks(run, flip);
+      continue;
+    }
+    await sleep(Math.max(0, start(time) - Date.now()));
+    const until = i + 1 < times.length ? start(times[i + 1]!) : deadline;
     if (Date.now() >= until) {
       log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
       continue;

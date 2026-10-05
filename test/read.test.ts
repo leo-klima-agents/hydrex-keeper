@@ -93,7 +93,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
   throw new Error(`unexpected call ${functionName} on ${address}`);
 }
 
-const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, votedThisEpoch: true };
+const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, lastVoted: 1000n, votedThisEpoch: true };
 
 test("readLayout drops pools without a gauge and defaults missing decimals", async () => {
   const s = await readLayout(fakeChain(table), [POOL_A, POOL_B, POOL_C]);

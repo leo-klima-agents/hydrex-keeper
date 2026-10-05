@@ -37,7 +37,7 @@ job_json() {
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"}'
   else
     sa=$keeper_sa retries=3
-    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400,600,200,70,25,10,5"}'
+    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400,0"}'
   fi
   secrets='{"name":"BASE_RPC_URLS","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}},{"name":"ALCHEMY_API_KEY","valueFrom":{"secretKeyRef":{"key":"latest","name":"alchemy-api-key"}}}'
   printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,%s],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \

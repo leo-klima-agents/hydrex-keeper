@@ -13,7 +13,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { castVote, VoteSent } from "../src/vote.ts";
+import { castVote, prepareVote, VoteSent } from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -21,7 +21,9 @@ const signer = privateKeyToAccount(generatePrivateKey());
 
 type Behaviour = {
   nonce?: number;
-  pending?: number;
+  congested?: boolean;
+  topTip?: bigint;
+  reverts?: boolean;
   receipt?: "success" | "reverted" | "timeout";
   recorded?: Address;
   fee?: bigint;
@@ -33,12 +35,33 @@ type Behaviour = {
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
+  const simulatedAt: bigint[] = [];
   const client = {
-    simulateContract: async () => ({ result: undefined }),
-    estimateGas: async () => 100_000n,
+    simulateBlocks: async ({
+      blocks,
+      blockTag,
+    }: {
+      blocks: { blockOverrides: { time: bigint } }[];
+      blockTag: string;
+    }) => {
+      assert.equal(blockTag, "pending", "simulates on the block being built");
+      simulatedAt.push(blocks[0]!.blockOverrides.time);
+      const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
+      return [{ calls: [b.reverts ? failure : { status: "success", gasUsed: 100_000n }] }];
+    },
     estimateFeesPerGas: async () => ({ maxFeePerGas: b.fee ?? 1_000n, maxPriorityFeePerGas: (b.fee ?? 1_000n) / 10n }),
-    getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
-      blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
+    getFeeHistory: async () => ({
+      gasUsedRatio: [b.congested ? 0.95 : 0.2, 0.3],
+      reward: [[b.topTip ?? 400n], [300n]],
+    }),
+    getTransactionCount: async ({ blockTag }: { blockTag: string }) => {
+      assert.equal(blockTag, "pending", "counts the votes in the block being built");
+      return b.nonce ?? 7;
+    },
+    getBlock: async ({ blockTag }: { blockTag: string }) => {
+      assert.equal(blockTag, "pending");
+      return { timestamp: 1_790_812_797n };
+    },
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
     waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
@@ -66,20 +89,31 @@ function fakeChain(b: Behaviour = {}) {
     voter: VOTER,
     ve: addr(6),
   };
-  return { chain, sent };
+  return { chain, sent, simulatedAt };
 }
 
 const vote = { pools: [POOL], weights: [100n] };
 const far = Date.now() + 3_600_000;
 
-test("signs with the confirmed nonce and the estimated fees, then verifies at the receipt block", async () => {
+test("signs with the next nonce and the estimated fees, then verifies at the receipt block", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
   await castVote(chain, signer, vote, false, far);
   const tx = parseTransaction(sent[0]!);
   assert.equal(tx.nonce, 3);
   assert.equal(tx.maxFeePerGas, 1_000n);
-  assert.equal(tx.gas, 120_000n);
+  assert.equal(tx.maxPriorityFeePerGas, 100n, "the tip of a block that is not congested is the estimate");
+  assert.equal(tx.gas, 150_000n, "half again the gas the simulation used");
   assert.equal(tx.to, MODULE);
+});
+
+test("after a congested block, the tip rises to what the top of it paid, up to 0.1 gwei", async () => {
+  const { chain, sent } = fakeChain({ congested: true });
+  await castVote(chain, signer, vote, false, far);
+  const tx = parseTransaction(sent[0]!);
+  assert.deepEqual([tx.maxPriorityFeePerGas, tx.maxFeePerGas], [400n, 1_300n]);
+  const capped = fakeChain({ congested: true, topTip: 10n ** 18n });
+  await castVote(capped.chain, signer, vote, false, far);
+  assert.equal(parseTransaction(capped.sent[0]!).maxPriorityFeePerGas, 100_000_000n);
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {
@@ -109,32 +143,25 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
   await assert.rejects(castVote(fakeChain({ recorded: OTHER }).chain, signer, vote, false, far), VoteSent);
 });
 
+test("a vote is simulated just after the block being built, and not sent if it would revert", async () => {
+  const { chain, simulatedAt } = fakeChain();
+  await prepareVote(chain, signer, vote, false, 1_790_812_799n);
+  await castVote(chain, signer, vote, false, far);
+  assert.deepEqual(simulatedAt, [1_790_812_800n, 1_790_812_798n]);
+  const reverting = fakeChain({ reverts: true });
+  await assert.rejects(castVote(reverting.chain, signer, vote, false, far), /VoteDelayNotMet/);
+  assert.equal(reverting.sent.length, 0);
+});
+
 test("a dry run signs but never sends", async () => {
   const { chain, sent } = fakeChain();
   await castVote(chain, signer, vote, true, far);
   assert.equal(sent.length, 0);
 });
 
-test("a pending vote of unknown fees is replaced at twice the estimate; one this process sent at a quarter more", async () => {
-  const unknown = fakeChain({ nonce: 3, pending: 4 });
-  await castVote(unknown.chain, signer, vote, false, far);
-  const replacing = parseTransaction(unknown.sent[0]!);
-  assert.deepEqual([replacing.nonce, replacing.maxFeePerGas], [3, 2_000n], "replaced, not queued behind");
-  const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
-  await castVote(own.chain, signer, vote, false, far);
-  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
-  await castVote(own.chain, signer, vote, false, far);
-  const tx = parseTransaction(own.sent[1]!);
-  assert.equal(tx.nonce, 3);
-  assert.equal(tx.maxFeePerGas, 1_250n);
-});
-
 test("a send that fails still counts as this process's vote: it may have reached a node", async () => {
   const { chain, sent } = fakeChain({ nonce: 3, sendFails: true });
   await assert.rejects(castVote(chain, signer, vote, false, far), /no RPC accepted/);
-  chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
   await assert.rejects(castVote(chain, signer, vote, false, far));
   const tx = parseTransaction(sent[1]!);
   assert.deepEqual([tx.nonce, tx.maxFeePerGas], [3, 1_250n], "a quarter more than the recorded fees");

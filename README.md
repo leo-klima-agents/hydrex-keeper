@@ -15,20 +15,31 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 ## How it votes
 
 Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. Each execution runs the passes due in the next
-hour: 24 hours before the Thursday 00:00 UTC epoch flip, then 600, 200, 70, 25, 10 and 5 seconds before it.
+hour: 24 hours before the Thursday 00:00 UTC epoch flip, then in the last two blocks before it.
 
 A pass reads this epoch's bribes and fees for each pool, prices them in USD, and splits the conduit's votes to maximise
 the expected reward: `x` votes on a pool with `V` votes from others and `usd` of rewards should earn
 `usd × x / (V + x)`. To save gas, pools that would get less than 0.1% of the votes are left out: each pool voted for
 adds two bribe deposits to the transaction, and a share that small earns almost nothing. Votes do not carry over, so the
-first pass of an epoch votes; later passes vote again only if that pays at least 1% more. A pass takes under a second,
-and Base blocks are two seconds apart, so the last pass leaves a block of margin.
+first pass of an epoch votes; later passes vote again only if that pays at least 1% more.
+
+The last pass votes as late as possible, to see as many of the other votes as it can. It starts a minute before the
+flip: it prices the rewards, then polls the block being built, which Base builds in sub-blocks about every 200 ms. The
+polls tell it when blocks are sealed and when their last sub-block starts, wherever that falls within the second and
+however far apart blocks are. Two blocks before its first vote, it starts reading the block being built every 100 ms,
+with the votes others sent so far, and keeps a vote signed for the latest read. It sends that vote in each of the last
+two blocks before the flip, 200 ms before the block's last sub-block starts: about 0.8 s before the block's timestamp.
+The deadlines come from the block timing alone: if reads or polls hang or fail, the vote sent is the latest that was
+ready, from an earlier read or from the minute before. If either of the last two sealed blocks was at least 90% full,
+the tip rises to the 99th percentile of their tips, up to 0.1 gwei.
 
 A failing pass is tried up to three times while there is time. If it still fails, the execution exits non-zero, an email
 alert fires, and Cloud Run restarts it up to three times. A restart runs a pass missed within the past hour, and does
-nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway.
+nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway. After the flip, the
+last pass reads where its votes landed, and fails if one reverted before the flip, or if it had nothing to send.
 
-Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote.
+Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote. The last pass
+also logs the block timing it learned, the votes others add, and what it sends in each block.
 
 ## Trust
 
@@ -80,7 +91,8 @@ Outside the scripts:
 ## Failure modes
 
 - **Base RPC:** a call that fails, or gets no answer within 250 ms, also goes to the next URL, and the first answer
-  wins. If all fail, the pass fails. The vote is sent to every URL.
+  wins. If all fail, the pass fails. The vote is sent to every URL. In the last pass, a poll that hangs is dropped after
+  500 ms, and up to three reads run at once, so that one that hangs does not hold up the next.
 - **Prices:** DefiLlama, Alchemy, and CoinGecko if set, three attempts each. A price is the median of three quotes, the
   lower of two, or the only one. If every source fails, the last prices are reused. The pass fails if there are none, or
   if no token has a price. Unpriced tokens count as zero.
@@ -102,7 +114,8 @@ the pinned Actions, npm packages and base images.
 
 ## Limitations
 
-- The expected reward assumes the other voters stay put; the late passes correct for them moving.
+- The expected reward assumes the other voters stay put. The last pass sees the votes sent until about 2 s before the
+  flip, but not those sent later.
 - Claiming and swapping rewards are not implemented.
 
 ## License

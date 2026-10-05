@@ -3,7 +3,7 @@ import { bribeAbi, veAbi } from "./abi.ts";
 import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
-export type Epoch = { start: bigint; flip: bigint; power: bigint; votedThisEpoch: boolean };
+export type Epoch = { start: bigint; flip: bigint; power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
 
 type Reward = { token: Address; amount: bigint; decimals: number };
 
@@ -33,7 +33,13 @@ function epochCalls(chain: Chain, calendar: bigint): Call[] {
 }
 
 function toEpoch([start, lastVoted, power]: bigint[]): Epoch {
-  return { start: start!, flip: start! + WEEK, power: power!, votedThisEpoch: lastVoted! >= start! };
+  return {
+    start: start!,
+    flip: start! + WEEK,
+    power: power!,
+    lastVoted: lastVoted!,
+    votedThisEpoch: lastVoted! >= start!,
+  };
 }
 
 /** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
@@ -93,22 +99,28 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
 /**
  * A pass's one read: the epoch, as `readEpoch`, and each pool's liveness, votes, and bribes and fees this epoch. The
  * epoch and votes come first, so that for up to 199 pools they come from one eth_call, and so from one block.
+ * `pending` reads the block being built.
  */
 export async function readPass(
   chain: Chain,
   { pools, gauges, bribes, lengths, slots }: Layout,
+  blockTag?: "pending",
 ): Promise<{ epoch: Epoch; rewards: PoolRewards[] }> {
   const calendar = calendarEpoch();
-  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(chain.client, [
-    ...epochCalls(chain, calendar),
-    ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
-    ...gauges.flatMap((gauge, i) => [
-      voterCall(chain, "isAlive", [gauge]),
-      voterCall(chain, "weights", [pools[i]]),
-      voterCall(chain, "votes", [chain.conduit, pools[i]]),
-    ]),
-    ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
-  ]);
+  const results = await readMany<boolean | bigint | [bigint, bigint, bigint]>(
+    chain.client,
+    [
+      ...epochCalls(chain, calendar),
+      ...bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
+      ...gauges.flatMap((gauge, i) => [
+        voterCall(chain, "isAlive", [gauge]),
+        voterCall(chain, "weights", [pools[i]]),
+        voterCall(chain, "votes", [chain.conduit, pools[i]]),
+      ]),
+      ...slots.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
+    ],
+    { blockTag },
+  );
   const epoch = toEpoch(results.slice(0, 3) as bigint[]);
   if (lengths.some((length, b) => results[3 + b] !== length)) throw new LayoutChanged("reward tokens changed");
   const perPool = results.slice(3 + bribes.length, 3 + bribes.length + 3 * pools.length);

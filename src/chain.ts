@@ -142,7 +142,7 @@ export function voterCall({ voter }: Chain, functionName: string, args: readonly
   return { address: voter, abi: voterAbi, functionName, args };
 }
 
-type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
+type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined; lenient?: boolean };
 
 /**
  * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
@@ -151,9 +151,9 @@ type ReadOptions = { blockNumber?: bigint; lenient?: boolean };
 export async function readMany<T>(
   client: Client,
   calls: readonly Call[],
-  { blockNumber, lenient = false }: ReadOptions = {},
+  { blockNumber, blockTag, lenient = false }: ReadOptions = {},
 ): Promise<T[]> {
-  const at = blockNumber === undefined ? {} : { blockNumber };
+  const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
   const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) =>
     calls.slice(i * CHUNK, (i + 1) * CHUNK),
   );
