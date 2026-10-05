@@ -75,7 +75,8 @@ export function hedged(rpcUrls: string[]): Transport {
  * hash once one accepts it or already has it; the other answers are logged. Rejects if none does before `until` (ms).
  */
 export function broadcaster(rpcUrls: string[]) {
-  const nodes = rpcUrls.map((url) => ({ host: hostOf(url), transport: transportOf(url) }));
+  // Unbatched, so that a vote does not wait for reads sent to the same URL.
+  const nodes = rpcUrls.map((url) => ({ host: hostOf(url), transport: http(url) }));
   return (signed: Hex, until: number): Promise<Hex> => {
     const hash = keccak256(signed);
     const timeout = Math.max(1, Math.min(TIMEOUT_MS, until - Date.now()));

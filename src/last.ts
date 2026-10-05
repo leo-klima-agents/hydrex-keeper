@@ -1,9 +1,10 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { keccak256, type Hex } from "viem";
+import { keccak256, serializeTransaction, TransactionReceiptNotFoundError, type Hex } from "viem";
 import { Blocks, watch } from "./blocks.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Prices } from "./prices.ts";
-import { decide, nameOf, readState, tokensOf, type Run, type State } from "./pass.ts";
+import { decide, nameOf, readState, type Run, type State } from "./pass.ts";
+import type { Layout } from "./read.ts";
 import type { Vote } from "./select.ts";
 import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
@@ -13,7 +14,7 @@ const TICK_MS = 50;
 const PLAN_EVERY_MS = 100;
 const MAX_PLANS = 3; // in flight
 const RETRY_DELAY_MS = 5_000;
-const SETTLE_MS = 4_000; // after the flip, before reading the outcome
+const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 
 /** What to send in the block with timestamp `time` (ms), from a read at `readAt` (ms). */
 export type Plan = {
@@ -68,7 +69,7 @@ export async function race(flip: number, { blocks, plan, send }: Race, first?: P
       await sleep(TICK_MS);
       continue;
     }
-    const { gap, seal, lead } = blocks.timing;
+    const { gap, lead } = blocks.timing;
     const deadline = time - lead;
     if (!planned && now >= deadline - 2 * gap) {
       planned = true;
@@ -80,10 +81,6 @@ export async function race(flip: number, { blocks, plan, send }: Race, first?: P
       continue;
     }
     after = time;
-    if (now >= time + seal) {
-      log.warning("missed the block", { block: time / 1000, deadline, seal: time + seal });
-      continue;
-    }
     send(best, time);
     sends++;
   }
@@ -95,19 +92,39 @@ export async function race(flip: number, { blocks, plan, send }: Race, first?: P
 export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   const { chain, account, dryRun } = run;
   const flipMs = Number(flip) * 1000;
+  let priced: Prices = new Map();
+  let pricedFor: Layout | undefined;
+  // Every reward token of the layout, so that a bribe funded late in any of them counts.
+  const reprice = async (until: number) => {
+    pricedFor = run.layout;
+    priced = await run.prices(
+      run.layout!.slots.map((s) => s.token),
+      until,
+    );
+  };
+  // Prices fetched now are reused if every source fails during the warm-up.
+  if (Date.now() < flipMs - WARMUP_MS) {
+    await readState(run)
+      .then(() => reprice(flipMs - WARMUP_MS))
+      .catch((error: unknown) => log.warning("prices not fetched ahead", { error: errorMessage(error) }));
+  }
   await sleep(Math.max(0, flipMs - WARMUP_MS - Date.now()));
   log.info("last blocks", { flip, secondsToFlip: (flipMs - Date.now()) / 1000 });
   const blocks = new Blocks();
   let watching = true;
   void watch(chain.client, blocks, () => !watching);
   let failures = 0;
-  let priced: Prices = new Map();
   let latest: { readAt: number; state: State } | undefined;
 
   const plan = async (best: Plan | undefined, verbose = false): Promise<Plan> => {
     const readAt = Date.now();
     const time = blocks.building(readAt) ?? readAt;
     const state = await readState(run, "pending");
+    if (run.layout !== pricedFor) {
+      void reprice(flipMs).catch((error: unknown) =>
+        log.warning("new reward tokens not priced", { error: errorMessage(error) }),
+      );
+    }
     if (!latest || readAt > latest.readAt) {
       const before = new Map(latest?.state.rewards.map((p) => [p.pool, p.otherVotes]));
       const moved = state.rewards.flatMap((p) => {
@@ -132,8 +149,8 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     try {
       const { number, timestamp } = await chain.client.getBlock();
       blocks.observe({ number, timestamp, txs: 0 }, Date.now());
-      const state = await readState(run);
-      priced = await run.prices(tokensOf(state), flipMs - PRICES_BY_MS);
+      await readState(run);
+      await reprice(flipMs - PRICES_BY_MS);
       first = await plan(undefined, true);
     } catch (error) {
       const retry = Date.now() + RETRY_DELAY_MS < flipMs - PRICES_BY_MS;
@@ -146,7 +163,8 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     }
   }
 
-  const sent = new Map<Hex, Vote>();
+  // Signatures of one transaction differ, so copies of it are found by its unsigned hash.
+  const sent = new Map<Hex, { hash: Hex; vote: Vote }>();
   const sending: Promise<void>[] = [];
   const send = (best: Plan | undefined, time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
@@ -160,9 +178,9 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     if (!tx) return log.info(best.note, fields);
     if (!signed) return log.info("not signed, not sent", fields);
     if (dryRun) return log.info("dry run: signed, not sent", fields);
-    const hash = keccak256(signed);
-    if (sent.has(hash)) return log.info("already sent", { ...at, hash });
-    sent.set(hash, best.vote!);
+    const id = keccak256(serializeTransaction(tx));
+    if (sent.has(id)) return log.info("already sent", at);
+    sent.set(id, { hash: keccak256(signed), vote: best.vote! });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
       broadcastVote(chain, { tx, signed }, flipMs).then(
@@ -184,16 +202,19 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   await Promise.all(sending);
   if (sent.size === 0) return failures;
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
-  return failures + (await outcome(run, flip, sent));
+  return failures + (await outcome(run, flip, [...sent.values()]));
 }
 
 /** Logs where each sent vote landed and checks the last one before the flip. Returns the number of failures. */
-async function outcome({ chain }: Run, flip: bigint, sent: Map<Hex, Vote>): Promise<number> {
+async function outcome({ chain }: Run, flip: bigint, sent: { hash: Hex; vote: Vote }[]): Promise<number> {
   let failures = 0;
   let last: { hash: Hex; vote: Vote; block: bigint } | undefined;
-  for (const [hash, vote] of sent) {
+  for (const { hash, vote } of sent) {
     try {
-      const receipt = await chain.client.getTransactionReceipt({ hash }).catch(() => undefined);
+      const receipt = await chain.client.getTransactionReceipt({ hash }).catch((error: unknown) => {
+        if (error instanceof TransactionReceiptNotFoundError) return undefined;
+        throw error;
+      });
       if (!receipt) {
         log.info("vote not mined: replaced or dropped", { hash });
         continue;

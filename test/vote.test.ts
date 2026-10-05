@@ -42,9 +42,9 @@ function fakeChain(b: Behaviour = {}) {
       blockTag,
     }: {
       blocks: { blockOverrides: { time: bigint } }[];
-      blockTag: string;
+      blockTag?: string;
     }) => {
-      assert.equal(blockTag, "pending", "simulates on the block being built");
+      assert.equal(blockTag, undefined, "simulates on top of the latest block");
       simulatedAt.push(blocks[0]!.blockOverrides.time);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
       return [{ calls: [b.reverts ? failure : { status: "success", gasUsed: 100_000n }] }];
@@ -58,8 +58,8 @@ function fakeChain(b: Behaviour = {}) {
       assert.equal(blockTag, "pending", "counts the votes in the block being built");
       return b.nonce ?? 7;
     },
-    getBlock: async ({ blockTag }: { blockTag: string }) => {
-      assert.equal(blockTag, "pending");
+    getBlock: async (args?: object) => {
+      assert.equal(args, undefined, "the latest block");
       return { timestamp: 1_790_812_797n };
     },
     getBalance: async () => 10n ** 18n,
@@ -143,7 +143,7 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
   await assert.rejects(castVote(fakeChain({ recorded: OTHER }).chain, signer, vote, false, far), VoteSent);
 });
 
-test("a vote is simulated just after the block being built, and not sent if it would revert", async () => {
+test("a vote is simulated just after the block it is for, and not sent if it would revert", async () => {
   const { chain, simulatedAt } = fakeChain();
   await prepareVote(chain, signer, vote, false, 1_790_812_799n);
   await castVote(chain, signer, vote, false, far);

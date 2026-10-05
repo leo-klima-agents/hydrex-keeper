@@ -27,13 +27,13 @@ export const nameOf = ({ whitelist }: Run, pool: Address) => whitelist.find((w) 
 export async function readState(run: Run, blockTag?: "pending"): Promise<State> {
   const { chain, whitelist } = run;
   const pools = whitelist.map((w) => w.pool);
-  run.layout ??= await readLayout(chain, pools);
+  run.layout ??= await readLayout(chain, pools, blockTag);
   try {
     return await readPass(chain, run.layout, blockTag);
   } catch (error) {
     if (!(error instanceof LayoutChanged)) throw error;
     log.info("reward tokens changed, re-reading");
-    run.layout = await readLayout(chain, pools);
+    run.layout = await readLayout(chain, pools, blockTag);
     return readPass(chain, run.layout, blockTag);
   }
 }

@@ -34,9 +34,9 @@ export type Prepared = { tx: Tx; signed?: Hex };
 const lastSentBy = new WeakMap<Client, Tx>();
 
 /**
- * Simulates module.vote on top of the block being built, whose timestamp is `time` (s), and signs it unless there is
- * no key. If either of the last two blocks was congested, the tip rises to the 99th percentile of their tips, up to
- * MAX_TIP.
+ * Simulates module.vote just after `time` (s), the timestamp of the block it is for, by default the latest block, and
+ * signs it unless there is no key. If either of the last two blocks was congested, the tip rises to the 99th
+ * percentile of their tips, up to MAX_TIP.
  */
 export async function prepareVote(
   chain: Chain,
@@ -49,11 +49,11 @@ export async function prepareVote(
   const args = [vote.pools, vote.weights] as const;
   const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
   const call = { account: keeper, to: module, abi: moduleAbi, functionName: "vote", args } as const;
-  time ??= (await client.getBlock({ blockTag: "pending" })).timestamp;
-  // A simulated block must come after the one it builds on, which can be the block being built.
+  time ??= (await client.getBlock()).timestamp;
+  // The simulated block builds on the latest one, which may already be the one at `time`.
   const blockOverrides = { time: time + 1n };
   const [[block], fees, history, nonce, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateBlocks({ blocks: [{ blockOverrides, calls: [call] }], blockTag: "pending" }),
+    client.simulateBlocks({ blocks: [{ blockOverrides, calls: [call] }] }),
     client.estimateFeesPerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: keeper, blockTag: "pending" }),
@@ -61,7 +61,7 @@ export async function prepareVote(
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]);
   const simulated = block!.calls[0]!;
-  if (simulated.status !== "success") throw simulated.error;
+  if (simulated.status !== "success") throw simulated.error ?? new Error("the vote would revert");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
   const tip = congested ? max(fees.maxPriorityFeePerGas, min(top, MAX_TIP)) : fees.maxPriorityFeePerGas;

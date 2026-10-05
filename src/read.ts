@@ -53,11 +53,12 @@ export function assertFresh(epoch: Epoch): void {
   }
 }
 
-export async function readLayout(chain: Chain, whitelist: Address[]): Promise<Layout> {
+export async function readLayout(chain: Chain, whitelist: Address[], blockTag?: "pending"): Promise<Layout> {
   const { client } = chain;
   const allGauges = await readMany<Address>(
     client,
     whitelist.map((pool) => voterCall(chain, "gauges", [pool])),
+    { blockTag },
   );
   const missing = whitelist.filter((_, i) => allGauges[i] === zeroAddress);
   if (missing.length) log.warning("no gauge, skipping", { pools: missing });
@@ -70,10 +71,12 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
       voterCall(chain, "external_bribes", [gauge]),
       voterCall(chain, "internal_bribes", [gauge]),
     ]),
+    { blockTag },
   );
   const lengths = await readMany<bigint>(
     client,
     bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
+    { blockTag },
   );
   const slots = bribes.flatMap((bribe, b) =>
     Array.from({ length: Number(lengths[b]) }, (_, j) => ({ pool: b >> 1, bribe, index: BigInt(j) })),
@@ -81,12 +84,13 @@ export async function readLayout(chain: Chain, whitelist: Address[]): Promise<La
   const tokens = await readMany<Address>(
     client,
     slots.map((s) => bribeCall(s.bribe, "rewardTokens", [s.index])),
+    { blockTag },
   );
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
   const decimals = await readMany<number | undefined>(
     client,
     distinct.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
-    { lenient: true },
+    { blockTag, lenient: true },
   );
   const decimalsOf = new Map(distinct.map((t, i) => [t, decimals[i] ?? 18]));
   const withTokens = slots.map(({ pool, bribe }, k) => {

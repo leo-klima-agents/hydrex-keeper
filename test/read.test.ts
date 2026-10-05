@@ -13,12 +13,22 @@ const [TOK_1, TOK_2, TOK_3] = [addr(12), addr(13), addr(14)] as const;
 type Call = { address: Address; functionName: string; args?: readonly unknown[] };
 
 let multicalls = 0;
+const blockTags: unknown[] = [];
 
 /** A client whose multicall answers from a table and counts round trips; unknown calls fail. */
 function fakeChain(answer: (call: Call) => unknown): Chain {
   const client = {
-    multicall: async ({ contracts, allowFailure }: { contracts: Call[]; allowFailure: boolean }) => {
+    multicall: async ({
+      contracts,
+      allowFailure,
+      blockTag,
+    }: {
+      contracts: Call[];
+      allowFailure: boolean;
+      blockTag?: string;
+    }) => {
       multicalls++;
+      blockTags.push(blockTag);
       return contracts.map((call) => {
         try {
           const result = answer(call);
@@ -166,6 +176,14 @@ test("readPass reports a grown reward token list", async () => {
   } finally {
     rewardTokens[INT_A] = [];
   }
+});
+
+test("asked for the block being built, readLayout and readPass read it in every call", async () => {
+  const chain = fakeChain(table);
+  blockTags.length = 0;
+  await readPass(chain, await readLayout(chain, [POOL_A, POOL_B], "pending"), "pending");
+  assert.ok(blockTags.length >= 5);
+  assert.ok(blockTags.every((tag) => tag === "pending"));
 });
 
 test("readEpoch reads the epoch and the power at the calendar epoch in one round trip", async (t) => {

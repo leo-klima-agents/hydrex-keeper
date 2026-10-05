@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Blocks } from "../src/blocks.ts";
+import type { Client } from "../src/chain.ts";
+import { Blocks, watch } from "../src/blocks.ts";
 
 const flip = 1_790_812_800_000;
 
@@ -87,4 +88,19 @@ test("a late answer about an older block, or about fewer transactions, is ignore
   blocks.observe({ number: 9n, timestamp: BigInt((flip - 45_000) / 1000), txs: 99 }, flip - 40_000);
   blocks.observe({ number: 10n, timestamp: BigInt((flip - 43_000) / 1000), txs: 2 }, flip - 40_000);
   assert.deepEqual(blocks.timing, before);
+});
+
+test("a failed, hung or malformed poll is skipped", async () => {
+  const answers = [
+    () => Promise.reject(new Error("HTTP 503")),
+    () => new Promise(() => {}),
+    async () => ({ number: "0x1", timestamp: "0x6abd8f7f" }),
+    async () => null,
+    async () => ({ number: "0x2", timestamp: "0x6abd8f81", transactions: ["0xab"] }),
+  ];
+  let polls = 0;
+  const client = { request: () => answers[polls++]!() } as unknown as Client;
+  const blocks = new Blocks();
+  await watch(client, blocks, () => polls === answers.length);
+  assert.equal(blocks.building(0), 0x6abd8f81 * 1000);
 });

@@ -74,22 +74,24 @@ export class Blocks {
   }
 }
 
-/** Polls the block being built into `blocks` until `stop()`; a poll that hangs is abandoned. */
+/** Polls the block being built into `blocks` until `stop()`; a poll that fails, hangs or is malformed is skipped. */
 export async function watch(client: Client, blocks: Blocks, stop: () => boolean): Promise<void> {
   while (!stop()) {
     const started = Date.now();
-    const block = await Promise.race([
-      client.request({ method: "eth_getBlockByNumber", params: ["pending", false] }),
-      sleep(POLL_TIMEOUT_MS, null),
-    ]).catch(() => null);
-    if (block?.number) {
-      const header = {
-        number: BigInt(block.number),
-        timestamp: BigInt(block.timestamp),
-        txs: block.transactions.length,
-      };
-      blocks.observe(header, (started + Date.now()) / 2);
-    }
+    try {
+      const block = await Promise.race([
+        client.request({ method: "eth_getBlockByNumber", params: ["pending", false] }),
+        sleep(POLL_TIMEOUT_MS, null),
+      ]);
+      if (block?.number) {
+        const header = {
+          number: BigInt(block.number),
+          timestamp: BigInt(block.timestamp),
+          txs: block.transactions.length,
+        };
+        blocks.observe(header, (started + Date.now()) / 2);
+      }
+    } catch {}
     await sleep(Math.max(0, started + POLL_MS - Date.now()));
   }
 }

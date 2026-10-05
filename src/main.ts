@@ -61,8 +61,8 @@ async function main(): Promise<number> {
       failed += await lastBlocks(run, flip);
       continue;
     }
-    await sleep(Math.max(0, start(time) - Date.now()));
     const until = i + 1 < times.length ? start(times[i + 1]!) : deadline;
+    await sleep(Math.max(0, Math.min(start(time), until) - Date.now()));
     if (Date.now() >= until) {
       log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
       continue;
