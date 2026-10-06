@@ -3,12 +3,12 @@ import { Blocks, sleep, watch } from "./blocks.ts";
 import { readMany, voterCall, WEEK } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Prices } from "./prices.ts";
-import { decide, readState, type Run } from "./pass.ts";
-import type { Layout } from "./read.ts";
-import type { Vote } from "./select.ts";
+import { decide, tokensOf, type Run } from "./pass.ts";
+import { readRewards, readVotes, type PoolRewards } from "./read.ts";
+import { waterFill, type Vote } from "./select.ts";
 import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
-export const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
+const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
 const PRICES_BY_MS = 5_000; // before the flip
 const TICK_MS = 50;
 const PLAN_EVERY_MS = 100;
@@ -92,18 +92,10 @@ export async function race(flip: number, { blocks, plan, send }: Race, first?: P
 export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   const { chain, account, dryRun } = run;
   const flipMs = Number(flip) * 1000;
-  let priced: Prices = new Map();
-  let pricedFor: Layout | undefined;
-  // Every reward token of the layout, so that a bribe funded late in any of them counts.
-  const reprice = async (until: number) => {
-    pricedFor = run.layout;
-    const tokens = run.layout!.slots.map((s) => s.token);
-    priced = await run.prices(tokens, until);
-  };
   // Prices fetched now are reused if every source fails during the warm-up.
   if (Date.now() < flipMs - WARMUP_MS) {
-    await readState(run)
-      .then(() => reprice(flipMs - WARMUP_MS))
+    await run
+      .prices(tokensOf(run), flipMs - WARMUP_MS)
       .catch((error: unknown) => log.warning("prices not fetched ahead", { error: errorMessage(error) }));
   }
   await sleep(Math.max(0, flipMs - WARMUP_MS - Date.now()));
@@ -112,17 +104,14 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   let watching = true;
   void watch(chain.client, blocks, () => !watching);
   let failures = 0;
+  let rewards: PoolRewards[] = [];
+  let priced: Prices = new Map();
 
   const plan = async (best: Plan | undefined, verbose = false): Promise<Plan> => {
     const readAt = Date.now();
     const time = blocks.building(readAt) ?? readAt;
-    const state = await readState(run, "pending");
-    if (run.layout !== pricedFor) {
-      void reprice(flipMs).catch((error: unknown) =>
-        log.warning("new reward tokens not priced", { error: errorMessage(error) }),
-      );
-    }
-    const { vote, reason, summary } = decide(run, state, priced, verbose);
+    const state = await readVotes(chain, rewards, "pending");
+    const { vote, reason, summary } = decide(run, state, priced, waterFill, verbose);
     const base = { readAt, time, vote, note: reason, summary };
     if (!vote) return base;
     if (Number(state.epoch.lastVoted) * 1000 >= time) return { ...base, note: "already voted in this block" };
@@ -136,8 +125,8 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     try {
       const { number, timestamp } = await chain.client.getBlock();
       blocks.observe({ number, timestamp, txs: 0 }, Date.now());
-      await readState(run);
-      await reprice(flipMs - PRICES_BY_MS);
+      rewards = await readRewards(chain, tokensOf(run));
+      priced = await run.prices(tokensOf(run), flipMs - PRICES_BY_MS);
       first = await plan(undefined, true);
     } catch (error) {
       const retry = Date.now() + RETRY_DELAY_MS < flipMs - PRICES_BY_MS;

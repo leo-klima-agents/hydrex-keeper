@@ -16,7 +16,7 @@ done
 
 log "== 1/3 job"
 gcloud run jobs deploy "$JOB" --source="$REPO_ROOT" --region="$REGION" --project="$KEEPER_PROJECT" \
-  --service-account="$KEEPER_SA" --set-secrets="^|^$SECRETS" --set-env-vars="^|^$ENV_VARS" \
+  --service-account="$KEEPER_SA" --set-secrets="$SECRETS" --set-env-vars="$ENV_VARS" \
   --task-timeout="${TASK_TIMEOUT}s" --max-retries="$MAX_RETRIES" --tasks=1 --cpu=1 --memory=512Mi --quiet
 
 log "== 2/3 job IAM"

@@ -40,8 +40,8 @@ expect "job max retries" "$(json_field "$job" "$task.maxRetries | tostring")" "$
 expect "job task count" "$(json_field "$job" ".spec.template.spec.taskCount | tostring")" "1"
 expect "job containers" "$(json_field "$job" "$task.containers | length | tostring")" "1"
 container_env=$(json_field "$job" "[$task.containers[0].env[]?] | tojson")
-env_vars=$(json_field "$container_env" '[.[] | select(.value) | "\(.name)=\(.value)"] | sort | join("|")')
-secrets=$(json_field "$container_env" '[.[] | select(.valueFrom) | "\(.name)=\(.valueFrom.secretKeyRef | "\(.name):\(.key)")"] | sort | join("|")')
+env_vars=$(json_field "$container_env" '[.[] | select(.value) | "\(.name)=\(.value)"] | sort | join(",")')
+secrets=$(json_field "$container_env" '[.[] | select(.valueFrom) | "\(.name)=\(.valueFrom.secretKeyRef | "\(.name):\(.key)")"] | sort | join(",")')
 expect "job env" "$env_vars" "$ENV_VARS"
 expect "job secrets" "$secrets" "$SECRETS"
 

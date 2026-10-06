@@ -66,14 +66,9 @@ golden_case deploy-first first-deploy keeper deploy.sh
 golden_case deploy-existing existing keeper deploy.sh
 golden_case deploy-stale drift keeper deploy.sh
 golden_case deploy-list-fails list-fails keeper deploy.sh
-golden_case deploy-spaces existing spaces deploy.sh
 golden_case deploy-coingecko existing coingecko deploy.sh
 golden_case run-dry existing keeper run.sh --dry-run --now
 golden_case run-bad-arg existing keeper run.sh --later
-golden_case config-uncovered existing uncovered run.sh --now
-golden_case config-late existing late run.sh --now
-golden_case config-close existing close run.sh --now
-golden_case config-zeros existing zeros run.sh --now
 golden_case config-bad-module existing bad-module run.sh --now
 golden_case check-ok existing keeper check.sh
 golden_case check-drift drift keeper check.sh

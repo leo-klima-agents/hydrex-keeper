@@ -143,16 +143,16 @@ export function voterCall({ voter }: Chain, functionName: string, args: readonly
   return { address: voter, abi: voterAbi, functionName, args };
 }
 
-type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined; lenient?: boolean };
+type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined };
 
 /**
  * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
- * requests. Every call must succeed unless `lenient`, which yields `undefined` for failures.
+ * requests. Every call must succeed.
  */
 export async function readMany<T>(
   client: Client,
   calls: readonly Call[],
-  { blockNumber, blockTag, lenient = false }: ReadOptions = {},
+  { blockNumber, blockTag }: ReadOptions = {},
 ): Promise<T[]> {
   const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
   const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) =>
@@ -160,11 +160,8 @@ export async function readMany<T>(
   );
   const results = await Promise.all(
     chunks.map((contracts) =>
-      client.multicall({ contracts: contracts as never, allowFailure: lenient, batchSize: 0, ...at }),
+      client.multicall({ contracts: contracts as never, allowFailure: false, batchSize: 0, ...at }),
     ),
   );
-  if (!lenient) return results.flat() as T[];
-  const settled = results.flat() as { status: string; result?: unknown; error?: unknown }[];
-  if (settled.length && settled.every((r) => r.status === "failure")) throw settled[0]!.error;
-  return settled.map((r) => (r.status === "success" ? r.result : undefined)) as T[];
+  return results.flat() as T[];
 }

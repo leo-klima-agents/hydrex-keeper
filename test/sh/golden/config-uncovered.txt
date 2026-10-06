@@ -1,3 +1,0 @@
-exit=1
---- output ---
-error: VOTE_OFFSETS entry 86400 is not within 3600 s after any SCHEDULES entry

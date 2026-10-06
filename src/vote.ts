@@ -17,6 +17,7 @@ const RECEIPT_TIMEOUT_MS = 60_000;
 const CONGESTED = 0.9; // in a block this full, the builder picks by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
+const MAX_GAS = 16_777_216n; // per transaction on Base, since its Azul upgrade
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
@@ -88,7 +89,7 @@ export async function prepareVote(
     to: module,
     data,
     // Refunds and the 63/64 rule make the gas needed exceed the gas used, by up to about a third.
-    gas: (simulated.gasUsed * 3n) / 2n,
+    gas: min((simulated.gasUsed * 3n) / 2n, MAX_GAS),
     maxFeePerGas: bump(2n * baseFee + tip, own?.maxFeePerGas),
     maxPriorityFeePerGas: bump(tip, own?.maxPriorityFeePerGas),
     nonce,

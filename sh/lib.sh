@@ -12,10 +12,7 @@ MAX_RETRIES=3
 # Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the first pass.
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-HORIZON=3600                   # seconds; HORIZON in src/schedule.ts
-MIN_LEAD=120                   # seconds; over WARMUP_MS in src/last.ts, kept clear of passes for the last blocks
-FLIP_WEEKDAY=4                 # Thursday 00:00 UTC
-MIN_KEEPER_WEI=500000000000000 # 0.0005 ETH: weeks of votes; check.sh fails below it
+MIN_KEEPER_WEI=1000000000000000 # 0.001 ETH: weeks of votes; check.sh fails below it
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 TAB=$(printf '\t')
@@ -48,8 +45,8 @@ require_tools() {
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
-  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE VOTE_OFFSETS SCHEDULES \
-    RPC_SECRET ALCHEMY_SECRET COINGECKO_SECRET ALERT_EMAIL
+  unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE RPC_SECRET ALCHEMY_SECRET \
+    COINGECKO_SECRET ALERT_EMAIL
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -57,8 +54,6 @@ load_config() {
   KEEPER_SA_NAME=${KEEPER_SA_NAME:-hydrex-keeper}
   SCHEDULER_SA_NAME=${SCHEDULER_SA_NAME:-hydrex-keeper-scheduler}
   MODULE=${MODULE:-0x750973E0CB728C3112561Bc8E9b235afA9B17E81}
-  VOTE_OFFSETS=${VOTE_OFFSETS:-86400}
-  SCHEDULES=${SCHEDULES:-50 23 * * 2;40 23 * * 3}
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
   COINGECKO_SECRET=${COINGECKO_SECRET:-}
@@ -79,29 +74,20 @@ load_config() {
     0x*) [ ${#MODULE} -eq 42 ] || die "MODULE must be a 20-byte hex address" ;;
     *) die "MODULE must be a 20-byte hex address" ;;
   esac
-  case "$VOTE_OFFSETS" in
-    "" | *[!0-9,]* | *,,* | ,* | *,) die "VOTE_OFFSETS must be comma-separated seconds" ;;
-  esac
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
     *) die "ALERT_EMAIL must be an email address" ;;
   esac
-  case "$SCHEDULES" in
-    "" | *";;"* | ";"* | *";") die "SCHEDULES must be cron expressions separated by ;" ;;
-  esac
-  starts=$(schedules | cut -f2 | while read -r cron; do schedule_start "$cron"; done)
-  check_offsets_covered "$starts"
-  check_last_blocks_covered "$starts"
 
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
-  # Sorted by name, as check.sh reads them back; `|`-separated since VOTE_OFFSETS contains commas.
-  ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION|MODULE=$MODULE|VOTE_OFFSETS=$VOTE_OFFSETS"
-  SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest|BASE_RPC_URLS=$RPC_SECRET:latest"
+  # Sorted by name, as check.sh reads them back.
+  ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
+  SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest,BASE_RPC_URLS=$RPC_SECRET:latest"
   SECRET_NAMES="$RPC_SECRET $ALCHEMY_SECRET"
   if [ -n "$COINGECKO_SECRET" ]; then
-    SECRETS="$SECRETS|COINGECKO_API_KEY=$COINGECKO_SECRET:latest"
+    SECRETS="$SECRETS,COINGECKO_API_KEY=$COINGECKO_SECRET:latest"
     SECRET_NAMES="$SECRET_NAMES $COINGECKO_SECRET"
   fi
   ALERT_NAME="$JOB failed"
@@ -219,67 +205,13 @@ rpc() {
   die "$1 failed on every public Base node"
 }
 
-# schedule_start CRON: seconds before the flip at which a "M H * * D" schedule fires.
-schedule_start() {
-  set -f
-  # shellcheck disable=SC2086
-  set -- $1
-  set +f
-  if [ $# -ne 5 ] || [ "$3" != '*' ] || [ "$4" != '*' ]; then die "SCHEDULES entries must be 'M H * * D': $*"; fi
-  case "$1$2$5" in *[!0-9]*) die "SCHEDULES entries must be 'M H * * D': $*" ;; esac
-  # Leading zeros would read as octal in arithmetic.
-  minute=$(printf '%s' "$1" | sed 's/^0*\([0-9]\)/\1/')
-  hour=$(printf '%s' "$2" | sed 's/^0*\([0-9]\)/\1/')
-  weekday=$(printf '%s' "$5" | sed 's/^0*\([0-9]\)/\1/')
-  if [ "$minute" -gt 59 ] || [ "$hour" -gt 23 ] || [ "$weekday" -gt 7 ]; then die "SCHEDULES entry out of range: $*"; fi
-  schedule_start_seconds=$(((FLIP_WEEKDAY - weekday + 7) % 7 * 86400 - hour * 3600 - minute * 60))
-  [ "$schedule_start_seconds" -gt 0 ] || schedule_start_seconds=$((schedule_start_seconds + 604800))
-  printf '%s\n' "$schedule_start_seconds"
-}
-
-# check_offsets_covered STARTS: every offset must fall strictly within HORIZON after some schedule start (seconds
-# before the flip, one per line), or the job never runs that pass, and at least MIN_LEAD before the flip.
-check_offsets_covered() {
-  for offset in $(printf '%s\n' "$VOTE_OFFSETS" | tr ',' ' '); do
-    [ "$offset" -ge "$MIN_LEAD" ] || die "VOTE_OFFSETS entry $offset is within $MIN_LEAD s of the flip, kept for the last blocks"
-    covered=no
-    for start in $1; do
-      [ "$offset" -lt "$start" ] && [ "$offset" -gt $((start - HORIZON)) ] && covered=yes
-    done
-    [ "$covered" = yes ] || die "VOTE_OFFSETS entry $offset is not within $HORIZON s after any SCHEDULES entry"
-  done
-}
-
-# check_last_blocks_covered STARTS: some schedule must start between MIN_LEAD and HORIZON before the flip, as that
-# execution votes in the last blocks.
-check_last_blocks_covered() {
-  covered=no
-  for start in $1; do
-    [ "$start" -ge "$MIN_LEAD" ] && [ "$start" -le "$HORIZON" ] && covered=yes
-  done
-  [ "$covered" = yes ] || die "no SCHEDULES entry starts between $MIN_LEAD and $HORIZON s before the flip"
-}
-
-# schedules: one "NAME<TAB>CRON" line per entry of SCHEDULES; NAME is $JOB-1, $JOB-2, ...
+# schedules: one "NAME<TAB>CRON" line per scheduler job, in UTC: ten minutes before the vote a day before the Thursday
+# 00:00 flip, and twenty minutes before the flip, for its last blocks; see src/schedule.ts.
 schedules() {
-  schedules_rest=$SCHEDULES
-  schedules_i=0
-  while [ -n "$schedules_rest" ]; do
-    schedules_i=$((schedules_i + 1))
-    case "$schedules_rest" in
-      *";"*) schedules_cron=${schedules_rest%%;*} schedules_rest=${schedules_rest#*;} ;;
-      *) schedules_cron=$schedules_rest schedules_rest='' ;;
-    esac
-    # Word splitting normalizes the spaces, so that check.sh compares what deploy.sh sent.
-    set -f
-    # shellcheck disable=SC2086
-    set -- $schedules_cron
-    set +f
-    printf '%s-%s\t%s\n' "$JOB" "$schedules_i" "$*"
-  done
+  printf '%s-1\t50 23 * * 2\n%s-2\t40 23 * * 3\n' "$JOB" "$JOB"
 }
 
-# stale_schedulers: scheduler jobs named $JOB-* that SCHEDULES no longer lists, space-separated.
+# stale_schedulers: scheduler jobs named $JOB-* that `schedules` does not list, space-separated.
 # Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"

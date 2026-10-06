@@ -1,3 +1,0 @@
-exit=1
---- output ---
-error: no SCHEDULES entry starts between 120 and 3600 s before the flip

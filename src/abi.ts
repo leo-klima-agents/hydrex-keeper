@@ -21,6 +21,8 @@ export const conduitAbi = parseAbi([
 
 export const voterAbi = parseAbi([
   "function _epochTimestamp() view returns (uint256)",
+  "function length() view returns (uint256)",
+  "function pools(uint256 index) view returns (address)",
   "function gauges(address pool) view returns (address)",
   "function isAlive(address gauge) view returns (bool)",
   "function weights(address pool) view returns (uint256)",

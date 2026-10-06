@@ -3,12 +3,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { getAddress } from "viem";
 import { connect, hostOf, now } from "./chain.ts";
 import { kmsAccount } from "./kms.ts";
-import { lastBlocks, WARMUP_MS } from "./last.ts";
+import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
 import { pass, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
-import { HORIZON, schedule } from "./schedule.ts";
+import { DAY, due, HORIZON } from "./schedule.ts";
 import { VoteSent } from "./vote.ts";
 import { parseWhitelist } from "./whitelist.ts";
 
@@ -23,10 +23,7 @@ async function main(): Promise<number> {
   const immediately = process.argv.includes("--now");
   const module = getAddress(required("MODULE"));
   const keyVersion = dryRun ? process.env.KMS_KEY_VERSION : required("KMS_KEY_VERSION");
-  const offsetFields = immediately ? [] : required("VOTE_OFFSETS").split(",");
-  if (!offsetFields.every((s) => /^[0-9]+$/.test(s))) throw new Error("VOTE_OFFSETS must be comma-separated seconds");
-  const offsets = offsetFields.map(BigInt);
-  const whitelist = parseWhitelist(readFileSync(new URL("../pools.json", import.meta.url), "utf8"));
+  const tokens = parseWhitelist(readFileSync(new URL("../tokens.json", import.meta.url), "utf8"));
 
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
@@ -48,44 +45,30 @@ async function main(): Promise<number> {
   }
   assertFresh(epoch);
   const { flip } = epoch;
-  const { times: due, last, note } = schedule(flip, offsets, now(), immediately);
-  if (note) log.warning(note, { flip });
-  const deadline = Number(flip) * 1000 - (last ? WARMUP_MS : LAST_MARGIN_MS);
-  const times = due.filter((time) => Number(time) * 1000 < deadline);
-  if (times.length < due.length)
-    log.warning("passes in the last blocks' warm-up skipped", { at: due.slice(times.length) });
-  if (times.length === 0 && !last) return 0;
-  const run: Run = { chain, whitelist, prices: priceFeed(source), account, dryRun };
-
-  let failed = 0;
-  for (const [i, time] of times.entries()) {
-    await sleep(Math.max(0, Number(time) * 1000 - Date.now()));
-    const until = i + 1 < times.length ? Number(times[i + 1]!) * 1000 : deadline;
-    if (Date.now() >= until) {
-      log.warning("pass skipped, overdue", { at: time, secondsToFlip: flip - now() });
-      continue;
-    }
-    log.info("pass", { at: time, flip, secondsToFlip: flip - now() });
-    for (let attempt = 1; ; attempt++) {
-      const started = Date.now();
-      try {
-        await pass(run, until);
-        log.info("pass done", { ms: Date.now() - started, secondsToFlip: flip - now() });
-        break;
-      } catch (error) {
-        const ms = Date.now() - started;
-        const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
-        log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
-        if (!retry) {
-          failed++;
-          break;
-        }
-        await sleep(RETRY_DELAY_MS);
-      }
+  const run: Run = { chain, tokens, prices: priceFeed(source), account, dryRun };
+  const what = immediately ? "day before" : due(flip, now());
+  if (what === "last blocks") return (await lastBlocks(run, flip)) ? 1 : 0;
+  if (!what) {
+    log.warning("nothing due: the job votes a day before the flip and in its last blocks", { flip });
+    return 0;
+  }
+  if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
+  const until = Number(flip) * 1000 - LAST_MARGIN_MS;
+  log.info("pass", { flip, secondsToFlip: flip - now() });
+  for (let attempt = 1; ; attempt++) {
+    const started = Date.now();
+    try {
+      await pass(run, until);
+      log.info("pass done", { ms: Date.now() - started });
+      return 0;
+    } catch (error) {
+      const ms = Date.now() - started;
+      const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
+      log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
+      if (!retry) return 1;
+      await sleep(RETRY_DELAY_MS);
     }
   }
-  if (last) failed += await lastBlocks(run, flip);
-  return failed ? 1 : 0;
 }
 
 function required(name: string): string {
