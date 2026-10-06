@@ -48,25 +48,21 @@ expect "job secrets" "$secrets" "$SECRETS"
 job_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
 expect_policy job "$job_policy" job.iam.json.tmpl
 
-# Schedules
-while IFS="$TAB" read -r name cron; do
-  if ! scheduler=$(describe_scheduler "$name"); then
-    fail "scheduler job $name not found; run deploy.sh"
-    continue
-  fi
-  require_json "$scheduler" "scheduler job $name"
-  expect "$name schedule" "$(json_field "$scheduler" .schedule)" "$cron"
-  expect "$name time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
-  expect "$name target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
-  expect "$name method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
-  expect "$name service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
-  expect "$name state" "$(json_field "$scheduler" .state)" "ENABLED"
+# Schedule
+if scheduler=$(describe_scheduler "$SCHEDULER"); then
+  require_json "$scheduler" "scheduler job $SCHEDULER"
+  expect "$SCHEDULER schedule" "$(json_field "$scheduler" .schedule)" "$SCHEDULE"
+  expect "$SCHEDULER time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
+  expect "$SCHEDULER target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
+  expect "$SCHEDULER method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
+  expect "$SCHEDULER service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
+  expect "$SCHEDULER state" "$(json_field "$scheduler" .state)" "ENABLED"
   retry='.retryConfig | "--max-retry-attempts=\(.retryCount // 0) --min-backoff=\(.minBackoffDuration)'
   retry="$retry"' --max-backoff=\(.maxBackoffDuration) --max-doublings=\(.maxDoublings) --max-retry-duration=\(.maxRetryDuration)"'
-  expect "$name retries" "$(json_field "$scheduler" "$retry")" "$SCHEDULER_RETRY_FLAGS"
-done <<LIST
-$(schedules)
-LIST
+  expect "$SCHEDULER retries" "$(json_field "$scheduler" "$retry")" "$SCHEDULER_RETRY_FLAGS"
+else
+  fail "scheduler job $SCHEDULER not found; run deploy.sh"
+fi
 stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 

@@ -46,9 +46,9 @@ job_json() {
 
 # scheduler_json NAME
 scheduler_json() {
-  case "$1" in "$job-1") cron='50 23 * * 2' ;; *) cron='40 23 * * 3' ;; esac
-  if [ "$drift" = yes ] && [ "$1" = "$job-2" ]; then state=PAUSED; else state=ENABLED; fi
-  if [ "$drift" = yes ] && [ "$1" = "$job-1" ]; then # Cloud Scheduler's defaults: no retry
+  cron='50 23 * * 2,3'
+  if [ "$drift" = yes ]; then state=PAUSED; else state=ENABLED; fi
+  if [ "$drift" = yes ]; then # Cloud Scheduler's defaults: no retry
     retry='{"maxBackoffDuration":"3600s","maxDoublings":5,"maxRetryDuration":"0s","minBackoffDuration":"5s"}'
   else
     retry='{"maxBackoffDuration":"60s","maxDoublings":2,"maxRetryDuration":"300s","minBackoffDuration":"15s","retryCount":3}'
@@ -239,8 +239,8 @@ case "$*" in
       exit 1
     }
     names=''
-    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/$job-2\""
-    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-3\",\"projects/$project/locations/$region/jobs/other-job\""
+    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\""
+    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-2\",\"projects/$project/locations/$region/jobs/other-job\""
     printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
     ;;
   "projects get-iam-policy "*)

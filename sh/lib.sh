@@ -9,13 +9,12 @@ cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis
 logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
-# Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the first pass.
+# Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the job has work to do.
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 MIN_KEEPER_WEI=1000000000000000 # 0.001 ETH: weeks of votes; check.sh fails below it
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
-TAB=$(printf '\t')
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 POLICY_DIR=$REPO_ROOT/policy
@@ -82,6 +81,10 @@ load_config() {
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
+  # Tuesday and Wednesday 23:50 UTC: ten minutes before the vote a day before the Thursday 00:00 flip, and before the
+  # last blocks; see src/schedule.ts.
+  SCHEDULER=$JOB-1
+  SCHEDULE="50 23 * * 2,3"
   # Sorted by name, as check.sh reads them back.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
   SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest,BASE_RPC_URLS=$RPC_SECRET:latest"
@@ -205,18 +208,11 @@ rpc() {
   die "$1 failed on every public Base node"
 }
 
-# schedules: one "NAME<TAB>CRON" line per scheduler job, in UTC: ten minutes before the vote a day before the Thursday
-# 00:00 flip, and twenty minutes before the flip, for its last blocks; see src/schedule.ts.
-schedules() {
-  printf '%s-1\t50 23 * * 2\n%s-2\t40 23 * * 3\n' "$JOB" "$JOB"
-}
-
-# stale_schedulers: scheduler jobs named $JOB-* that `schedules` does not list, space-separated.
+# stale_schedulers: scheduler jobs named $JOB-* other than $SCHEDULER, space-separated.
 # Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
-  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg configured "$(schedules | cut -f1)" '
-    [.[].name | split("/") | last | select(startswith($job + "-"))] - ($configured | split("\n"))
-    | join(" ")'
+  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg current "$SCHEDULER" '
+    [.[].name | split("/") | last | select(startswith($job + "-") and . != $current)] | join(" ")'
 }

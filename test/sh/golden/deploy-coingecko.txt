@@ -4,13 +4,11 @@ gcloud secrets versions list coingecko-api-key --project=hydrex-keeper-test --fo
 gcloud run jobs deploy hydrex-keeper --source=<repo> --region=us-central1 --project=hydrex-keeper-test --service-account=hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com --set-secrets=ALCHEMY_API_KEY=alchemy-api-key:latest,BASE_RPC_URLS=base-rpc-url:latest,COINGECKO_API_KEY=coingecko-api-key:latest --set-env-vars=KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1,MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 --task-timeout=5400s --max-retries=3 --tasks=1 --cpu=1 --memory=512Mi --quiet
 gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
 gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json
-gcloud scheduler jobs update http hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --schedule=50 23 * * 2 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
-gcloud scheduler jobs describe hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --format=json
-gcloud scheduler jobs update http hydrex-keeper-2 --location=us-central1 --project=hydrex-keeper-test --schedule=40 23 * * 3 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
+gcloud scheduler jobs update http hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --schedule=50 23 * * 2,3 --time-zone=Etc/UTC --uri=https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run --http-method=POST --oauth-service-account-email=hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com --description=starts hydrex-keeper before the Hydrex epoch flip --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 exit=0
 --- output ---
 == 1/3 job
 == 2/3 job IAM
 iam: hydrex-keeper unchanged
-== 3/3 schedules
+== 3/3 schedule

@@ -13,7 +13,7 @@ KMS key of [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and c
 
 ## How it votes
 
-Cloud Scheduler starts the job on Tuesday 23:50 and Wednesday 23:40 UTC. The first execution votes a day before the
+Cloud Scheduler starts the job at 23:50 UTC on Tuesday and Wednesday. The first execution votes a day before the
 Thursday 00:00 UTC epoch flip, as a fallback. The second votes again in the last two blocks before the flip.
 
 Both read this epoch's bribes and fees in every pool of Hydrex's Voter with a live gauge, keep those paid in the tokens
@@ -73,8 +73,7 @@ script is safe to re-run.
 5. **Fund the keeper.** Send ETH on Base to `KEEPER`, `0x625CF6663d9D090535FBd57680bFFE6fA0262434`. A vote costs about
    0.00005 ETH, so 0.005 ETH pays for about 100. The job refuses to vote with less than twice the cost of a vote.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build, deploys the job, lets only the scheduler's account
-   start it, and creates its two scheduler jobs, deleting stale ones. Re-run it after any change to `src/` or
-   `tokens.json`.
+   start it, and creates its scheduler job, deleting stale ones. Re-run it after any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs with KMS, but sends
    nothing. `sh/run.sh --now` votes. Read the logs in Cloud Run.
 8. **Check for drift.** `sh/check.sh` compares the project with `config.env` and `policy/`, read-only: service accounts,
