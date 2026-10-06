@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
-import { expected, proportional, select, waterFill, type Candidate } from "../src/select.ts";
+import { expected, proportional, select, toVote, waterFill, type Candidate } from "../src/select.ts";
 
 const A = "0x000000000000000000000000000000000000000a" as Address;
 const B = "0x000000000000000000000000000000000000000b" as Address;
@@ -33,12 +33,12 @@ test("water-filling matches a brute-force optimum for two pools", () => {
 test("all power goes to the only paying pool; nothing pays gives null", () => {
   assert.deepEqual(waterFill([candidate(A, 0, 10n), candidate(B, 5, 10n)], 100n), [0, 1]);
   assert.equal(waterFill([candidate(A, 0, 10n)], 100n), null);
-  assert.deepEqual(select([], 100n, waterFill), { fractions: null, vote: null });
+  assert.deepEqual(select([], 100n), { fractions: null, vote: null });
 });
 
 test("equal pools split equally and weights are basis points", () => {
   const candidates = [candidate(A, 10, 100n), candidate(B, 10, 100n), candidate(C, 0, 1n)];
-  const { fractions, vote } = select(candidates, 50n, waterFill);
+  const { fractions, vote } = select(candidates, 50n);
   assert.deepEqual(vote, { pools: [A, B], weights: [5000n, 5000n] });
   assert.deepEqual(fractions, waterFill(candidates, 50n), "the allocation it voted from");
 });
@@ -56,8 +56,7 @@ test("shares below a tenth of a percent are dropped and the rest re-solved", () 
 });
 
 test("keeps the current vote unless the gain is at least one percent", () => {
-  const voted = (a: bigint, b: bigint) =>
-    select([candidate(A, 10, 100n, a), candidate(B, 10, 100n, b)], 50n, waterFill).vote;
+  const voted = (a: bigint, b: bigint) => select([candidate(A, 10, 100n, a), candidate(B, 10, 100n, b)], 50n).vote;
   assert.equal(voted(25n, 25n), null, "already optimal");
   assert.equal(voted(26n, 24n), null, "within one percent");
   assert.deepEqual(voted(50n, 0n), { pools: [A, B], weights: [5000n, 5000n] }, "clearly better");
@@ -87,20 +86,17 @@ test("a vote names at most the 40 pools with the largest shares", () => {
 });
 
 test("proportional shares follow the rewards alone, without the smallest", () => {
-  assert.deepEqual(
-    proportional([candidate(A, 30, 1_000_000n), candidate(B, 10, 0n), candidate(C, 0, 0n)]),
-    [0.75, 0.25, 0],
-  );
-  assert.deepEqual(proportional([candidate(A, 9_995, 0n), candidate(B, 5, 0n)]), [1, 0], "under 0.1% is dropped");
-  assert.equal(proportional([candidate(A, 0, 0n)]), null);
-  const x = proportional(many(50))!;
+  assert.deepEqual(proportional([30, 10, 0]), [0.75, 0.25, 0]);
+  assert.deepEqual(proportional([9_995, 5]), [1, 0], "under 0.1% is dropped");
+  assert.equal(proportional([0]), null);
+  const x = proportional(Array.from({ length: 50 }, (_, i) => i + 1))!;
   assert.equal(x.filter((xi) => xi > 0).length, 40);
   assert.ok(Math.abs(x[49]! / x[10]! - 50 / 11) < 1e-9, "the rest keep their proportions");
 });
 
-test("a proportional vote is cast once: casting it again does not pay one percent more", () => {
-  const voted = (a: bigint, b: bigint) =>
-    select([candidate(A, 30, 100n, a), candidate(B, 10, 100n, b)], 100n, proportional).vote;
-  assert.deepEqual(voted(0n, 0n), { pools: [A, B], weights: [7500n, 2500n] });
-  assert.equal(voted(75n, 25n), null);
+test("a vote is in basis points, without the pools that get none", () => {
+  assert.deepEqual(toVote([{ pool: A }, { pool: B }, { pool: C }], [0.75, 0, 0.25]), {
+    pools: [A, C],
+    weights: [7500n, 2500n],
+  });
 });

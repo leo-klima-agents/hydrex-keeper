@@ -3,9 +3,9 @@ import { Blocks, sleep, watch } from "./blocks.ts";
 import { readMany, voterCall, WEEK } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Prices } from "./prices.ts";
-import { decide, tokensOf, type Run } from "./pass.ts";
-import { readRewards, readVotes, type PoolRewards } from "./read.ts";
-import { waterFill, type Vote } from "./select.ts";
+import { tokensOf, valueRewards, type Run } from "./pass.ts";
+import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
+import { expected, select, type Vote } from "./select.ts";
 import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
 const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
@@ -88,6 +88,21 @@ export async function race(flip: number, { blocks, plan, send }: Race, first?: P
   return sends;
 }
 
+/** The water-filling vote, or null to keep the current one. Logs each pool if `verbose`. */
+function decide(run: Run, { epoch, pools }: State, priced: Prices, verbose: boolean) {
+  assertFresh(epoch);
+  const usd = valueRewards(run, pools, priced, verbose);
+  const candidates = pools.map((p, i) => ({ ...p, rewardsUsd: usd[i]! }));
+  const { fractions, vote } = select(candidates, epoch.power);
+  const plan = (fractions ?? [])
+    .map((f, i) => ({ pool: candidates[i]!.pool, share: Math.round(f * 10_000) / 100 }))
+    .filter((p) => p.share > 0);
+  const expectedUsd = fractions ? expected(candidates, fractions, epoch.power) : 0;
+  const currentVote = pools.filter((p) => p.ownVotes > 0n).map((p) => ({ pool: p.pool, votes: p.ownVotes }));
+  const reason = fractions ? "keeping the current vote" : "no pool pays anything; keeping the current vote";
+  return { vote, reason, summary: { plan, expectedUsd, currentVote, power: epoch.power } };
+}
+
 /** Votes in each of the last two blocks before the flip, as late as each allows. Returns the number of failures. */
 export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   const { chain, account, dryRun } = run;
@@ -111,7 +126,7 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     const readAt = Date.now();
     const time = blocks.building(readAt) ?? readAt;
     const state = await readVotes(chain, rewards, "pending");
-    const { vote, reason, summary } = decide(run, state, priced, waterFill, verbose);
+    const { vote, reason, summary } = decide(run, state, priced, verbose);
     const base = { readAt, time, vote, note: reason, summary };
     if (!vote) return base;
     if (Number(state.epoch.lastVoted) * 1000 >= time) return { ...base, note: "already voted in this block" };

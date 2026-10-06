@@ -4,9 +4,6 @@ export type Candidate = { pool: Address; rewardsUsd: number; otherVotes: bigint;
 
 export type Vote = { pools: Address[]; weights: bigint[] };
 
-/** Fractions of `power` for the candidates, or null when nothing pays. */
-export type Strategy = (candidates: Candidate[], power: bigint) => number[] | null;
-
 const BPS = 10_000;
 const MIN_GAIN = 0.01; // re-vote only when the expected reward improves by this fraction
 const MIN_SHARE = 0.001; // pools that would get less are left out to save gas
@@ -28,13 +25,13 @@ function kept(x: number[]): boolean[] {
   return x.map((xi, i) => xi >= MIN_SHARE && largest.has(i));
 }
 
-/** In proportion to the rewards; the shares not kept are dropped and the rest scaled up. */
-export function proportional(candidates: Candidate[]): number[] | null {
+/** Shares in proportion to `rewards`; those not kept are dropped and the rest scaled up. Null when nothing pays. */
+export function proportional(rewards: number[]): number[] | null {
   const normalize = (xs: number[]) => {
     const total = xs.reduce((a, b) => a + b, 0);
     return total > 0 ? xs.map((x) => x / total) : null;
   };
-  const shares = normalize(candidates.map((c) => Math.max(c.rewardsUsd, 0)));
+  const shares = normalize(rewards.map((r) => Math.max(r, 0)));
   if (!shares) return null;
   const keep = kept(shares);
   return normalize(shares.map((share, i) => (keep[i] ? share : 0)));
@@ -43,7 +40,7 @@ export function proportional(candidates: Candidate[]): number[] | null {
 /**
  * Water-filling: the marginal reward B·V/(V + x)² of a pool falls as x grows, so the optimum gives every funded
  * pool the same marginal λ: x = max(0, √(B·V/λ) − V), with λ such that Σx = v. The shares not kept are dropped and
- * the rest re-solved.
+ * the rest re-solved. Returns fractions of `power`, or null when nothing pays.
  */
 export function waterFill(candidates: Candidate[], power: bigint): number[] | null {
   let x = solve(candidates, power);
@@ -75,20 +72,20 @@ function solve(candidates: Candidate[], power: bigint): number[] | null {
   return x.map((xi) => xi / total);
 }
 
-/** The allocation and the vote to cast; the vote is null when nothing pays or the gain is under MIN_GAIN. */
-export function select(
-  candidates: Candidate[],
-  power: bigint,
-  strategy: Strategy,
-): { fractions: number[] | null; vote: Vote | null } {
-  const fractions = strategy(candidates, power);
-  if (!fractions) return { fractions, vote: null };
+/** `fractions` of the votes on `pools`, in basis points; the pools that get none are left out. */
+export function toVote(pools: { pool: Address }[], fractions: number[]): Vote {
   const weights = fractions.map((f) => Math.round(f * BPS));
-  const rounded = weights.map((w) => w / BPS);
+  const funded = pools.flatMap((_, i) => (weights[i]! > 0 ? [i] : []));
+  return { pools: funded.map((i) => pools[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
+}
+
+/** The water-filling allocation and its vote; the vote is null when nothing pays or the gain is under MIN_GAIN. */
+export function select(candidates: Candidate[], power: bigint): { fractions: number[] | null; vote: Vote | null } {
+  const fractions = waterFill(candidates, power);
+  if (!fractions) return { fractions, vote: null };
+  const rounded = fractions.map((f) => Math.round(f * BPS) / BPS);
   const current = candidates.map((c) => Number(c.ownVotes) / Number(power));
   const next = expected(candidates, rounded, power);
   if (next - expected(candidates, current, power) <= MIN_GAIN * next) return { fractions, vote: null };
-  const funded = candidates.flatMap((_, i) => (weights[i]! > 0 ? [i] : []));
-  const vote = { pools: funded.map((i) => candidates[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
-  return { fractions, vote };
+  return { fractions, vote: toVote(candidates, fractions) };
 }

@@ -22,9 +22,10 @@ pools' rewards. The last pass splits them to maximise the expected reward: `x` v
 others and `usd` of rewards should earn `usd × x / (V + x)`. Either way, pools that would get less than 0.1% of the
 votes are left out, and so are all but the 40 with the largest shares: each pool voted for adds two bribe deposits to
 the transaction, a share that small earns almost nothing, and more pools could take a vote past the 16.8M gas a Base
-transaction may use. Votes do not carry over, so the first vote of an epoch is cast; a later one only if it pays at
-least 1% more. A vote's max fee is twice the base fee plus the tip; if either of the last two blocks was at least 90%
-full, the tip rises to the 99th percentile of their tips, up to 0.1 gwei.
+transaction may use. Votes do not carry over from one epoch to the next, so the vote a day before the flip is always
+cast; the last pass votes again only if that pays at least 1% more. A vote's max fee is twice the base fee plus the tip;
+if either of the last two blocks was at least 90% full, the tip rises to the 99th percentile of their tips, up to 0.1
+gwei.
 
 The last pass votes as late as possible, to see as many of the other votes as it can. It starts a minute before the
 flip: it reads and prices the rewards, then polls the block being built, which Base builds in sub-blocks about every 200
@@ -41,8 +42,8 @@ hour, and does nothing within the hour after the flip. Nothing is sent after the
 the flip, the last pass reads where its votes landed, and fails if one reverted before the flip, if it had nothing to
 send, or if the Voter shows no vote of the conduit this epoch.
 
-Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote. The last pass
-also logs the block timing it learned and what it sends in each block.
+Every log line is JSON: each pass logs each pool's rewards, the vote it prepares, and the recorded vote. The last pass
+also logs the votes on each pool, the block timing it learned and what it sends in each block.
 
 ## Trust
 

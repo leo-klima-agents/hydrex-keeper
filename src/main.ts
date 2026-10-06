@@ -44,6 +44,7 @@ async function main(): Promise<number> {
     return 0;
   }
   assertFresh(epoch);
+  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
   const { flip } = epoch;
   const run: Run = { chain, tokens, prices: priceFeed(source), account, dryRun };
   const what = immediately ? "day before" : due(flip, now());
