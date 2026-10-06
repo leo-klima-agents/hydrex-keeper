@@ -1,5 +1,5 @@
 import { erc20Abi, zeroAddress, type Address } from "viem";
-import { bribeAbi, veAbi, votedEvent } from "./abi.ts";
+import { bribeAbi, veAbi } from "./abi.ts";
 import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
 import { log } from "./log.ts";
 
@@ -54,43 +54,28 @@ export function assertFresh(epoch: Epoch): void {
 }
 
 export async function readLayout(chain: Chain, whitelist: Address[], blockTag?: "pending"): Promise<Layout> {
-  const { client } = chain;
-  const allGauges = await readMany<Address>(
-    client,
-    whitelist.map((pool) => voterCall(chain, "gauges", [pool])),
-    { blockTag },
-  );
+  const read = <T>(calls: Call[], lenient = false) => readMany<T>(chain.client, calls, { blockTag, lenient });
+  const allGauges = await read<Address>(whitelist.map((pool) => voterCall(chain, "gauges", [pool])));
   const missing = whitelist.filter((_, i) => allGauges[i] === zeroAddress);
   if (missing.length) log.warning("no gauge, skipping", { pools: missing });
   const pools = whitelist.filter((_, i) => allGauges[i] !== zeroAddress);
   const gauges = allGauges.filter((gauge) => gauge !== zeroAddress);
 
-  const bribes = await readMany<Address>(
-    client,
+  const bribes = await read<Address>(
     gauges.flatMap((gauge) => [
       voterCall(chain, "external_bribes", [gauge]),
       voterCall(chain, "internal_bribes", [gauge]),
     ]),
-    { blockTag },
   );
-  const lengths = await readMany<bigint>(
-    client,
-    bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")),
-    { blockTag },
-  );
+  const lengths = await read<bigint>(bribes.map((bribe) => bribeCall(bribe, "rewardsListLength")));
   const slots = bribes.flatMap((bribe, b) =>
     Array.from({ length: Number(lengths[b]) }, (_, j) => ({ pool: b >> 1, bribe, index: BigInt(j) })),
   );
-  const tokens = await readMany<Address>(
-    client,
-    slots.map((s) => bribeCall(s.bribe, "rewardTokens", [s.index])),
-    { blockTag },
-  );
+  const tokens = await read<Address>(slots.map((s) => bribeCall(s.bribe, "rewardTokens", [s.index])));
   const distinct = [...new Set(tokens.map((t) => t.toLowerCase() as Address))];
-  const decimals = await readMany<number | undefined>(
-    client,
+  const decimals = await read<number | undefined>(
     distinct.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
-    { blockTag, lenient: true },
+    true,
   );
   const decimalsOf = new Map(distinct.map((t, i) => [t, decimals[i] ?? 18]));
   const withTokens = slots.map(({ pool, bribe }, k) => {
@@ -144,14 +129,4 @@ export async function readPass(
     };
   });
   return { epoch, rewards };
-}
-
-/** Who voted in the block being built, and how much. */
-export async function readVoted({ client, voter }: Chain): Promise<{ voter: Address; weight: bigint }[]> {
-  const logs = await client.getLogs({ address: voter, event: votedEvent, fromBlock: "pending", toBlock: "pending" });
-  const byVoter = new Map<Address, bigint>();
-  for (const { args } of logs) {
-    if (args.voter) byVoter.set(args.voter, (byVoter.get(args.voter) ?? 0n) + (args.weight ?? 0n));
-  }
-  return [...byVoter].map(([voter, weight]) => ({ voter, weight }));
 }

@@ -3,8 +3,8 @@ import { Blocks, sleep, watch } from "./blocks.ts";
 import { readMany, voterCall, WEEK } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Prices } from "./prices.ts";
-import { decide, nameOf, readState, type Run, type State } from "./pass.ts";
-import { readVoted, type Layout } from "./read.ts";
+import { decide, readState, type Run } from "./pass.ts";
+import type { Layout } from "./read.ts";
 import type { Vote } from "./select.ts";
 import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
@@ -97,10 +97,8 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   // Every reward token of the layout, so that a bribe funded late in any of them counts.
   const reprice = async (until: number) => {
     pricedFor = run.layout;
-    priced = await run.prices(
-      run.layout!.slots.map((s) => s.token),
-      until,
-    );
+    const tokens = run.layout!.slots.map((s) => s.token);
+    priced = await run.prices(tokens, until);
   };
   // Prices fetched now are reused if every source fails during the warm-up.
   if (Date.now() < flipMs - WARMUP_MS) {
@@ -114,7 +112,6 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   let watching = true;
   void watch(chain.client, blocks, () => !watching);
   let failures = 0;
-  let latest: { readAt: number; state: State } | undefined;
 
   const plan = async (best: Plan | undefined, verbose = false): Promise<Plan> => {
     const readAt = Date.now();
@@ -124,17 +121,6 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
       void reprice(flipMs).catch((error: unknown) =>
         log.warning("new reward tokens not priced", { error: errorMessage(error) }),
       );
-    }
-    if (!latest || readAt > latest.readAt) {
-      const before = new Map(latest?.state.rewards.map((p) => [p.pool, p.otherVotes]));
-      const moved = state.rewards.flatMap((p) => {
-        const was = before.get(p.pool);
-        return was === undefined || was === p.otherVotes
-          ? []
-          : [{ pool: nameOf(run, p.pool), change: p.otherVotes - was }];
-      });
-      if (moved.length) log.info("others voted", { block: time / 1000, pools: moved });
-      latest = { readAt, state };
     }
     const { vote, reason, summary } = decide(run, state, priced, verbose);
     const base = { readAt, time, vote, note: reason, summary };
@@ -169,12 +155,6 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   const sending: Promise<void>[] = [];
   const send = (best: Plan | undefined, time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
-    void readVoted(chain).then(
-      (voted) => {
-        if (voted.length) log.info("votes in the block being built", { ...at, voted });
-      },
-      (error: unknown) => log.warning("votes in the block being built unread", { error: errorMessage(error) }),
-    );
     if (!best) {
       failures++;
       log.error("nothing planned in time", at);

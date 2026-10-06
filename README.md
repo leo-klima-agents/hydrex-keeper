@@ -42,7 +42,7 @@ last pass reads where its votes landed, and fails if one reverted before the fli
 Voter shows no vote of the conduit this epoch.
 
 Every log line is JSON: each pass logs each pool's rewards and votes, the decision, and the recorded vote. The last pass
-also logs the block timing it learned, the votes others add and who sent them, and what it sends in each block.
+also logs the block timing it learned and what it sends in each block.
 
 ## Trust
 

@@ -32,7 +32,7 @@ type Tx = {
 };
 
 /** The block a vote is for: its timestamp (s), and the conduit's `lastVoted` as read on it. */
-export type Target = { time: bigint; lastVoted: bigint };
+type Target = { time: bigint; lastVoted: bigint };
 
 export type Prepared = { tx: Tx; signed?: Hex | undefined; lastVoted?: bigint | undefined };
 
@@ -77,10 +77,9 @@ export async function prepareVote(
   // process sent, or at twice the fees over one of unknown fees. Once the Voter shows a later vote than the one the sent
   // vote was decided on, that vote is in a block, whatever the node says.
   const lastSent = lastSentBy.get(client);
-  const known = lastSent?.lastVoted;
-  const mined = lastSent && known !== undefined && target && target.lastVoted > known ? lastSent.nonce + 1 : 0;
-  const nonce = Math.max(latest, mined);
-  const queued = Math.max(pending, mined) > nonce;
+  const mined = target && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted;
+  const nonce = Math.max(latest, mined ? lastSent.nonce + 1 : 0);
+  const queued = pending > nonce;
   const own = lastSent?.nonce === nonce ? lastSent : undefined;
   const bump = (fee: bigint, sent?: bigint) =>
     sent !== undefined ? max(fee, (sent * 5n) / 4n) : queued ? fee * 2n : fee;

@@ -3,7 +3,7 @@ import type { Chain } from "./chain.ts";
 import { log } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { assertFresh, LayoutChanged, readLayout, readPass, type Layout } from "./read.ts";
-import { expected, select, type Candidate, type Vote } from "./select.ts";
+import { expected, select, type Candidate } from "./select.ts";
 import { castVote } from "./vote.ts";
 import type { Whitelist } from "./whitelist.ts";
 
@@ -16,13 +16,11 @@ export type Run = {
   dryRun: boolean;
 };
 
-export type State = Awaited<ReturnType<typeof readPass>>;
+type State = Awaited<ReturnType<typeof readPass>>;
 
-export type Decision = { vote: Vote | null; reason: string; summary: Record<string, unknown> };
+const tokensOf = ({ rewards }: State) => rewards.flatMap((p) => p.rewards.map((r) => r.token));
 
-export const tokensOf = ({ rewards }: State) => rewards.flatMap((p) => p.rewards.map((r) => r.token));
-
-export const nameOf = ({ whitelist }: Run, pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
+const nameOf = ({ whitelist }: Run, pool: Address) => whitelist.find((w) => w.pool === pool)?.name ?? pool;
 
 export async function readState(run: Run, blockTag?: "pending"): Promise<State> {
   const { chain, whitelist } = run;
@@ -39,7 +37,7 @@ export async function readState(run: Run, blockTag?: "pending"): Promise<State> 
 }
 
 /** The vote that maximises the expected reward, or null to keep the current one. Logs each pool if `verbose`. */
-export function decide(run: Run, state: State, priced: Prices, verbose: boolean): Decision {
+export function decide(run: Run, state: State, priced: Prices, verbose: boolean) {
   const { epoch, rewards } = state;
   assertFresh(epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");

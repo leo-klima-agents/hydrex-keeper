@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroAddress, type Address } from "viem";
 import { readMany, WEEK, type Chain, type Client } from "../src/chain.ts";
-import { LayoutChanged, readEpoch, readLayout, readPass, readVoted } from "../src/read.ts";
+import { LayoutChanged, readEpoch, readLayout, readPass } from "../src/read.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [VOTER, CONDUIT, VE] = [addr(1), addr(2), addr(97)] as const;
@@ -193,25 +193,4 @@ test("readEpoch reads the epoch and the power at the calendar epoch in one round
   assert.deepEqual(await readEpoch(chain), epoch);
   assert.equal(multicalls, 1);
   assert.equal(calendarAt, 1_790_812_800n);
-});
-
-test("readVoted sums the Voted events of the block being built by voter", async () => {
-  const chain = fakeChain(table);
-  const [A, B] = [addr(50), addr(51)];
-  chain.client.getLogs = (async ({
-    address,
-    fromBlock,
-    toBlock,
-  }: {
-    address: Address;
-    fromBlock: string;
-    toBlock: string;
-  }) => {
-    assert.deepEqual([address, fromBlock, toBlock], [VOTER, "pending", "pending"]);
-    return [{ args: { voter: A, weight: 2n } }, { args: { voter: B, weight: 5n } }, { args: { voter: A, weight: 3n } }];
-  }) as never;
-  assert.deepEqual(await readVoted(chain), [
-    { voter: A, weight: 5n },
-    { voter: B, weight: 5n },
-  ]);
 });

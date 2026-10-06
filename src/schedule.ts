@@ -19,8 +19,8 @@ type Schedule = { times: bigint[]; last: boolean; note?: string };
  * last blocks, which it does when the flip is within the horizon.
  */
 export function schedule(flip: bigint, offsets: bigint[], at: bigint, immediately: boolean): Schedule {
-  const last = !immediately && flip > at && flip - at <= HORIZON;
-  if (immediately) return { times: [at], last };
+  if (immediately) return { times: [at], last: false };
+  const last = flip > at && flip - at <= HORIZON;
   const times = passTimes(flip, offsets, at);
   if (times.length) return { times, last };
   if (flip > at && missed(flip, offsets, at)) return { times: [at], last, note: "running the missed pass now" };

@@ -6,10 +6,10 @@ const SEND_MARGIN_MS = 200; // polls see a sub-block up to POLL_MS late, and a v
 const POLL_MS = 50;
 const POLL_TIMEOUT_MS = 500;
 
-export type Header = { number: bigint; timestamp: bigint; txs: number };
+type Header = { number: bigint; timestamp: bigint; txs: number };
 
 /** In ms: blocks are `gap` apart, at most `maxGap`; each is sealed `seal` after its timestamp. */
-export type Timing = { gap: number; maxGap: number; seal: number; lead: number };
+type Timing = { gap: number; maxGap: number; seal: number; lead: number };
 
 type Seen = { time: number; txs: number; changes: number[] };
 
