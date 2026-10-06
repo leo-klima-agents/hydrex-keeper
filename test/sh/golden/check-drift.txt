@@ -1,6 +1,6 @@
 gcloud run jobs describe hydrex-keeper --region=us-central1 --project=hydrex-keeper-test --format=json
 gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
-gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json
+gcloud scheduler jobs describe hydrex-keeper --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud secrets versions list base-rpc-url --project=hydrex-keeper-test --format=json
 gcloud secrets get-iam-policy --project=hydrex-keeper-test base-rpc-url --format=json
@@ -38,14 +38,14 @@ FAIL: job IAM policy differs from template
 -  ]
 +  "bindings": []
  }
-ok: hydrex-keeper-1 schedule is 50 23 * * 2,3
-ok: hydrex-keeper-1 time zone is Etc/UTC
-ok: hydrex-keeper-1 target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
-ok: hydrex-keeper-1 method is POST
-ok: hydrex-keeper-1 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
-FAIL: hydrex-keeper-1 state is PAUSED, expected ENABLED
-FAIL: hydrex-keeper-1 retries is --max-retry-attempts=0 --min-backoff=5s --max-backoff=3600s --max-doublings=5 --max-retry-duration=0s, expected --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
-FAIL: stale scheduler jobs: hydrex-keeper-2
+ok: schedule is 50 23 * * 2,3
+ok: schedule time zone is Etc/UTC
+ok: schedule target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
+ok: schedule method is POST
+ok: schedule service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
+FAIL: schedule state is PAUSED, expected ENABLED
+FAIL: schedule retries is --max-retry-attempts=0 --min-backoff=5s --max-backoff=3600s --max-doublings=5 --max-retry-duration=0s, expected --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
+FAIL: stale scheduler jobs: hydrex-keeper-1
 ok: base-rpc-url has an enabled version
 FAIL: base-rpc-url IAM policy differs from template
 @@ -2,7 +2,8 @@
@@ -82,4 +82,4 @@ FAIL: "hydrex-keeper failed" does not notify hydrex-admin@example.com
 ok: "hydrex-keeper failed" filter is metric.type="run.googleapis.com/job/completed_task_attempt_count" AND resource.type="cloud_run_job" AND resource.labels.job_name="hydrex-keeper" AND metric.labels.result="failed"
 ok: "hydrex-keeper start failed" enabled is true
 ok: "hydrex-keeper start failed" notifies hydrex-admin@example.com
-FAIL: "hydrex-keeper start failed" filter is resource.type="cloud_scheduler_job", expected resource.type="cloud_scheduler_job" AND resource.labels.job_id=~"^hydrex-keeper-[0-9]+$" AND jsonPayload.@type="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished" AND (severity>=ERROR OR httpRequest.status>=400)
+FAIL: "hydrex-keeper start failed" filter is resource.type="cloud_scheduler_job", expected resource.type="cloud_scheduler_job" AND resource.labels.job_id="hydrex-keeper" AND jsonPayload.@type="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished" AND (severity>=ERROR OR httpRequest.status>=400)

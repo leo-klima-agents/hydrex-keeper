@@ -1,6 +1,6 @@
 gcloud run jobs describe hydrex-keeper --region=us-central1 --project=hydrex-keeper-test --format=json
 gcloud run jobs get-iam-policy --region=us-central1 --project=hydrex-keeper-test hydrex-keeper --format=json
-gcloud scheduler jobs describe hydrex-keeper-1 --location=us-central1 --project=hydrex-keeper-test --format=json
+gcloud scheduler jobs describe hydrex-keeper --location=us-central1 --project=hydrex-keeper-test --format=json
 gcloud scheduler jobs list --location=us-central1 --project=hydrex-keeper-test --format=json
 exit=1
 --- output ---
@@ -12,12 +12,12 @@ ok: job containers is 1
 ok: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1,MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
 ok: job secrets is ALCHEMY_API_KEY=alchemy-api-key:latest,BASE_RPC_URLS=base-rpc-url:latest
 ok: job IAM policy matches template
-ok: hydrex-keeper-1 schedule is 50 23 * * 2,3
-ok: hydrex-keeper-1 time zone is Etc/UTC
-ok: hydrex-keeper-1 target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
-ok: hydrex-keeper-1 method is POST
-ok: hydrex-keeper-1 service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
-ok: hydrex-keeper-1 state is ENABLED
-ok: hydrex-keeper-1 retries is --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
+ok: schedule is 50 23 * * 2,3
+ok: schedule time zone is Etc/UTC
+ok: schedule target is https://run.googleapis.com/v2/projects/hydrex-keeper-test/locations/us-central1/jobs/hydrex-keeper:run
+ok: schedule method is POST
+ok: schedule service account is hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com
+ok: schedule state is ENABLED
+ok: schedule retries is --max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s
 ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED
 error: cannot list scheduler jobs

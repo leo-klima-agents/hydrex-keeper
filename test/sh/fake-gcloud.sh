@@ -96,7 +96,7 @@ alert_json() {
 }
 
 start_alert_json() {
-  filter="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^$job-[0-9]+\$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
+  filter="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"$job\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
   [ "$drift" = no ] || filter='resource.type="cloud_scheduler_job"' # edited by hand
   jq -nc --arg name "$job start failed" --arg filter "$filter" --arg channel "$channel" --arg project "$project" \
     '{displayName: $name, enabled: true, name: "projects/\($project)/alertPolicies/2", notificationChannels: [$channel], conditions: [{conditionMatchedLog: {filter: $filter}}]}'
@@ -239,8 +239,8 @@ case "$*" in
       exit 1
     }
     names=''
-    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job-1\""
-    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-2\",\"projects/$project/locations/$region/jobs/other-job\""
+    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job\""
+    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/other-job\""
     printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
     ;;
   "projects get-iam-policy "*)

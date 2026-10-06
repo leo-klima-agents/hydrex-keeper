@@ -24,15 +24,15 @@ job_policy=$(render_policy job.iam.json.tmpl)
 set_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" "$job_policy" run jobs
 
 log "== 3/3 schedule"
-if scheduler=$(describe_scheduler "$SCHEDULER"); then verb=update; else verb=create; fi
+if scheduler=$(describe_scheduler "$JOB"); then verb=update; else verb=create; fi
 # shellcheck disable=SC2086
-gcloud scheduler jobs "$verb" http "$SCHEDULER" --location="$REGION" --project="$KEEPER_PROJECT" \
+gcloud scheduler jobs "$verb" http "$JOB" --location="$REGION" --project="$KEEPER_PROJECT" \
   --schedule="$SCHEDULE" --time-zone=Etc/UTC --uri="$RUN_URI" --http-method=POST \
   --oauth-service-account-email="$SCHEDULER_SA" --description="starts $JOB before the Hydrex epoch flip" \
   $SCHEDULER_RETRY_FLAGS
 if [ "$verb" = update ] && [ "$(json_field "$scheduler" .state)" = PAUSED ]; then
-  log "resuming $SCHEDULER"
-  gcloud scheduler jobs resume "$SCHEDULER" --location="$REGION" --project="$KEEPER_PROJECT"
+  log "resuming the schedule"
+  gcloud scheduler jobs resume "$JOB" --location="$REGION" --project="$KEEPER_PROJECT"
 fi
 stale=$(stale_schedulers)
 for name in $stale; do

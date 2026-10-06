@@ -49,19 +49,19 @@ job_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run job
 expect_policy job "$job_policy" job.iam.json.tmpl
 
 # Schedule
-if scheduler=$(describe_scheduler "$SCHEDULER"); then
-  require_json "$scheduler" "scheduler job $SCHEDULER"
-  expect "$SCHEDULER schedule" "$(json_field "$scheduler" .schedule)" "$SCHEDULE"
-  expect "$SCHEDULER time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
-  expect "$SCHEDULER target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
-  expect "$SCHEDULER method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
-  expect "$SCHEDULER service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
-  expect "$SCHEDULER state" "$(json_field "$scheduler" .state)" "ENABLED"
+if scheduler=$(describe_scheduler "$JOB"); then
+  require_json "$scheduler" "scheduler job $JOB"
+  expect "schedule" "$(json_field "$scheduler" .schedule)" "$SCHEDULE"
+  expect "schedule time zone" "$(json_field "$scheduler" .timeZone)" "Etc/UTC"
+  expect "schedule target" "$(json_field "$scheduler" .httpTarget.uri)" "$RUN_URI"
+  expect "schedule method" "$(json_field "$scheduler" .httpTarget.httpMethod)" "POST"
+  expect "schedule service account" "$(json_field "$scheduler" .httpTarget.oauthToken.serviceAccountEmail)" "$SCHEDULER_SA"
+  expect "schedule state" "$(json_field "$scheduler" .state)" "ENABLED"
   retry='.retryConfig | "--max-retry-attempts=\(.retryCount // 0) --min-backoff=\(.minBackoffDuration)'
   retry="$retry"' --max-backoff=\(.maxBackoffDuration) --max-doublings=\(.maxDoublings) --max-retry-duration=\(.maxRetryDuration)"'
-  expect "$SCHEDULER retries" "$(json_field "$scheduler" "$retry")" "$SCHEDULER_RETRY_FLAGS"
+  expect "schedule retries" "$(json_field "$scheduler" "$retry")" "$SCHEDULER_RETRY_FLAGS"
 else
-  fail "scheduler job $SCHEDULER not found; run deploy.sh"
+  fail "scheduler job $JOB not found; run deploy.sh"
 fi
 stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi

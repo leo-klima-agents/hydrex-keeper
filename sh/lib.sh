@@ -83,7 +83,6 @@ load_config() {
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
   # Tuesday and Wednesday 23:50 UTC: ten minutes before the vote a day before the Thursday 00:00 flip, and before the
   # last blocks; see src/schedule.ts.
-  SCHEDULER=$JOB-1
   SCHEDULE="50 23 * * 2,3"
   # Sorted by name, as check.sh reads them back.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
@@ -97,7 +96,7 @@ load_config() {
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
   # Cloud Scheduler logs an AttemptFinished entry for each attempt to start the job, at ERROR if it failed.
   START_ALERT_NAME="$JOB start failed"
-  START_ALERT_FILTER="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=~\"^$JOB-[0-9]+\$\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
+  START_ALERT_FILTER="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"$JOB\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
 }
 
 # render_policy FILE: policy/FILE with the service accounts filled in.
@@ -208,11 +207,10 @@ rpc() {
   die "$1 failed on every public Base node"
 }
 
-# stale_schedulers: scheduler jobs named $JOB-* other than $SCHEDULER, space-separated.
+# stale_schedulers: scheduler jobs named $JOB-*, as older versions named them, space-separated.
 # Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"
-  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" --arg current "$SCHEDULER" '
-    [.[].name | split("/") | last | select(startswith($job + "-") and . != $current)] | join(" ")'
+  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" '[.[].name | split("/") | last | select(startswith($job + "-"))] | join(" ")'
 }
