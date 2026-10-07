@@ -63,8 +63,17 @@ function fakeChain(b: Behaviour = {}) {
     },
     getBalance: async () => 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
-    waitForTransactionReceipt: async ({ hash, timeout }: { hash: Hex; timeout: number }) => {
+    waitForTransactionReceipt: async ({
+      hash,
+      timeout,
+      confirmations,
+    }: {
+      hash: Hex;
+      timeout: number;
+      confirmations: number;
+    }) => {
       assert.ok(timeout >= 1 && timeout <= 60_000);
+      assert.equal(confirmations, 2, "waits for a block on top of the receipt's, so that verification can read it");
       if (b.receipt === "timeout") throw new WaitForTransactionReceiptTimeoutError({ hash });
       return { status: b.receipt ?? "success", blockNumber: 42n, transactionHash: b.minedHash ?? hash };
     },

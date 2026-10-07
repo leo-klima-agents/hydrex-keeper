@@ -145,7 +145,8 @@ export async function castVote(
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
   try {
-    receipt = await chain.client.waitForTransactionReceipt({ hash, timeout });
+    // Base RPCs return receipts from the block being built, which cannot be read yet; one block on top seals it.
+    receipt = await chain.client.waitForTransactionReceipt({ hash, timeout, confirmations: 2 });
   } catch (error) {
     if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
       throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
