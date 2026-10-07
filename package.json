@@ -1,0 +1,11 @@
+{
+  "name": "lokal-circles-analysis",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "onchain": "node scripts/onchain-check.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.0.0"
+  }
+}

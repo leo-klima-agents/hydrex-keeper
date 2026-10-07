@@ -1,0 +1,219 @@
+{
+  "takenAt": "2026-10-07T15:14:05.000Z",
+  "block": 48636816,
+  "group": {
+    "blockNumber": 47333962,
+    "timestamp": 1784726900,
+    "transactionIndex": 0,
+    "logIndex": 15,
+    "transactionHash": "0x62c34c673e77241768d723acd7eecd4d69a0663ea4fc4052be4b1bc7f06fc3d3",
+    "group": "0x75b812a7bfb0a3580b32caf2a2c201d6e0fac5b3",
+    "type": "CrcV2_BaseGroupCreated",
+    "owner": "0x3e4fd8c6971b0b2b578c1dda8eaeb378fbdf727c",
+    "mintPolicy": "0xcdfc5135aec0afbf102c108e7f5c8a88c6112842",
+    "mintHandler": "0x3c32bf238c4bf2358ad220e7a252a4fe37c9534d",
+    "treasury": "0x96657f946d391b01b51b0fe84998128023931db6",
+    "service": "0x488cbd83f514aa1605e59d4e51bd36427a25e69b",
+    "feeCollection": "0x3e4fd8c6971b0b2b578c1dda8eaeb378fbdf727c",
+    "memberCount": 289,
+    "name": "Psst",
+    "symbol": "KIEZ0",
+    "cidV0Digest": "0x98a557e3beb0b369eeacf99539b8cd2319041bb6e2ede11cd952a536fbac18b4",
+    "erc20WrapperDemurraged": "0xd433fdb8861e86a827c25740b07452ecdca30a67",
+    "erc20WrapperStatic": "0x3291a64b391dd3b77425005ccaebd88faceda0a3",
+    "profile": {
+      "address": "0x75b812a7bfb0a3580b32caf2a2c201d6e0fac5b3",
+      "name": "Psst",
+      "groupType": "open",
+      "description": "-",
+      "membershipCriteria": {
+        "minRepScore": 0,
+        "membershipFee": 0
+      },
+      "shortName": "adpdNvsNZwRN",
+      "avatarType": "CrcV2_RegisterGroup"
+    }
+  },
+  "groupsTrustedBy": [
+    "0x96657f946d391b01b51b0fe84998128023931db6"
+  ],
+  "members": {
+    "count": 289,
+    "nonSelfOutgoingTrusts": 1,
+    "nonSelfOutgoingTrustsToOtherMembers": 0,
+    "incomingTrustByTruster": {
+      "0x00738aca013b7b2e6cfe1690f0021c3182fa40b5": 289,
+      "0x20ec0a8a5e2209097df0a30f47106cdf3a2443a6": 182,
+      "0xdc287474114cc0551a81ddc2eb51783fbf34802f": 289,
+      "0x75b812a7bfb0a3580b32caf2a2c201d6e0fac5b3": 289,
+      "0x3c32bf238c4bf2358ad220e7a252a4fe37c9534d": 289,
+      "0xd17f726251890c603beba290789ad31237c57ce2": 3,
+      "0xd542d6e2f6eeabd54e7e39b16f1c454feee8e370": 3,
+      "0x5633ee2d9f5db44c1658f71543cff22bcd8f971a": 107
+    },
+    "distinctRegisterHumanInviters": 289,
+    "publiclyNamedProfiles": [
+      "LOKAL TEST ACCOUNT (alpha) - not a real neighbour",
+      "LOKAL TEST ACCOUNT (bravo) - not a real neighbour",
+      "LOKAL TEST ACCOUNT (charlie) - not a real neighbour"
+    ]
+  },
+  "safes": {
+    "count": 289,
+    "thresholdOne": 289,
+    "ownedOnlyByDeadAddress": 7,
+    "ownersAreEoasInFirst25": true,
+    "moduleSets": {
+      "0x00738aca013b7b2e6cfe1690f0021c3182fa40b5,0x75cf11467937ce3f2f357ce24ffc3dbf8fd5c226": 289
+    }
+  },
+  "autoInviteBot": {
+    "address": "0x5633eE2D9F5DB44C1658F71543CfF22BCD8f971A",
+    "owner": "0x3E4fD8C6971B0b2B578c1ddA8EaeB378fBdf727c",
+    "permitSigner": "0x627a6f3d6a627e20469058E5E4387544544E9387",
+    "farm": "0xd28b7C4f148B1F1E190840A1f7A796C5525D8902",
+    "invitationModule": "0x00738aca013B7B2e6cfE1690F0021C3182Fa40B5",
+    "remainingInviteQuota": 1901,
+    "invitationFeeCrc": 96,
+    "permitMaxTtlSeconds": 3600,
+    "isCirclesHuman": true
+  },
+  "legacyAutoInviteBot": {
+    "address": "0x20ec0a8a5e2209097df0a30f47106cdf3a2443a6",
+    "owner": "0xCfDC9fB089510A9cB6641D236a5A6f2B89521aAF",
+    "remainingInviteQuota": 0
+  },
+  "groupService": {
+    "address": "0x488CBD83f514aa1605e59d4e51bd36427a25E69B",
+    "group": "0x75b812a7bFb0a3580b32CaF2A2C201D6e0FaC5b3",
+    "permitSigner": "0x627a6f3d6a627e20469058E5E4387544544E9387",
+    "permitMaxTtlSeconds": 3600
+  },
+  "invitationModule": "0x00738aca013B7B2e6cfE1690F0021C3182Fa40B5",
+  "tills": [
+    {
+      "shop": "Barkin Kitchen",
+      "address": "0x49a0d31ba28631AeaA52aCA1E03F5aF172Bc0e44",
+      "kiez0": 129.1270774491883,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Filmkunstbar Fitzcarraldo",
+      "address": "0xd06Dc92f099ECAc2A5FAF27666f433E3A4059f46",
+      "kiez0": 159.936432557787,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Adore",
+      "address": "0x553b06464fC6B2B4594f50356F4458E6F8B730bB",
+      "kiez0": 95.85705184296798,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Dirty Dumplings",
+      "address": "0x01B9876bA30BfB53882E1CA86C8B9B6965d62d06",
+      "kiez0": 558.5558261416173,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Smooches Sandwiches",
+      "address": "0x5Eb55c58f1b1708Bd1aCD85c36D4e434aC12ABd4",
+      "kiez0": 199.365377200596,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Villa Di Wow",
+      "address": "0xf024E2bAfcd33B1AA09698E34469Ee5003eF9512",
+      "kiez0": 518.5564212672837,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Gästeblock",
+      "address": "0x4e7f83911a9e1B1568EA1518F9b2200927dDDe12",
+      "kiez0": 1195.0035002939287,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Darfur",
+      "address": "0x4C6685202EFDD13C59fDeB88D0Bd2DAbD5827dC9",
+      "kiez0": 836.7981569191201,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "YiLa Nudel",
+      "address": "0x2A5B07Df2A63193C0d7E7BdC1c1353A836dcA7eA",
+      "kiez0": 198.65347984393821,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Matreshka",
+      "address": "0x05A30c4cDE21D6A23CE7114Fb07EdcAf112EF90f",
+      "kiez0": 39.785991797306714,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Full Node",
+      "address": "0x65Bcf5D95B421b7541471D4e5f565C2542eF07c1",
+      "kiez0": 502.5621461707174,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Café Filou",
+      "address": "0x869C748586eFc236A8bE86D162167b105cc7e9c0",
+      "kiez0": 208.22103186601186,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Café Fleurs",
+      "address": "0xeFD6406538b01dF95D4279A5271AF6c8DFa32686",
+      "kiez0": 287.6555033796653,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Pizza Back Kiez",
+      "address": "0x2977052E8BCf3c2797CD191ac79DA11f70Ca0630",
+      "kiez0": 318.5036912218847,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    },
+    {
+      "shop": "Bagel Bro",
+      "address": "0xf49E64a99C74cC45E21990c34480FE272648bdE9",
+      "kiez0": 794.4852197691589,
+      "circlesHuman": false,
+      "circlesOrg": false,
+      "isContract": false
+    }
+  ],
+  "kiez0": {
+    "totalSupply": 6177.29420624369,
+    "heldByTills": 6043.066907721172
+  }
+}
