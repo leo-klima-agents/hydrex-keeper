@@ -38,9 +38,10 @@ that was ready, from an earlier read or from the minute before.
 
 A failing vote a day before the flip is tried up to three times. If it still fails, the execution exits non-zero, an
 email alert fires, and Cloud Run restarts it up to three times. A restart runs that vote if it fell due within the past
-hour, and does nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway. After
-the flip, the last pass reads where its votes landed, and fails if one reverted before the flip, if it had nothing to
-send, or if the Voter shows no vote of the conduit this epoch.
+hour, and does nothing within the hour after the flip. Nothing is sent after the flip; voting then reverts anyway. The
+last pass fails if no RPC accepts a vote, unless an earlier vote landed first under the same nonce. After the flip, it
+reads where its votes landed, and fails if one reverted before the flip, if it had nothing to send, or if the Voter
+shows no vote of the conduit this epoch.
 
 Every log line is JSON: each pass logs each pool's rewards, the vote it prepares, and the recorded vote. The last pass
 also logs the votes on each pool, the block timing it learned and what it sends in each block.
@@ -72,7 +73,8 @@ script is safe to re-run.
    Alchemy API key to `alchemy-api-key` the same way, and a CoinGecko Demo API key if `COINGECKO_SECRET` is set. Several
    RPC URLs can be given, separated by commas. Public nodes, which rate-limit, are tried after them.
 5. **Fund the keeper.** Send ETH on Base to `KEEPER`, `0x625CF6663d9D090535FBd57680bFFE6fA0262434`. A vote costs about
-   0.00005 ETH, so 0.005 ETH pays for about 100. The job refuses to vote with less than twice the cost of a vote.
+   0.00005 ETH, so 0.005 ETH pays for about 100. The job refuses a vote unless the keeper could pay its maximum cost
+   twice, which leaves enough for the last blocks; in the last blocks, once.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build, deploys the job, lets only the scheduler's account
    start it, and creates its scheduler job, deleting stale ones. Re-run it after any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs with KMS, but sends
