@@ -55,10 +55,11 @@ test("shares below a tenth of a percent are dropped and the rest re-solved", () 
   assert.deepEqual(percents, [50, 50, 0]);
 });
 
-test("keeps the current vote unless the gain is at least one percent", () => {
-  const voted = (a: bigint, b: bigint) => select([candidate(A, 10, 100n, a), candidate(B, 10, 100n, b)], 50n).vote;
+test("keeps the current vote unless the gain is at least a dollar", () => {
+  const voted = (a: bigint, b: bigint) => select([candidate(A, 1000, 100n, a), candidate(B, 1000, 100n, b)], 50n).vote;
   assert.equal(voted(25n, 25n), null, "already optimal");
-  assert.equal(voted(26n, 24n), null, "within one percent");
+  assert.equal(voted(28n, 22n), null, "within a dollar");
+  assert.deepEqual(voted(29n, 21n), { pools: [A, B], weights: [5000n, 5000n] }, "over a dollar");
   assert.deepEqual(voted(50n, 0n), { pools: [A, B], weights: [5000n, 5000n] }, "clearly better");
   assert.deepEqual(voted(0n, 0n)?.weights, [5000n, 5000n], "first vote of the epoch");
 });

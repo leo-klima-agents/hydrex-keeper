@@ -16,7 +16,7 @@ Tuesday and on Wednesday.
 - **In the last two blocks before the flip**, it votes for the largest expected reward: `x` votes on a pool with `V`
   votes from others and `usd` of rewards earn `usd × x / (V + x)`. It reads the block being built, with the votes others
   sent so far, and sends each vote about 0.8 s before its block's timestamp; if reads or signing fail, it sends the
-  latest vote it has ready. It replaces the vote in force only if that pays at least 1% more.
+  latest vote it has ready. It replaces the vote in force only if that pays at least $1 more.
 
 Rewards are this epoch's bribes and fees in every pool with a live gauge, counted only in the tokens of `tokens.json`
 and priced in USD. A vote leaves out pools that would get less than 0.1% of the votes, and all but the 40 largest: each
