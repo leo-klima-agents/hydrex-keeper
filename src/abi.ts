@@ -11,6 +11,7 @@ export const moduleAbi = parseAbi([
   "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
   "error EpochFlipInProgress()",
   "error VoteDelayNotMet()",
+  "error EpochStale()",
   "error InsufficientVotingPower()",
 ]);
 
