@@ -2,10 +2,9 @@
 
 A static page where holders of vote-escrowed positions on metaDEXes hand their votes and rewards to a relay, and take
 them back. Hydrex calls these relays conduits; Aerodrome and Velodrome call them relays. Version 1 supports one:
-Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The same static build is served from GitHub Pages
-(or a similar host), so that Safe{Wallet} can open it as a Safe App, and from IPFS through an ENS name on eth.limo. This
-plan is for the agent that builds it. The facts below were checked on Base on 2026-10-15; check them again before
-relying on them.
+Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The same static build is served from GitHub Pages,
+so that Safe{Wallet} can open it as a Safe App, and from IPFS through an ENS name on eth.limo. This plan is for the
+agent that builds it. The facts below were checked on Base on 2026-10-15; check them again before relying on them.
 
 ## Why it exists
 
@@ -170,9 +169,8 @@ already finds MetaMask's extension, `baseAccount` because `coinbaseWallet` reach
 - **GitHub Pages:** sends `Access-Control-Allow-Origin: *` and no framing headers. In the same test, a live GitHub Pages
   site (`pages-themes.github.io/minimal`) loaded inside Safe{Wallet}'s frame. pages.github.com did not, apparently
   because of that page's own scripts, so test this page in Safe{Wallet} early.
-- **So:** the page runs as a Safe App from GitHub Pages or a similar host, and from eth.limo only as a normal page.
-- **Clickjacking:** eth.limo's headers stop other sites from framing the page; GitHub Pages lets any site frame it. See
-  [Content Security Policy](#content-security-policy).
+- **So:** the page runs as a Safe App from GitHub Pages, and from eth.limo only as a normal page. Other sites can frame
+  it on GitHub Pages too; see [Copies and framing](#copies-and-framing).
 
 ## Principles
 
@@ -303,7 +301,8 @@ The page lists relays. Version 1 lists one, Carbon Impact; design for several an
    - Hydrex can change these settings.
    - Leaving is one transaction, at any time.
    - Link each contract to Basescan and each repository to GitHub.
-6. **Footer:** the version, commit and CID; how to check them; links to the repositories.
+6. **Footer:** the official addresses of the page, the version, commit and CID, how to check them, and links to the
+   repositories.
 
 The page never mentions that Hydrex's automations ended, and shows no payout history.
 
@@ -351,19 +350,25 @@ connect-src <RPC origins> <wallet SDK origins>; frame-src <wallet SDK origins>; 
 
 - **Wallet origins:** take each SDK's origins from its documentation, then confirm them in the browser. Every wallet
   must work, and the console must show no CSP violation the wallet needs. List each origin and its reason in the README.
-- **Framing:** a meta tag cannot set `frame-ancestors`.
-  - **eth.limo:** sends `frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so no other site can frame the page
-    there.
-  - **Safe App host:** must let app.safe.global frame the page, and nothing else. Prefer a host that can send
-    `Content-Security-Policy: frame-ancestors 'self' https://app.safe.global` from a headers file, such as Cloudflare
-    Pages or Netlify. GitHub Pages sends no such header, so any site could frame the page there.
-  - **Check in the page:** when framed, render only if `location.ancestorOrigins` (or `document.referrer` where that is
-    missing) shows `https://app.safe.global`, and otherwise say why the page is blank. This backs up the header; it does
-    not replace it.
+- **Framing:** a meta tag cannot set `frame-ancestors`. eth.limo forbids framing; GitHub Pages allows it, which
+  Safe{Wallet} needs. See [Copies and framing](#copies-and-framing).
 - **Safe App manifest:** `manifest.json` sits at the site's root and is served with `Access-Control-Allow-Origin: *`,
   because Safe{Wallet} fetches it from its own origin. GitHub Pages does this already.
-- **Links:** share links to eth.limo, to the Safe App host and to subdomain gateways only, because path gateways put
-  every site on one origin.
+- **Links:** share only the official addresses, the eth.limo name and the GitHub Pages URL. Path gateways put every site
+  on one origin.
+
+### Copies and framing
+
+Anyone can copy a static page and host it with changes, such as an attacker's payout address, and no host can stop that.
+On GitHub Pages, other sites can also frame the real page. Accept both, and defend where it works:
+
+- **Wallet prompts:** every action ends in a wallet prompt that shows the exact call and the site asking. A framing site
+  cannot skip that prompt or type into the page, and a copy cannot borrow the official address.
+- **Official addresses:** publish the GitHub Pages URL and the ENS name in the README, in hydrex-keeper's README and
+  wherever users already look, and show them in the page's footer.
+- **Verifiable builds:** anyone can rebuild a tag and check that both official addresses serve that code.
+- **No frame check:** don't add code that hides the page when framed. It stops framing, not copying; in Firefox it has
+  to rely on the referrer, which the framing site can strip; and a mistake would blank the page for real Safe users.
 
 ## Research
 
@@ -444,11 +449,11 @@ screenshots of other sites out of the repository.
 - **Release:**
   1. A tag builds the site, prints the CID in the release notes, and uploads the CAR to at least two pinning services,
      using CI secrets.
-  2. The same tag deploys the same `dist/` to the Safe App host with pinned Actions. CI then fetches every served file
-     and compares it with the build.
+  2. The same tag deploys the same `dist/` to GitHub Pages with `actions/upload-pages-artifact` and
+     `actions/deploy-pages`, pinned by SHA. CI then fetches every served file and compares it with the build.
   3. The ENS name's owner, a Safe if possible, sets the contenthash to `ipfs://<CID>`.
   4. The README explains how anyone can rebuild a tag and compare it with the CID behind the ENS name and with the files
-     on the Safe App host.
+     on GitHub Pages.
 
 ## Milestones
 
@@ -463,17 +468,17 @@ Ask the user at the end of each milestone before going on.
    public RPCs.
 4. **Wallets:** `injected` and `coinbaseWallet`, account statuses, join, leave and payout, with simulation, batching and
    the startup checks. Then the fork and Coinbase tests.
-5. **Safe:** the Safe App manifest, the `safe` connector, the framing check and a first deployment to the Safe App host,
-   tested in Playwright and then by the user with a real Safe.
+5. **Safe:** the Safe App manifest, the `safe` connector and a first deployment to GitHub Pages, tested in Playwright
+   and then by the user with a real Safe.
 6. **Polish:** all states, copy, accessibility, the cold-read loop, mobile, and the in-wallet browsers.
-7. **Release:** the first CID, pinning, the contenthash, the Safe App host, and the verification steps written down.
+7. **Release:** the first CID, pinning, the contenthash, GitHub Pages, and the verification steps written down.
 
 ## Still to ask the user
 
 1. **Names:** the repository's final name and owner (working name `metadex-relays`), the product's name on the page, and
    the ENS name, kept generic too.
-2. **Safe App host:** GitHub Pages, or a host that can send `frame-ancestors`, such as Cloudflare Pages or Netlify; the
-   account that owns it; and whether it gets its own domain.
+2. **GitHub Pages:** the account or organization that publishes it, and whether it gets its own domain. A custom domain
+   adds a DNS account to secure; the github.io address does not.
 3. **Copy:** the user signs off the wording about votes, claims and payouts once hydrex-keeper's README describes
    claiming.
 
@@ -482,10 +487,10 @@ Ask the user at the end of each milestone before going on.
 - **Wallets:** a Hydrex user with a browser-extension or in-app wallet, or Coinbase's smart wallet, can join, leave and
   set the payout address, on a phone or a desktop.
 - **Understood:** a cold reader understands what joining changes, when it takes effect and how to undo it.
-- **Safe:** a Safe signer can open the page as a Safe App in Safe{Wallet}, from the Safe App host, and propose calls
-  that simulate cleanly.
+- **Safe:** a Safe signer can open the page as a Safe App in Safe{Wallet}, from GitHub Pages, and propose calls that
+  simulate cleanly.
 - **Reproducible:** two clean builds of the same commit give the same CID, and the README tells anyone how to check it
-  against the ENS contenthash and the files on the Safe App host.
+  against the ENS contenthash and the files on GitHub Pages.
 - **Network and CI:** the page makes no requests beyond the listed RPCs, the wallet and the origins in the README. It
   stays within budget and passes CI.
 - **Rechecked:** every fact in this plan that the page relies on has been checked again, and `docs/research.md` records
