@@ -37,16 +37,20 @@ type Behaviour = {
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
   const simulatedAt: bigint[] = [];
+  const simulatedOn: (bigint | undefined)[] = [];
   const client = {
     simulateBlocks: async ({
       blocks,
+      blockNumber,
       blockTag,
     }: {
       blocks: { blockOverrides: { time: bigint } }[];
+      blockNumber?: bigint;
       blockTag?: string;
     }) => {
-      assert.equal(blockTag, undefined, "simulates on top of the latest block");
+      assert.equal(blockTag, undefined, "simulates on top of the latest block, or of the one read");
       simulatedAt.push(blocks[0]!.blockOverrides.time);
+      simulatedOn.push(blockNumber);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
       return [{ calls: [b.reverts ? failure : { status: "success", gasUsed: 100_000n }] }];
     },
@@ -60,7 +64,7 @@ function fakeChain(b: Behaviour = {}) {
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
     getBlock: async (args?: object) => {
       assert.equal(args, undefined, "the latest block");
-      return { timestamp: 1_790_812_797n };
+      return { number: 41n, timestamp: 1_790_812_797n };
     },
     getBalance: async () => b.balance ?? 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
@@ -99,7 +103,7 @@ function fakeChain(b: Behaviour = {}) {
     voter: VOTER,
     ve: addr(6),
   };
-  return { chain, sent, simulatedAt };
+  return { chain, sent, simulatedAt, simulatedOn };
 }
 
 const vote = { pools: [POOL], weights: [100n] };
@@ -154,10 +158,11 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
 });
 
 test("a vote is simulated just after the block it is for, and not sent if it would revert", async () => {
-  const { chain, simulatedAt } = fakeChain();
+  const { chain, simulatedAt, simulatedOn } = fakeChain();
   await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 0n });
   await castVote(chain, signer, vote, false, far);
   assert.deepEqual(simulatedAt, [1_790_812_800n, 1_790_812_798n]);
+  assert.deepEqual(simulatedOn, [undefined, 41n], "a vote before the last blocks, on the block whose time it takes");
   const reverting = fakeChain({ reverts: true });
   await assert.rejects(castVote(reverting.chain, signer, vote, false, far), /VoteDelayNotMet/);
   assert.equal(reverting.sent.length, 0);

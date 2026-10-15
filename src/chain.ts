@@ -1,8 +1,11 @@
 import {
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
   createPublicClient,
   createTransport,
   fallback,
   http,
+  isAddressEqual,
   keccak256,
   shouldThrow,
   type Address,
@@ -171,11 +174,40 @@ type ReadOptions = {
  * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
  * requests. Every call must succeed.
  */
-export async function readMany<T>(
+export async function readMany<T>(client: Client, calls: readonly Call[], options: ReadOptions = {}): Promise<T[]> {
+  return (await multicall(client, calls, false, options)) as T[];
+}
+
+/** Like readMany, but a call that reverts reads as undefined. Any other failure, such as a node's, throws. */
+export async function readEach<T>(
   client: Client,
   calls: readonly Call[],
-  { blockNumber, blockTag, chunk = CHUNK, concurrency = Infinity }: ReadOptions = {},
-): Promise<T[]> {
+  options: ReadOptions = {},
+): Promise<(T | undefined)[]> {
+  const settled = (await multicall(client, calls, true, options)) as { status: string; result?: T; error?: unknown }[];
+  return settled.map(({ status, result, error }, i) => {
+    if (status === "success") return result;
+    if (reverted(error, calls[i]!)) return undefined;
+    throw error;
+  });
+}
+
+/**
+ * Whether `error` is the revert of `call` itself. A node's failure to make the multicall fails each of its calls too,
+ * and may look like a revert, but of the multicall contract.
+ */
+const reverted = (error: unknown, { address }: Call) =>
+  error instanceof ContractFunctionExecutionError &&
+  error.contractAddress !== undefined &&
+  isAddressEqual(error.contractAddress, address) &&
+  error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
+
+async function multicall(
+  client: Client,
+  calls: readonly Call[],
+  allowFailure: boolean,
+  { blockNumber, blockTag, chunk = CHUNK, concurrency = Infinity }: ReadOptions,
+): Promise<unknown[]> {
   const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
   const chunks = Array.from({ length: Math.ceil(calls.length / chunk) }, (_, i) =>
     calls.slice(i * chunk, (i + 1) * chunk),
@@ -184,9 +216,9 @@ export async function readMany<T>(
   let next = 0;
   const worker = async () => {
     for (let i = next++; i < chunks.length; i = next++) {
-      results[i] = await client.multicall({ contracts: chunks[i] as never, allowFailure: false, batchSize: 0, ...at });
+      results[i] = await client.multicall({ contracts: chunks[i] as never, allowFailure, batchSize: 0, ...at });
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
-  return results.flat() as T[];
+  return results.flat();
 }

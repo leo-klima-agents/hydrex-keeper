@@ -48,9 +48,14 @@ export function assertFresh(epoch: Epoch): void {
   }
 }
 
-/** Every pool of the Voter with a live gauge and rewards this epoch in `tokens`, with those rewards alone. */
-export async function readRewards(chain: Chain, tokens: Address[]): Promise<PoolRewards[]> {
-  const read = <T>(calls: Call[]) => readMany<T>(chain.client, calls);
+/** Reads calls that must all succeed, as readMany does with a client and options. */
+export type Reader = <T>(calls: Call[]) => Promise<T[]>;
+
+/** A bribe contract of a pool's gauge: its external bribe, or its fee contract (`fees`), the internal one. */
+export type Bribe = { pool: Address; bribe: Address; fees: boolean; alive: boolean };
+
+/** The bribe contracts of every pool of the Voter, external then internal, and whether the pool's gauge is alive. */
+export async function readBribes(chain: Chain, read: Reader): Promise<Bribe[]> {
   const [count] = await read<bigint>([voterCall(chain, "length")]);
   const pools = await read<Address>(
     Array.from({ length: Number(count) }, (_, i) => voterCall(chain, "pools", [BigInt(i)])),
@@ -63,30 +68,52 @@ export async function readRewards(chain: Chain, tokens: Address[]): Promise<Pool
       voterCall(chain, "internal_bribes", [gauge]),
     ]),
   );
-  const bribes = pools.flatMap((_, i) =>
-    perGauge[3 * i] ? [1, 2].map((k) => ({ pool: i, bribe: perGauge[3 * i + k] as Address })) : [],
+  return pools.flatMap((pool, i) =>
+    [1, 2].map((k) => ({
+      pool,
+      bribe: perGauge[3 * i + k] as Address,
+      fees: k === 2,
+      alive: perGauge[3 * i] === true,
+    })),
   );
+}
+
+/** Each of `bribes` once per token of `tokens` that it lists as a reward. */
+export async function readRewardTokens<B extends { bribe: Address }>(
+  read: Reader,
+  bribes: B[],
+  tokens: Address[],
+): Promise<(B & { token: Address })[]> {
   const lengths = await read<bigint>(bribes.map((b) => bribeCall(b.bribe, "rewardsListLength")));
   const slots = bribes.flatMap((b, k) =>
-    Array.from({ length: Number(lengths[k]) }, (_, j) => ({ ...b, index: BigInt(j) })),
+    Array.from({ length: Number(lengths[k]) }, (_, j) => ({ b, index: BigInt(j) })),
   );
-  const slotTokens = await read<Address>(slots.map((s) => bribeCall(s.bribe, "rewardTokens", [s.index])));
-  const whitelisted = new Set(tokens.map(lower));
-  const kept = slots.flatMap((s, k) =>
-    whitelisted.has(lower(slotTokens[k]!)) ? [{ ...s, token: slotTokens[k]! }] : [],
-  );
+  const slotTokens = await read<Address>(slots.map(({ b, index }) => bribeCall(b.bribe, "rewardTokens", [index])));
+  const whitelisted = new Map(tokens.map((token) => [lower(token), token]));
+  return slots.flatMap(({ b }, k) => {
+    const token = whitelisted.get(lower(slotTokens[k]!));
+    return token ? [{ ...b, token }] : [];
+  });
+}
+
+/** Every pool of the Voter with a live gauge and rewards this epoch in `tokens`, with those rewards alone. */
+export async function readRewards(chain: Chain, tokens: Address[]): Promise<PoolRewards[]> {
+  const read: Reader = <T>(calls: Call[]) => readMany<T>(chain.client, calls);
+  const live = (await readBribes(chain, read)).filter((b) => b.alive);
+  const kept = await readRewardTokens(read, live, tokens);
   const calendar = calendarEpoch();
   const results = await read<number | [bigint, bigint, bigint]>([
     ...tokens.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
     ...kept.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
   ]);
   const decimalsOf = new Map(tokens.map((token, i) => [lower(token), results[i] as number]));
-  const rewards = pools.map((): Reward[] => []);
+  const rewards = new Map<Address, Reward[]>();
   kept.forEach(({ pool, token }, k) => {
     const [, amount] = results[tokens.length + k] as [bigint, bigint, bigint];
-    if (amount > 0n) rewards[pool]!.push({ token, amount, decimals: decimalsOf.get(lower(token))! });
+    if (amount === 0n) return;
+    rewards.set(pool, [...(rewards.get(pool) ?? []), { token, amount, decimals: decimalsOf.get(lower(token))! }]);
   });
-  return pools.flatMap((pool, i) => (rewards[i]!.length ? [{ pool, rewards: rewards[i]! }] : []));
+  return [...rewards].map(([pool, list]) => ({ pool, rewards: list }));
 }
 
 /**

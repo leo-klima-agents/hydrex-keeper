@@ -5,7 +5,6 @@ import {
   type Address,
   type Hex,
   type LocalAccount,
-  type Log,
 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi } from "./abi.ts";
@@ -45,9 +44,6 @@ export type ModuleCall =
       functionName: "claimSwapAndDistribute";
       args: readonly [bigint, Address[], Hex[], Address[], Address[], Address[], bigint, bigint];
     };
-
-/** The call as simulated: its gas and logs. */
-export type Simulated = { gasUsed: bigint; logs: readonly Log[] };
 
 const lastSentBy = new WeakMap<Client, Tx & { lastVoted?: bigint | undefined; mined?: boolean }>();
 
@@ -92,13 +88,16 @@ export async function prepareCall(
   const { client, module, keeper } = chain;
   const data = encodeFunctionData({ abi: moduleAbi, functionName, args } as never);
   const toCall = (c: ModuleCall) => ({ account: keeper, to: module, abi: moduleAbi, ...c }) as const;
-  // The simulated block builds on the latest one, which may already be the one at `time`. A claim does not depend on
-  // the time, and pinning it could fall behind a node ahead of the one that gave the latest block.
-  const time = functionName === "vote" ? (target?.time ?? (await client.getBlock()).timestamp) : undefined;
+  // A vote in the last blocks is simulated on the latest block, which may already be the one at its `time`. Another
+  // vote is simulated just after the latest block, on that block: a node ahead of the one that gave it would refuse a
+  // time before its own latest block's. A claim does not depend on the time, and goes in the node's next block.
+  const head = functionName === "vote" && !target ? await client.getBlock() : undefined;
+  const time = target?.time ?? head?.timestamp;
   const blockOverrides = time === undefined ? {} : { blockOverrides: { time: time + 1n } };
+  const on = head ? { blockNumber: head.number } : {};
   const calls = [...before, { functionName, args } as ModuleCall].map(toCall);
   const [[block], suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateBlocks({ blocks: [{ ...blockOverrides, calls: calls as never[] }] }),
+    client.simulateBlocks({ ...on, blocks: [{ ...blockOverrides, calls: calls as never[] }] }),
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: keeper, blockTag: "latest" }),
@@ -146,7 +145,7 @@ export async function prepareCall(
     balance,
     tip,
     congested,
-    simulated: { gasUsed, logs: logs ?? [] } satisfies Simulated,
+    simulated: { gasUsed, logs: logs ?? [] },
   };
 }
 

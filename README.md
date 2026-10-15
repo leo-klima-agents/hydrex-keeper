@@ -52,9 +52,9 @@ them to kVCM, retires part of the kVCM, and pays the rest to the veNFT's owner, 
   share of the kVCM claimed and of the swaps' minimum returns, and the tonnes retired cost 97% of it at Carbonmark's
   quote.
 
-Claims go one at a time, each once the one before is a block deep, and none starts in the last minute of the hour after
-the flip. A claim needs its maximum cost and 0.001 ETH more in the keeper, so that it never spends what the next votes
-need.
+Claims go one at a time, the veNFT with the most to claim first, each once the one before is a block deep, and none
+starts in the last minute of the hour after the flip. A claim needs its maximum cost and 0.001 ETH more in the keeper,
+so that it never spends what the next votes need.
 
 ## What it can and cannot do
 
@@ -154,7 +154,9 @@ and base images.
   epochs, and only those of a veNFT delegated to it when the epoch that ended began. The owner can claim the rest. But
   from those contracts, a claim also takes what the veNFT earned before it delegated, swaps it and retires a third.
 - Rewards that never add up to $5 in a claim are never claimed. Swaps go to kVCM only, and lose more as they grow: about
-  1% for $100 of USDC, 5% for $1,000.
+  0.7% for $100 of USDC, 4.5% for $1,000. Each also raises kVCM's price for the claims after it, so the veNFTs with less
+  to claim, claimed last, absorb the price impact of the larger ones: about 1.7% less kVCM for the last of three on
+  2026-10-15.
 
 ## License
 

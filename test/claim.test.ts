@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
+  ContractFunctionExecutionError,
   ContractFunctionRevertedError,
   decodeFunctionData,
   encodeAbiParameters,
@@ -10,6 +11,7 @@ import {
   parseAbiParameters,
   parseTransaction,
   type Address,
+  type BaseError,
   type Hex,
   type LocalAccount,
 } from "viem";
@@ -38,6 +40,7 @@ const WETH: Address = "0x4200000000000000000000000000000000000006";
 const HYDX: Address = "0x00000e7efa313F4E11Bfff432471eD9423AC6B30";
 const AZUSD: Address = "0x3595ca37596D5895B70EFAB592ac315D5B9809B2";
 const JUNK = addr(99);
+const MULTICALL3: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
 /** Tokens of the whitelist that KyberSwap may not route. */
 const ODD = [addr(91), addr(92), addr(93), addr(94), addr(95)];
 const [OWNER, SMALL, OTHER] = [addr(21), addr(22), addr(23)];
@@ -130,6 +133,10 @@ type Call = { address: Address; functionName: string; args?: readonly unknown[] 
 const reverts = (functionName: string) =>
   new ContractFunctionRevertedError({ abi: veAbi, functionName, message: "execution reverted" });
 
+/** A call's failure, as viem's multicall reports it: for the call's contract, or the multicall's if the node failed. */
+const failed = ({ address, functionName, args }: Call, cause: unknown) =>
+  new ContractFunctionExecutionError(cause as BaseError, { abi: [], contractAddress: address, functionName, args });
+
 /** A chain whose bribe contracts pay what `w` says, once; records what it is asked to send. */
 function fakeChain(w: World = world()) {
   const live = new Map(w.earned);
@@ -183,6 +190,8 @@ function fakeChain(w: World = world()) {
         return addr(1_000 + Number(a));
       case `${VOTER}.gauges`:
         return addr(2_000 + Number(BigInt(a as Address)) - 1_000);
+      case `${VOTER}.isAlive`:
+        return a !== addr(2_001); // the second pool's gauge was killed: its bribe contracts still pay
       case `${VOTER}.internal_bribes`:
         return w.pools[Number(BigInt(a as Address)) - 2_000]![0][0];
       case `${VOTER}.external_bribes`:
@@ -250,13 +259,15 @@ function fakeChain(w: World = world()) {
       if (contracts.some((c) => c.functionName === "earned")) reads++;
       if (!allowFailure) return contracts.map(answer);
       if (w.ownersFail && contracts.some((c) => c.functionName === "ownerOf")) {
-        return contracts.map(() => ({ status: "failure", error: new Error("HTTP request failed: 503") }));
+        // A node's internal error (-32603) reads as a revert, of the multicall.
+        const error = failed({ address: MULTICALL3, functionName: "aggregate3" }, reverts("aggregate3"));
+        return contracts.map(() => ({ status: "failure", error }));
       }
       return contracts.map((c) => {
         try {
           return { status: "success", result: answer(c) };
         } catch (error) {
-          return { status: "failure", error };
+          return { status: "failure", error: failed(c, error) };
         }
       });
     },

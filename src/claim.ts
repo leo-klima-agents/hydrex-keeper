@@ -1,6 +1,4 @@
 import {
-  BaseError,
-  ContractFunctionRevertedError,
   erc20Abi,
   formatEther,
   formatUnits,
@@ -14,12 +12,12 @@ import {
 } from "viem";
 import { bribeAbi, conduitAbi, retirementAbi, veAbi } from "./abi.ts";
 import { sleep } from "./blocks.ts";
-import { CHUNK, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
+import { readEach, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
 import { BadSwap, kyberswap, SwapRefused, type Swap, type Swapper } from "./kyber.ts";
 import { errorMessage, log } from "./log.ts";
 import { tokensOf, type Run } from "./pass.ts";
 import type { Prices } from "./prices.ts";
-import { readEpoch } from "./read.ts";
+import { readBribes, readEpoch, readRewardTokens, type Reader } from "./read.ts";
 import { broadcastTx, markMined, prepareCall, signTx, type ModuleCall } from "./vote.ts";
 
 /** Owners whose veNFTs the keeper does not claim for, for now, by lowercase address. */
@@ -582,23 +580,12 @@ async function readDelegators(chain: Chain, at: bigint) {
  */
 async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]) {
   const { bulk, conduit } = chain;
-  const read = <T>(calls: Call[]) => readMany<T>(bulk, calls, { concurrency: CONCURRENCY });
-  const [count] = await read<bigint>([voterCall(chain, "length")]);
-  const pools = await read<Address>(
-    Array.from({ length: Number(count) }, (_, i) => voterCall(chain, "pools", [BigInt(i)])),
-  );
-  const gauges = await read<Address>(pools.map((pool) => voterCall(chain, "gauges", [pool])));
-  const contracts = await read<Address>(
-    gauges.flatMap((gauge) => [
-      voterCall(chain, "internal_bribes", [gauge]),
-      voterCall(chain, "external_bribes", [gauge]),
-    ]),
-  );
+  const read: Reader = <T>(calls: Call[]) => readMany<T>(bulk, calls, { concurrency: CONCURRENCY });
   const seen = new Set<string>();
-  const bribes = contracts.flatMap((bribe, i) => {
-    if (bribe === zeroAddress || seen.has(lower(bribe))) return [];
+  const bribes = (await readBribes(chain, read)).filter(({ bribe }) => {
+    if (bribe === zeroAddress || seen.has(lower(bribe))) return false;
     seen.add(lower(bribe));
-    return [{ bribe, fees: i % 2 === 0 }];
+    return true;
   });
   const balances = await read<bigint>(
     bribes.flatMap(({ bribe }) => epochs.map((epoch) => bribeCall(bribe, "balanceOfOwnerAt", [conduit, epoch]))),
@@ -607,14 +594,7 @@ async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]
     const on = epochs.filter((_, k) => balances[i * epochs.length + k]! > 0n);
     return on.length ? [{ ...b, on }] : [];
   });
-  const lengths = await read<bigint>(voted.map(({ bribe }) => bribeCall(bribe, "rewardsListLength")));
-  const slots = voted.flatMap((b, i) => Array.from({ length: Number(lengths[i]) }, (_, j) => ({ ...b, j: BigInt(j) })));
-  const slotTokens = await read<Address>(slots.map(({ bribe, j }) => bribeCall(bribe, "rewardTokens", [j])));
-  const whitelisted = new Map(tokens.map((token) => [lower(token), token]));
-  const kept = slots.flatMap((slot, k) => {
-    const token = whitelisted.get(lower(slotTokens[k]!));
-    return token ? [{ ...slot, token }] : [];
-  });
+  const kept = await readRewardTokens(read, voted, tokens);
   const data = await read<readonly bigint[]>(
     kept.flatMap(({ bribe, token, on }) => on.map((epoch) => bribeCall(bribe, "rewardData", [token, epoch]))),
   );
@@ -631,26 +611,6 @@ async function readDecimals(client: Client, tokens: Address[]): Promise<Map<stri
     tokens.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
   );
   return new Map(tokens.map((token, i) => [lower(token), decimals[i]!]));
-}
-
-/** Whether `error` is a call's revert, and not a failure to make the call. */
-const reverted = (error: unknown) =>
-  error instanceof BaseError && error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
-
-/** Like readMany, but a call that reverts reads as undefined; any other failure, such as a node's, throws. */
-async function readEach<T>(client: Client, calls: Call[]): Promise<(T | undefined)[]> {
-  const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) =>
-    calls.slice(i * CHUNK, (i + 1) * CHUNK),
-  );
-  const results = await Promise.all(
-    chunks.map((contracts) => client.multicall({ contracts: contracts as never, allowFailure: true, batchSize: 0 })),
-  );
-  const settled = results.flat() as { status: "success" | "failure"; result?: unknown; error?: unknown }[];
-  return settled.map(({ status, result, error }) => {
-    if (status === "success") return result as T;
-    if (reverted(error)) return undefined;
-    throw error;
-  });
 }
 
 /** The USD value of `amount` of `token` at the job's prices; zero if it has none. */
