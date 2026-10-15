@@ -1,6 +1,6 @@
 import { erc20Abi, type Address } from "viem";
 import { bribeAbi, veAbi } from "./abi.ts";
-import { now, readMany, voterCall, WEEK, type Call, type Chain } from "./chain.ts";
+import { lower, now, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
 
 export type Epoch = { start: bigint; flip: bigint; power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
 
@@ -12,10 +12,16 @@ export type State = { epoch: Epoch; pools: (PoolRewards & { otherVotes: bigint; 
 
 const calendarEpoch = () => (now() / WEEK) * WEEK;
 
-const lower = (address: Address) => address.toLowerCase();
-
-function bribeCall(address: Address, functionName: string, args: readonly unknown[] = []): Call {
+export function bribeCall(address: Address, functionName: string, args: readonly unknown[] = []): Call {
   return { address, abi: bribeAbi, functionName, args };
+}
+
+const decimalsCall = (address: Address): Call => ({ address, abi: erc20Abi, functionName: "decimals" });
+
+/** The decimals of `tokens`, by lowercase address. */
+export async function readDecimals(client: Client, tokens: Address[]): Promise<Map<string, number>> {
+  const decimals = await readMany<number>(client, tokens.map(decimalsCall));
+  return new Map(tokens.map((token, i) => [lower(token), decimals[i]!]));
 }
 
 function epochCalls(chain: Chain, calendar: bigint): Call[] {
@@ -103,7 +109,7 @@ export async function readRewards(chain: Chain, tokens: Address[]): Promise<Pool
   const kept = await readRewardTokens(read, live, tokens);
   const calendar = calendarEpoch();
   const results = await read<number | [bigint, bigint, bigint]>([
-    ...tokens.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
+    ...tokens.map(decimalsCall),
     ...kept.map((s) => bribeCall(s.bribe, "rewardData", [s.token, calendar])),
   ]);
   const decimalsOf = new Map(tokens.map((token, i) => [lower(token), results[i] as number]));

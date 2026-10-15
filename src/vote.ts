@@ -13,7 +13,7 @@ import { NoMetadataServer } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
-const RECEIPT_TIMEOUT_MS = 60_000;
+export const RECEIPT_TIMEOUT_MS = 60_000;
 const CONGESTED = 0.9; // in a block this full, the builder picks by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");

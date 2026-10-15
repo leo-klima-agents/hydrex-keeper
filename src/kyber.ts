@@ -28,8 +28,9 @@ export class SwapRefused extends Error {}
 export class BadSwap extends Error {}
 
 /**
- * KyberSwap's aggregator: a route, then its calldata, for a swap paid from and to `account`. The calldata is decoded
- * and must sell exactly the amount and token asked for, for the token asked for, to `account`.
+ * KyberSwap's aggregator: a route, then its calldata, for a swap paid from and to `account`. The calldata, for any of
+ * the router's entry points, is decoded and must sell exactly the amount and token asked for, for the token asked for,
+ * to `account`.
  */
 export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
   return async ({ tokenIn, tokenOut, amountIn, account, slippageBps }, until) => {
@@ -50,7 +51,8 @@ export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
     }
     let desc;
     try {
-      desc = decodeFunctionData({ abi: kyberAbi, data }).args[0].desc;
+      const decoded = decodeFunctionData({ abi: kyberAbi, data });
+      desc = decoded.functionName === "swapSimpleMode" ? decoded.args[1] : decoded.args[0].desc;
     } catch (error) {
       throw new BadSwap(`KyberSwap: calldata is not a swap: ${errorMessage(error)}`);
     }

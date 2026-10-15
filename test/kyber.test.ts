@@ -14,8 +14,13 @@ const request = { tokenIn: USDC, tokenOut: KVCM, amountIn: 10_000_000n, account:
 
 type Swap = { srcToken?: Address; dstToken?: Address; dstReceiver?: Address; amount?: bigint; minReturn?: bigint };
 
-/** Calldata of the router's swap, as KyberSwap builds it, for `request` unless overridden. */
-function calldata({ srcToken = USDC, dstToken = KVCM, dstReceiver = CONDUIT, amount = 10_000_000n, minReturn }: Swap) {
+type Entry = "swap" | "swapGeneric" | "swapSimpleMode";
+
+/** Calldata of the router's `entry`, as KyberSwap builds it, for `request` unless overridden. */
+function calldata(
+  { srcToken = USDC, dstToken = KVCM, dstReceiver = CONDUIT, amount = 10_000_000n, minReturn }: Swap,
+  entry: Entry = "swap",
+) {
   const desc = {
     srcToken,
     dstToken,
@@ -36,14 +41,17 @@ function calldata({ srcToken = USDC, dstToken = KVCM, dstReceiver = CONDUIT, amo
     desc,
     clientData: "0x",
   } as const;
-  return encodeFunctionData({ abi: kyberAbi, functionName: "swap", args: [execution] });
+  if (entry === "swapSimpleMode") {
+    return encodeFunctionData({ abi: kyberAbi, functionName: entry, args: [EXECUTOR, desc, "0x", "0x"] });
+  }
+  return encodeFunctionData({ abi: kyberAbi, functionName: entry, args: [execution] });
 }
 
 const route = { code: 0, message: "successfully", data: { routeSummary: { routeID: "r" }, routerAddress: ROUTER } };
-const built = (swap: Swap = {}) => ({
+const built = (swap: Swap = {}, entry?: Entry) => ({
   code: 0,
   message: "successfully",
-  data: { routerAddress: ROUTER, data: calldata(swap), amountOut: "374416742845163634687" },
+  data: { routerAddress: ROUTER, data: calldata(swap, entry), amountOut: "374416742845163634687" },
 });
 
 /** Answers each request with the next response; records the requests. */
@@ -96,6 +104,15 @@ test("calldata that would sell or buy anything else, or pay anyone else, is refu
   ] satisfies Swap[]) {
     const { fetchFn } = fakeFetch([() => Response.json(route), () => Response.json(built(swap))]);
     await assert.rejects(kyberswap(fetchFn)(request, far()), /KyberSwap built another swap/);
+  }
+});
+
+test("calldata for the router's other entry points is checked the same way", async () => {
+  for (const entry of ["swapGeneric", "swapSimpleMode"] as const) {
+    const ok = fakeFetch([() => Response.json(route), () => Response.json(built({}, entry))]);
+    assert.equal((await kyberswap(ok.fetchFn)(request, far())).minOut, 350n * 10n ** 18n, entry);
+    const other = fakeFetch([() => Response.json(route), () => Response.json(built({ dstReceiver: EXECUTOR }, entry))]);
+    await assert.rejects(kyberswap(other.fetchFn)(request, far()), /KyberSwap built another swap/);
   }
 });
 

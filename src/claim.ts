@@ -1,5 +1,4 @@
 import {
-  erc20Abi,
   formatEther,
   formatUnits,
   isAddressEqual,
@@ -10,15 +9,15 @@ import {
   type Hex,
   type Log,
 } from "viem";
-import { bribeAbi, conduitAbi, retirementAbi, veAbi } from "./abi.ts";
+import { conduitAbi, retirementAbi, veAbi } from "./abi.ts";
 import { sleep } from "./blocks.ts";
-import { readEach, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
+import { lower, readEach, readMany, WEEK, type Call, type Chain } from "./chain.ts";
 import { BadSwap, kyberswap, SwapRefused, type Swap, type Swapper } from "./kyber.ts";
 import { errorMessage, log } from "./log.ts";
 import { tokensOf, type Run } from "./pass.ts";
 import type { Prices } from "./prices.ts";
-import { readBribes, readEpoch, readRewardTokens, type Reader } from "./read.ts";
-import { broadcastTx, markMined, prepareCall, signTx, type ModuleCall } from "./vote.ts";
+import { bribeCall, readBribes, readDecimals, readEpoch, readRewardTokens, type Reader } from "./read.ts";
+import { broadcastTx, markMined, prepareCall, RECEIPT_TIMEOUT_MS, signTx, type ModuleCall } from "./vote.ts";
 
 /** Owners whose veNFTs the keeper does not claim for, for now, by lowercase address. */
 export const EXCLUDED_OWNERS: ReadonlyMap<string, string> = new Map([
@@ -43,7 +42,6 @@ const REPLANS = 4; // smaller plans after simulations over MAX_GAS_USED
 const ROUNDS = 12; // plans per claim: smaller, without a token KyberSwap cannot swap, or with less of one
 const EARNED_CHUNK = 25; // earned() loops over the epochs since the last claim: 25 calls can take 15M gas
 const CONCURRENCY = 4; // eth_calls in flight for the largest reads
-const RECEIPT_TIMEOUT_MS = 60_000;
 const MINTER_POLL_MS = 5_000;
 const TONNE = 10n ** 18n;
 const WETH: Address = "0x4200000000000000000000000000000000000006";
@@ -105,8 +103,6 @@ type Built = {
 /** Ends the claims: what the next one would do is unknown, or it could not be paid for. */
 class Stop extends Error {}
 
-const lower = (address: Address) => address.toLowerCase() as Address;
-
 const pairKey = (bribe: Address, token: Address) => `${lower(bribe)}${lower(token)}`;
 
 const isPayout = ({ payouts }: Conduit, token: Address) => payouts.some((payout) => isAddressEqual(payout, token));
@@ -121,13 +117,6 @@ const veCall = ({ ve }: Chain, functionName: string, args: readonly unknown[] = 
 const conduitCall = ({ conduit }: Chain, functionName: string, args: readonly unknown[] = []): Call => ({
   address: conduit,
   abi: conduitAbi,
-  functionName,
-  args,
-});
-
-const bribeCall = (address: Address, functionName: string, args: readonly unknown[] = []): Call => ({
-  address,
-  abi: bribeAbi,
   functionName,
   args,
 });
@@ -313,7 +302,10 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
   let replans = 0;
   for (let round = 0; round < ROUNDS; round++) {
     const plan = nextPlan(ctx, nft, budget);
-    if (!plan && budget < GAS_BUDGET) throw new Error(`no claim fits in ${MAX_GAS_USED} gas`);
+    // Gas is why there is no plan only if one is worth claiming at the full budget: refusals may have left none.
+    if (!plan && budget < GAS_BUDGET && (nextPlan(ctx, nft)?.usd ?? 0) >= MIN_CLAIM_USD) {
+      throw new Error(`no claim fits in ${MAX_GAS_USED} gas`);
+    }
     if (!plan || plan.usd < MIN_CLAIM_USD) {
       const usd = untaken(nft).reduce((sum, p) => sum + p.usd, 0);
       log.info("not claimed: too little", { tokenId: nft.id, claimable: plan?.usd ?? 0, left: usd });
@@ -462,8 +454,8 @@ async function buildClaim(ctx: Context, nft: Nft, plan: ClaimPlan): Promise<Buil
 
 /**
  * The most tonnes whose retirement the aggregator quotes at `budget` kVCM or less. The price per tonne moves little
- * with the tonnes, so t·budget/price(t) converges in a few steps; if the last overshoots, one more step brings it under
- * the budget, whether the price per tonne rises or falls with the tonnes.
+ * with the tonnes, so t·budget/price(t) converges in a few steps. It can converge from over the budget, when the price
+ * per tonne falls with the tonnes: then steps a percent shorter bring it under.
  */
 async function tonnesFor({ chain, conduit }: Context, budget: bigint): Promise<bigint> {
   const { aggregator, creditToken, creditTokenId, kvcm, carbonClass } = conduit;
@@ -476,9 +468,13 @@ async function tonnesFor({ chain, conduit }: Context, budget: bigint): Promise<b
   };
   let tonnes = (budget * TONNE) / (await quote(TONNE));
   for (let step = 0; step < 3 && tonnes > 0n; step++) tonnes = (tonnes * budget) / (await quote(tonnes));
-  if (tonnes === 0n) return 0n;
-  const price = await quote(tonnes);
-  return price > budget ? (tonnes * budget) / price : tonnes;
+  for (let step = 0; tonnes > 0n; step++) {
+    const price = await quote(tonnes);
+    if (price <= budget) return tonnes;
+    if (step === 5) throw new Error(`no retirement within ${budget} kVCM: ${tonnes} cost ${price}`);
+    tonnes = (tonnes * budget * 99n) / (price * 100n);
+  }
+  return 0n;
 }
 
 /**
@@ -613,14 +609,6 @@ async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]
     const paid = on.map(() => data[k++]![1]!).some((amount) => amount > 0n);
     return paid ? [{ bribe, fees, token }] : [];
   });
-}
-
-async function readDecimals(client: Client, tokens: Address[]): Promise<Map<string, number>> {
-  const decimals = await readMany<number>(
-    client,
-    tokens.map((address) => ({ address, abi: erc20Abi, functionName: "decimals" })),
-  );
-  return new Map(tokens.map((token, i) => [lower(token), decimals[i]!]));
 }
 
 /** The USD value of `amount` of `token` at the job's prices; zero if it has none. */

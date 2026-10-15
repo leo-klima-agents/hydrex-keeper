@@ -9,7 +9,7 @@ import { errorMessage, log } from "./log.ts";
 import { pass, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
-import { DAY, due, HORIZON } from "./schedule.ts";
+import { DAY, due, HORIZON, lastFlip } from "./schedule.ts";
 import { VoteSent } from "./vote.ts";
 import { parseWhitelist } from "./whitelist.ts";
 
@@ -44,13 +44,14 @@ async function main(): Promise<number> {
   const run: Run = { chain, tokens, prices: priceFeed(source), account, dryRun };
   const epoch = await readEpoch(chain);
   const scheduled = due(epoch.flip, now());
-  // A claim sent by hand could take the nonce of a vote or claim the schedule sends then.
+  // A claim sent by hand could take the nonce of a vote or claim the schedule sends then; a dry run sends nothing.
   const sends = { claims: "claims", "day before": "vote of a day before the flip", "last blocks": "last-block votes" };
-  if (claimNow && scheduled) throw new Error(`--claim would race the scheduled ${sends[scheduled]}: run it later`);
+  if (claimNow && scheduled && !dryRun) {
+    throw new Error(`--claim would race the scheduled ${sends[scheduled]}: run it later`);
+  }
   const what = claimNow ? "claims" : immediately ? "day before" : scheduled;
   if (what === "claims") {
-    // The flip just past: the Voter's next one while the minter has not started its epoch.
-    const flip = epoch.flip <= now() ? epoch.flip : epoch.start;
+    const flip = lastFlip(epoch.flip, now());
     const until = claimNow ? Date.now() + Number(HORIZON) * 1000 : Number(flip + HORIZON) * 1000;
     return (await claims(run, flip, until)) ? 1 : 0;
   }

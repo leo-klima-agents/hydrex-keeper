@@ -25,6 +25,8 @@ const BULK_TIMEOUT_MS = 30_000; // a 1,000-call eth_call of the claims takes up 
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
+export const lower = (address: Address) => address.toLowerCase() as Address;
+
 /** The host of an RPC URL, for logs: provider URLs carry their API key. */
 export const hostOf = (url: string) => (URL.canParse(url) ? new URL(url).host : "invalid URL");
 

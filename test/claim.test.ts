@@ -83,6 +83,8 @@ type World = {
   gas?: (swaps: number, pairs: number) => bigint;
   /** A claim takes one more unit of USDC than is earned. */
   overpays?: boolean;
+  /** The price per tonne retired falls with the tonnes, and one costs more than a claim retires. */
+  falling?: boolean;
 };
 
 const key = (id: unknown, bribe: Address, token: Address) => `${id}${bribe}${token}`.toLowerCase();
@@ -129,6 +131,13 @@ function crowded(more: Partial<World> = {}): World {
 }
 
 type Call = { address: Address; functionName: string; args?: readonly unknown[] };
+
+/** The kVCM `tonnes` cost: 5 a tonne, or, if falling, from 20,000 a tonne for little down to 10,000 from one tonne. */
+function retirementPrice(w: World, tonnes: bigint): bigint {
+  if (!w.falling) return tonnes * KVCM_PER_TONNE;
+  const t = tonnes < E18 ? tonnes : E18;
+  return (tonnes * (20_000n * E18 - 10_000n * t)) / E18;
+}
 
 const reverts = (functionName: string) =>
   new ContractFunctionRevertedError({ abi: veAbi, functionName, message: "execution reverted" });
@@ -231,7 +240,7 @@ function fakeChain(w: World = world()) {
         return a === ROUTER;
       case `${AGGREGATOR}.quoteRetireCreditViaKlima`: {
         const tonnes = args[2] as bigint;
-        return [tonnes, tonnes * KVCM_PER_TONNE, 0n, tonnes];
+        return [tonnes, retirementPrice(w, tonnes), 0n, tonnes];
       }
     }
     switch (functionName) {
@@ -321,7 +330,11 @@ const prices = new Map<Address, number>([
 /** kVCM per unit of each token, at `prices`. */
 const rates: Record<string, [bigint, bigint]> = { [USDC]: [100n * 10n ** 12n, 3n], [HYDX]: [5n, 6n] };
 
-type Swaps = { refuse?: Address[]; bad?: Address; lossy?: (token: Address, amountIn: bigint) => boolean };
+type Swaps = {
+  refuse?: Address[] | ((token: Address) => boolean);
+  bad?: Address;
+  lossy?: (token: Address, amountIn: bigint) => boolean;
+};
 
 /** Quotes at `prices`, minus the slippage; `refuse` has no route, `bad` a wrong answer, and `lossy` returns half. */
 function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
@@ -330,7 +343,9 @@ function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
     assert.equal(tokenOut, KVCM);
     assert.equal(account, CONDUIT, "the conduit sells and buys");
     asked.push(tokenIn);
-    if (refuse.includes(tokenIn)) throw new SwapRefused("KyberSwap: route not found");
+    if (typeof refuse === "function" ? refuse(tokenIn) : refuse.includes(tokenIn)) {
+      throw new SwapRefused("KyberSwap: route not found");
+    }
     if (tokenIn === bad) throw new BadSwap("KyberSwap built another swap");
     const [num, den] = rates[tokenIn]!;
     const amountOut = (amountIn * num) / den / (lossy?.(tokenIn, amountIn) ? 2n : 1n);
@@ -477,6 +492,29 @@ test("a claim too large for a transaction is planned again, smaller than it was"
   const never = fakeChain(world({ gas: () => 20_000_000n }));
   assert.equal(await claims(runOf(never.chain), START, until(), fakeSwapper().swapper), 1);
   assert.equal(never.sent.length, 0);
+});
+
+test("the tonnes retired cost at most their budget, even when the price per tonne falls with the tonnes", async () => {
+  const w = world({ falling: true });
+  const { chain, sent } = fakeChain(w);
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  const { tonnes, maxKvcmIn } = decode(sent[0]!);
+  assert.ok(tonnes > 0n && tonnes < E18, "less than a tonne");
+  assert.ok(retirementPrice(w, tonnes) <= (maxKvcmIn * 97n) / 100n, "within 97% of maxKvcmIn");
+});
+
+test("a claim that refusals leave empty after a smaller plan is too little, not too large", async () => {
+  // The first plan, of two contracts, uses just over 12M gas; KyberSwap then refuses USDC, the only token.
+  const earned = new Map([
+    [key(2, E1, USDC), usdc(60)],
+    [key(2, I1, USDC), usdc(10)],
+  ]);
+  const gas = (swaps: number, pairs: number) => (pairs > 1 ? 12_100_000n : 5_000_000n);
+  const { chain, sent } = fakeChain(world({ earned, gas }));
+  let asks = 0;
+  const { swapper } = fakeSwapper({ refuse: (token) => token === USDC && ++asks > 1 });
+  assert.equal(await claims(runOf(chain), START, until(), swapper), 0);
+  assert.equal(sent.length, 0);
 });
 
 test("a claim that would leave some of a token in the conduit is not sent, whether it swaps it or not", async () => {
