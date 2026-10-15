@@ -3,6 +3,7 @@ import { test, type TestContext } from "node:test";
 import {
   ContractFunctionExecutionError,
   ContractFunctionRevertedError,
+  decodeAbiParameters,
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
@@ -72,7 +73,7 @@ type World = {
   earned: Map<string, bigint>;
   /** Reads of the epoch before the minter starts it. */
   lag?: number;
-  /** earned() reads as when the claims began, like a node that never catches up. */
+  /** A node behind the claims: it gives the block before them as the latest, and the state then for it. */
   stale?: boolean;
   /** earned() reads zero for this token after the first read. */
   hide?: Address;
@@ -85,6 +86,10 @@ type World = {
   overpays?: boolean;
   /** The price per tonne retired falls with the tonnes, and one costs more than a claim retires. */
   falling?: boolean;
+  /** The keeper has a transaction pending that this process did not send. */
+  pending?: boolean;
+  /** A pair, by `key`, half of which a claim leaves owed, as when it is owed for more than 50 epochs. */
+  partial?: string;
 };
 
 const key = (id: unknown, bribe: Address, token: Address) => `${id}${bribe}${token}`.toLowerCase();
@@ -149,26 +154,59 @@ const failed = ({ address, functionName, args }: Call, cause: unknown) =>
 /** A chain whose bribe contracts pay what `w` says, once; records what it is asked to send. */
 function fakeChain(w: World = world()) {
   const live = new Map(w.earned);
-  const first = new Map(w.earned);
+  if (w.partial) {
+    // What a claim leaves, held apart until a claim takes the rest.
+    const half = live.get(w.partial)! / 2n;
+    live.set(w.partial, half);
+    live.set(`${w.partial}:later`, half);
+  }
+  const first = new Map(live);
   const listed = new Map(w.pools.flatMap(([fees, other]) => [fees, other]));
   const sent: Hex[] = [];
   const earnedFor = new Set<string>();
   let polls = 0;
   let reads = 0;
-  let pending: readonly unknown[] = [];
+  let inFlight: readonly unknown[] = [];
+  let head = 40n; // each claim is mined in a block of its own, with one more on top
+  let lastClaim = head;
 
-  /** Takes from `owed` what a claim with `args` takes, and returns its gas and logs. */
+  /** What is owed at `block`, the latest by default: a node behind the claims serves the state before them. */
+  const owedAt = (block?: bigint) => ((block ?? (w.stale ? 40n : head)) >= lastClaim ? live : first);
+
+  /**
+   * Takes from `owed` what a claim with `args` takes, unless it reverts: when a swap sells more than the claim took. Returns
+   * whether it succeeded, its gas and its logs.
+   */
   function claim(owed: Map<string, bigint>, args: readonly unknown[]) {
-    const [id, targets, , fees, bribes, tokens] = args as [bigint, Address[], Hex[], Address[], Address[], Address[]];
+    const [id, targets, swaps, fees, bribes, tokens] = args as [
+      bigint,
+      Address[],
+      Hex[],
+      Address[],
+      Address[],
+      Address[],
+    ];
+    const next = new Map(owed);
     const asked = [...fees, ...bribes];
     const amounts = tokens.map((token) =>
       asked.reduce((sum, bribe) => {
-        const amount = owed.get(key(id, bribe, token)) ?? 0n;
-        owed.delete(key(id, bribe, token));
+        const pair = key(id, bribe, token);
+        const amount = next.get(pair) ?? 0n;
+        next.delete(pair);
+        const later = next.get(`${pair}:later`);
+        if (later !== undefined) (next.set(pair, later), next.delete(`${pair}:later`));
         return sum + amount;
       }, 0n),
     );
     if (w.overpays) amounts[tokens.indexOf(USDC)]! += 1n;
+    const ok = swaps.every((swap) => {
+      const [token, amountIn] = decodeAbiParameters(parseAbiParameters("address, uint256"), swap);
+      return amountIn <= (amounts[tokens.indexOf(token)] ?? 0n);
+    });
+    if (ok) {
+      owed.clear();
+      for (const [pair, amount] of next) owed.set(pair, amount);
+    }
     const owner = owners[String(id)]!;
     const topics = encodeEventTopics({
       abi: conduitAbi,
@@ -183,10 +221,10 @@ function fakeChain(w: World = world()) {
       [0n, 0n],
     ]);
     const gasUsed = w.gas ? w.gas(targets.length, asked.length * tokens.length) : 8_000_000n;
-    return { gasUsed, logs: [{ address: CONDUIT, topics, data }] };
+    return { ok, gasUsed, logs: ok ? [{ address: CONDUIT, topics, data }] : [] };
   }
 
-  function answer({ address, functionName, args = [] }: Call): unknown {
+  function answerAt({ address, functionName, args = [] }: Call, owed: Map<string, bigint>): unknown {
     const [a, b] = args as [unknown, unknown];
     switch (`${address}.${functionName}`) {
       case `${VOTER}._epochTimestamp`:
@@ -258,14 +296,24 @@ function fakeChain(w: World = world()) {
       case "earned":
         earnedFor.add(String(a));
         if (w.hide === b && reads > 1) return 0n;
-        return (w.stale ? first : live).get(key(a, address, b as Address)) ?? 0n;
+        return owed.get(key(a, address, b as Address)) ?? 0n;
     }
     throw new Error(`unexpected call ${functionName} on ${address}`);
   }
 
   const client = {
-    multicall: async ({ contracts, allowFailure }: { contracts: Call[]; allowFailure: boolean }) => {
+    multicall: async ({
+      contracts,
+      allowFailure,
+      blockNumber,
+    }: {
+      contracts: Call[];
+      allowFailure: boolean;
+      blockNumber?: bigint;
+    }) => {
       if (contracts.some((c) => c.functionName === "earned")) reads++;
+      const owed = owedAt(blockNumber);
+      const answer = (c: Call) => answerAt(c, owed);
       if (!allowFailure) return contracts.map(answer);
       if (w.ownersFail && contracts.some((c) => c.functionName === "ownerOf")) {
         // A node's internal error (-32603) reads as a revert, of the multicall.
@@ -281,10 +329,23 @@ function fakeChain(w: World = world()) {
       });
     },
     getGasPrice: async () => 6_000_000n,
-    simulateBlocks: async ({ blocks }: { blocks: { blockOverrides?: unknown; calls: { args: unknown[] }[] }[] }) => {
-      assert.equal(blocks[0]!.blockOverrides, undefined, "a claim is simulated in the node's next block");
-      const owed = new Map(live);
-      return [{ calls: blocks[0]!.calls.map(({ args }) => ({ status: "success", ...claim(owed, args) })) }];
+    getBlockNumber: async () => (w.stale ? 40n : head),
+    simulateBlocks: async ({
+      blocks,
+      blockNumber,
+    }: {
+      blocks: { blockOverrides?: unknown; calls: { args: unknown[] }[] }[];
+      blockNumber?: bigint;
+    }) => {
+      assert.equal(blocks[0]!.blockOverrides, undefined, "a claim does not depend on the time");
+      const owed = new Map(owedAt(blockNumber));
+      const calls = blocks[0]!.calls.map(({ args }) => {
+        const { ok, ...result } = claim(owed, args);
+        return ok
+          ? { status: "success", ...result }
+          : { status: "failure", error: new Error("swap failed"), ...result };
+      });
+      return [{ calls }];
     },
     estimateMaxPriorityFeePerGas: async () => 1_000_000n,
     getFeeHistory: async () => ({
@@ -292,18 +353,21 @@ function fakeChain(w: World = world()) {
       gasUsedRatio: [0.2, 0.3],
       reward: [[1_000_000n], [1_000_000n]],
     }),
-    getTransactionCount: async () => 7 + sent.length,
+    getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
+      7 + sent.length + (w.pending && blockTag === "pending" ? 1 : 0),
     getBalance: async () => w.balance ?? E18,
     estimateL1Fee: async () => 5_000n,
     waitForTransactionReceipt: async ({ hash, confirmations }: { hash: Hex; confirmations: number }) => {
-      assert.equal(confirmations, 2, "a block past the claim's, so that the next claim reads after it");
-      const { logs } = claim(live, pending);
-      return { transactionHash: hash, status: "success", blockNumber: 42n, logs };
+      assert.equal(confirmations, 2, "a block past the claim's");
+      const { ok, logs } = claim(live, inFlight);
+      head += 2n;
+      lastClaim = head - 1n;
+      return { transactionHash: hash, status: ok ? "success" : "reverted", blockNumber: lastClaim, logs };
     },
   } as unknown as Client;
   const broadcast = async (signed: Hex) => {
     sent.push(signed);
-    pending = decodeFunctionData({ abi: moduleAbi, data: parseTransaction(signed).data! }).args;
+    inFlight = decodeFunctionData({ abi: moduleAbi, data: parseTransaction(signed).data! }).args;
     return keccak256(signed);
   };
   const chain: Chain = {
@@ -331,7 +395,7 @@ const prices = new Map<Address, number>([
 const rates: Record<string, [bigint, bigint]> = { [USDC]: [100n * 10n ** 12n, 3n], [HYDX]: [5n, 6n] };
 
 type Swaps = {
-  refuse?: Address[] | ((token: Address) => boolean);
+  refuse?: Address[] | ((token: Address, amountIn: bigint) => boolean);
   bad?: Address;
   lossy?: (token: Address, amountIn: bigint) => boolean;
 };
@@ -343,14 +407,15 @@ function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
     assert.equal(tokenOut, KVCM);
     assert.equal(account, CONDUIT, "the conduit sells and buys");
     asked.push(tokenIn);
-    if (typeof refuse === "function" ? refuse(tokenIn) : refuse.includes(tokenIn)) {
+    if (typeof refuse === "function" ? refuse(tokenIn, amountIn) : refuse.includes(tokenIn)) {
       throw new SwapRefused("KyberSwap: route not found");
     }
     if (tokenIn === bad) throw new BadSwap("KyberSwap built another swap");
     const [num, den] = rates[tokenIn]!;
     const amountOut = (amountIn * num) / den / (lossy?.(tokenIn, amountIn) ? 2n : 1n);
     const minOut = (amountOut * BigInt(10_000 - slippageBps)) / 10_000n;
-    return { router: ROUTER, data: `0x1234${tokenIn.slice(2, 6)}`, amountIn, amountOut, minOut };
+    const data = encodeAbiParameters(parseAbiParameters("address, uint256"), [tokenIn, amountIn]);
+    return { router: ROUTER, data, amountIn, amountOut, minOut };
   };
   return { swapper, asked };
 }
@@ -401,7 +466,7 @@ test("the Klima Foundation's veNFTs are excluded", () => {
   assert.equal(EXCLUDED_OWNERS.get(FOUNDATION.toLowerCase()), "Klima Foundation");
 });
 
-test("a token without a route is left out of the execution's claims; one whose swap loses too much, capped", async () => {
+test("a token without a route is left out of the veNFT's claims; one whose swap loses too much, capped", async () => {
   for (const swaps of [{ refuse: [HYDX] }, { lossy: (token: Address) => token === HYDX }] satisfies Swaps[]) {
     const { chain, sent } = fakeChain();
     const { swapper, asked } = fakeSwapper(swaps);
@@ -433,6 +498,17 @@ test("tokens KyberSwap cannot route do not use up a claim's plans, and are asked
   for (const token of ODD) assert.equal(asked.filter((t) => t === token).length, 1);
 });
 
+test("a token KyberSwap has no route for at one veNFT's amount is still swapped for another's", async () => {
+  const w = world();
+  w.earned.set(key(4, E2, HYDX), 300n * E18); // $7.50: veNFT 2 has 400
+  const { chain, sent } = fakeChain(w);
+  const { swapper } = fakeSwapper({ refuse: (token, amountIn) => token === HYDX && amountIn > 350n * E18 });
+  assert.equal(await claims(runOf(chain), START, until(), swapper), 0);
+  const [two, four] = sent.map(decode);
+  assert.deepEqual([two!.id, two!.tokens], [2n, [USDC, KVCM]]);
+  assert.deepEqual([four!.id, four!.tokens], [4n, [HYDX, USDC]]);
+});
+
 test("a wrong answer from KyberSwap leaves its token out, and fails the execution", async () => {
   const { chain, sent } = fakeChain();
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper({ bad: HYDX }).swapper), 1);
@@ -448,6 +524,20 @@ test("a later claim does not count what an earlier one took, whatever a node beh
   assert.deepEqual(first!.tokens, [USDC]);
   assert.ok(first!.fees.includes(I1), "the first takes I1's USDC");
   assert.ok(second!.fees.includes(I1) && second!.tokens.includes(USDC), "the second asks I1 for USDC again");
+});
+
+test("a contract still owing after a claim, as for more than 50 epochs, is claimed again in full", async () => {
+  const { chain, sent } = fakeChain(crowded({ partial: key(2, I1, USDC) }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  assert.equal(sent.length, 2);
+  const [first, second] = sent.map(decode);
+  assert.ok(first!.fees.includes(I1) && second!.fees.includes(I1) && second!.tokens.includes(USDC));
+});
+
+test("a claim never replaces a transaction pending at its nonce, which may be a vote: the claims stop", async () => {
+  const { chain, sent } = fakeChain(world({ pending: true }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 1);
+  assert.equal(sent.length, 0);
 });
 
 test("a dry run simulates each claim after those it prepared, and signs them without sending", async () => {
@@ -584,6 +674,12 @@ test("a plan asks the bribe contracts that pay most for the tokens that pay most
   assert.equal(planClaim([], 10_000_000n, 0, swapped), undefined);
   const capped = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[USDC, 35]]))!;
   assert.deepEqual([capped.fees, capped.bribes, capped.usd], [[I1], [E2], 50], "E1 owes more USDC than the cap");
+});
+
+test("a contract that owes more of a capped token than its cap is still claimed for its other tokens", () => {
+  const pairs = [pair(E1, HYDX, 1000), pair(E1, USDC, 50), pair(E2, USDC, 20)];
+  const plan = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[HYDX, 500]]))!;
+  assert.deepEqual([plan.tokens, plan.bribes, plan.usd], [[USDC], [E1, E2], 70]);
 });
 
 test("a bribe contract that does not pay for its gas is left out", () => {

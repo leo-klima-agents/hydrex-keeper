@@ -62,7 +62,7 @@ export async function prepareVote(
   const { tx, cost, balance, tip, congested } = await prepareCall(
     chain,
     { functionName: "vote", args: [vote.pools, vote.weights] },
-    target,
+    { target },
   );
   // A vote before the last blocks must leave enough to vote in them.
   const needed = (target ? 1n : 2n) * cost;
@@ -75,26 +75,25 @@ export async function prepareVote(
 
 /**
  * The transaction that makes `call` from the keeper, simulated: a vote just after the block it is for, by default the
- * latest, and a claim in the node's next block, after `before`, calls a dry run prepared but did not send. Throws if it
- * would revert. Returns its maximum `cost` and its `expectedCost` at its fees, in wei, L1 fee included, and the keeper's
- * `balance`.
+ * latest, and a claim in the block after `at`, by default the latest, after `before`, calls a dry run prepared but did
+ * not send. Throws if it would revert. Returns its maximum `cost` and its `expectedCost` at its fees, in wei, L1 fee
+ * included, the keeper's `balance`, and whether another transaction of the keeper is `queued` at its nonce.
  */
 export async function prepareCall(
   chain: Chain,
   { functionName, args }: ModuleCall,
-  target?: Target,
-  before: readonly ModuleCall[] = [],
+  { target, before = [], at }: { target?: Target | undefined; before?: readonly ModuleCall[]; at?: bigint } = {},
 ) {
   const { client, module, keeper } = chain;
   const data = encodeFunctionData({ abi: moduleAbi, functionName, args } as never);
   const toCall = (c: ModuleCall) => ({ account: keeper, to: module, abi: moduleAbi, ...c }) as const;
   // A vote in the last blocks is simulated on the latest block, which may already be the one at its `time`. Another
   // vote is simulated just after the latest block, on that block: a node ahead of the one that gave it would refuse a
-  // time before its own latest block's. A claim does not depend on the time, and goes in the node's next block.
+  // time before its own latest block's. A claim does not depend on the time.
   const head = functionName === "vote" && !target ? await client.getBlock() : undefined;
   const time = target?.time ?? head?.timestamp;
   const blockOverrides = time === undefined ? {} : { blockOverrides: { time: time + 1n } };
-  const on = head ? { blockNumber: head.number } : {};
+  const on = head ? { blockNumber: head.number } : at !== undefined ? { blockNumber: at } : {};
   const calls = [...before, { functionName, args } as ModuleCall].map(toCall);
   const [[block], suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
     client.simulateBlocks({ ...on, blocks: [{ ...blockOverrides, calls: calls as never[] }] }),
@@ -145,6 +144,7 @@ export async function prepareCall(
     balance,
     tip,
     congested,
+    queued,
     simulated: { gasUsed, logs: logs ?? [] },
   };
 }
