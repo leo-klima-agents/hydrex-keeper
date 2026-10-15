@@ -68,6 +68,7 @@ golden_case deploy-stale drift keeper deploy.sh
 golden_case deploy-list-fails list-fails keeper deploy.sh
 golden_case deploy-coingecko existing coingecko deploy.sh
 golden_case run-dry existing keeper run.sh --dry-run --now
+golden_case run-claim existing keeper run.sh --dry-run --claim
 golden_case run-bad-arg existing keeper run.sh --later
 golden_case config-bad-module existing bad-module run.sh --now
 golden_case check-ok existing keeper check.sh

@@ -5,6 +5,7 @@ import {
   type Address,
   type Hex,
   type LocalAccount,
+  type Log,
 } from "viem";
 import { base } from "viem/chains";
 import { moduleAbi } from "./abi.ts";
@@ -22,7 +23,7 @@ const MAX_GAS = 16_777_216n; // per transaction on Base, since its Azul upgrade
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
 
-type Tx = {
+export type Tx = {
   chainId: number;
   to: Address;
   data: Hex;
@@ -37,7 +38,18 @@ type Target = { time: bigint; lastVoted: bigint };
 
 export type Prepared = { tx: Tx; signed?: Hex | undefined; lastVoted?: bigint | undefined };
 
-const lastSentBy = new WeakMap<Client, Tx & { lastVoted?: bigint | undefined }>();
+/** A call of the module by the keeper. */
+export type ModuleCall =
+  | { functionName: "vote"; args: readonly [Address[], bigint[]] }
+  | {
+      functionName: "claimSwapAndDistribute";
+      args: readonly [bigint, Address[], Hex[], Address[], Address[], Address[], bigint, bigint];
+    };
+
+/** The call as simulated: its gas and logs. */
+export type Simulated = { gasUsed: bigint; logs: readonly Log[] };
+
+const lastSentBy = new WeakMap<Client, Tx & { lastVoted?: bigint | undefined; mined?: boolean }>();
 
 /**
  * Simulates module.vote just after the block it is for, by default the latest, and signs it unless there is no key.
@@ -51,15 +63,35 @@ export async function prepareVote(
   dryRun: boolean,
   target?: Target,
 ): Promise<Prepared> {
+  const { tx, cost, balance, tip, congested } = await prepareCall(
+    chain,
+    { functionName: "vote", args: [vote.pools, vote.weights] },
+    target,
+  );
+  // A vote before the last blocks must leave enough to vote in them.
+  const needed = (target ? 1n : 2n) * cost;
+  if (balance < needed) {
+    throw new Error(`fund the keeper: ${chain.keeper} has ${balance} wei, needs ${needed}: a vote costs up to ${cost}`);
+  }
+  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce: tx.nonce, tip, congested });
+  return { ...(await signTx(account, tx, dryRun)), lastVoted: target?.lastVoted };
+}
+
+/**
+ * The transaction that makes `call` from the keeper, simulated: a vote just after the block it is for, by default the
+ * latest, and a claim in the node's next block. Throws if it would revert. Returns its maximum `cost` and its
+ * `expectedCost` at the current fees, in wei, L1 fee included, and the keeper's `balance`.
+ */
+export async function prepareCall(chain: Chain, { functionName, args }: ModuleCall, target?: Target) {
   const { client, module, keeper } = chain;
-  const args = [vote.pools, vote.weights] as const;
-  const data = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args });
-  const call = { account: keeper, to: module, abi: moduleAbi, functionName: "vote", args } as const;
-  const time = target?.time ?? (await client.getBlock()).timestamp;
-  // The simulated block builds on the latest one, which may already be the one at `time`.
-  const blockOverrides = { time: time + 1n };
+  const data = encodeFunctionData({ abi: moduleAbi, functionName, args } as never);
+  const call = { account: keeper, to: module, abi: moduleAbi, functionName, args } as const;
+  // The simulated block builds on the latest one, which may already be the one at `time`. A claim does not depend on
+  // the time, and pinning it could fall behind a node ahead of the one that gave the latest block.
+  const time = functionName === "vote" ? (target?.time ?? (await client.getBlock()).timestamp) : undefined;
+  const blockOverrides = time === undefined ? {} : { blockOverrides: { time: time + 1n } };
   const [[block], suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateBlocks({ blocks: [{ blockOverrides, calls: [call] }] }),
+    client.simulateBlocks({ blocks: [{ ...blockOverrides, calls: [call as never] }] }),
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: keeper, blockTag: "latest" }),
@@ -68,7 +100,8 @@ export async function prepareVote(
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]);
   const simulated = block!.calls[0]!;
-  if (simulated.status !== "success") throw simulated.error ?? new Error("the vote would revert");
+  const what = functionName === "vote" ? "the vote" : "the claim";
+  if (simulated.status !== "success") throw simulated.error ?? new Error(`${what} would revert`);
   const baseFee = history.baseFeePerGas.at(-1); // the next block's
   if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
@@ -76,9 +109,10 @@ export async function prepareVote(
   const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
   // The confirmed nonce, so that a pending vote is replaced, not queued behind: at a quarter more than the one this
   // process sent, or at twice the fees over one of unknown fees. Once the Voter shows a later vote than the one the sent
-  // vote was decided on, that vote is in a block, whatever the node says.
+  // vote was decided on, or its receipt was seen, that transaction is in a block, whatever the node says.
   const lastSent = lastSentBy.get(client);
-  const mined = target && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted;
+  const mined =
+    lastSent?.mined === true || (target && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted);
   const nonce = Math.max(latest, mined ? lastSent.nonce + 1 : 0);
   const queued = pending > nonce;
   const own = lastSent?.nonce === nonce ? lastSent : undefined;
@@ -95,31 +129,38 @@ export async function prepareVote(
     nonce,
   } satisfies Tx;
   const cost = tx.gas * tx.maxFeePerGas + l1Fee;
-  // A vote before the last blocks must leave enough to vote in them.
-  const needed = (target ? 1n : 2n) * cost;
-  if (balance < needed) {
-    throw new Error(`fund the keeper: ${keeper} has ${balance} wei, needs ${needed}: a vote costs up to ${cost}`);
-  }
-  log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce, tip, congested });
+  const { gasUsed, logs } = simulated;
+  const expectedCost = gasUsed * (baseFee + tip) + l1Fee;
+  return {
+    tx,
+    cost,
+    expectedCost,
+    balance,
+    tip,
+    congested,
+    simulated: { gasUsed, logs: logs ?? [] } satisfies Simulated,
+  };
+}
 
-  const lastVoted = target?.lastVoted;
+/** Signs `tx`, unless there is no key, or, in a dry run, no metadata server. */
+export async function signTx(account: LocalAccount | undefined, tx: Tx, dryRun: boolean): Promise<Prepared> {
   if (!account) {
     log.warning("signing skipped: no KMS key configured");
-    return { tx, lastVoted };
+    return { tx };
   }
   try {
-    return { tx, signed: await account.signTransaction(tx), lastVoted };
+    return { tx, signed: await account.signTransaction(tx) };
   } catch (error) {
     if (dryRun && error instanceof NoMetadataServer) {
       log.warning("signing skipped: no metadata server", { reason: error.message });
-      return { tx, lastVoted };
+      return { tx };
     }
     throw error;
   }
 }
 
-/** Sends a signed vote to every RPC; resolves with its hash once one accepts it before `until` (ms). */
-export async function broadcastVote(
+/** Sends a signed transaction to every RPC; resolves with its hash once one accepts it before `until` (ms). */
+export async function broadcastTx(
   chain: Chain,
   { tx, signed, lastVoted }: Prepared & { signed: Hex },
   until: number,
@@ -127,6 +168,12 @@ export async function broadcastVote(
   if (Date.now() >= until) throw new Error("out of time before sending");
   lastSentBy.set(chain.client, { ...tx, lastVoted }); // before sending: a send that fails may still have reached a node
   return chain.broadcast(signed, until);
+}
+
+/** Records that the receipt of the transaction this process sent last, at `nonce`, was seen. */
+export function markMined({ client }: Chain, nonce: number): void {
+  const lastSent = lastSentBy.get(client);
+  if (lastSent?.nonce === nonce) lastSentBy.set(client, { ...lastSent, mined: true });
 }
 
 /**
@@ -155,7 +202,7 @@ export async function castVote(
     log.info("dry run: signed, not sent");
     return;
   }
-  const hash = await broadcastVote(chain, { ...prepared, signed }, until);
+  const hash = await broadcastTx(chain, { ...prepared, signed }, until);
   log.info("vote sent", { hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;

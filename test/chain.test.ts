@@ -73,7 +73,7 @@ test("broadcast counts 'already known' as accepted, and fails only when no node 
   await assert.rejects(
     broadcaster(nodes.slice(1).map((n) => n.url))(signed, Date.now() + 60_000),
     (e: Error) =>
-      /^no RPC accepted the vote: 127\.0\.0\.1:\d+: .*nonce too low.*; 127\.0\.0\.1:/s.test(e.message) &&
+      /^no RPC accepted the transaction: 127\.0\.0\.1:\d+: .*nonce too low.*; 127\.0\.0\.1:/s.test(e.message) &&
       !e.message.includes("secret-key"),
   );
 });
@@ -165,6 +165,29 @@ test("readMany sends one multicall per CHUNK calls and keeps their order", async
   }));
   const results = await readMany<number>(client, calls as Call[]);
   assert.deepEqual(sizes, [CHUNK, CHUNK, 1]);
+  assert.deepEqual(
+    results,
+    calls.map((_, i) => i),
+  );
+});
+
+test("readMany can send smaller chunks, a few at a time, and still keeps their order", async () => {
+  let inFlight = 0;
+  let most = 0;
+  const sizes: number[] = [];
+  const client = {
+    multicall: async ({ contracts }: { contracts: Call[] }) => {
+      most = Math.max(most, ++inFlight);
+      sizes.push(contracts.length);
+      await sleep((5 * (contracts[0]!.args![0] as number)) % 3);
+      inFlight--;
+      return contracts.map((c) => c.args![0]);
+    },
+  } as unknown as Client;
+  const calls = Array.from({ length: 103 }, (_, i) => ({ address: "0x", abi: [], functionName: "f", args: [i] }));
+  const results = await readMany<number>(client, calls as Call[], { chunk: 10, concurrency: 3 });
+  assert.equal(sizes.length, 11);
+  assert.equal(most, 3);
   assert.deepEqual(
     results,
     calls.map((_, i) => i),

@@ -101,7 +101,7 @@ export function broadcaster(rpcUrls: string[]) {
     return Promise.any(sends).then(
       () => hash,
       (error: AggregateError) => {
-        throw new Error(`no RPC accepted the vote: ${reasons(error.errors).join("; ")}`);
+        throw new Error(`no RPC accepted the transaction: ${reasons(error.errors).join("; ")}`);
       },
     );
   };
@@ -143,7 +143,14 @@ export function voterCall({ voter }: Chain, functionName: string, args: readonly
   return { address: voter, abi: voterAbi, functionName, args };
 }
 
-type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined };
+type ReadOptions = {
+  blockNumber?: bigint;
+  blockTag?: "pending" | undefined;
+  /** Calls per eth_call, lower for calls heavy enough to reach a node's gas cap. */
+  chunk?: number;
+  /** eth_calls in flight, for reads too large to send at once. */
+  concurrency?: number;
+};
 
 /**
  * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
@@ -152,16 +159,19 @@ type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined };
 export async function readMany<T>(
   client: Client,
   calls: readonly Call[],
-  { blockNumber, blockTag }: ReadOptions = {},
+  { blockNumber, blockTag, chunk = CHUNK, concurrency = Infinity }: ReadOptions = {},
 ): Promise<T[]> {
   const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
-  const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) =>
-    calls.slice(i * CHUNK, (i + 1) * CHUNK),
+  const chunks = Array.from({ length: Math.ceil(calls.length / chunk) }, (_, i) =>
+    calls.slice(i * chunk, (i + 1) * chunk),
   );
-  const results = await Promise.all(
-    chunks.map((contracts) =>
-      client.multicall({ contracts: contracts as never, allowFailure: false, batchSize: 0, ...at }),
-    ),
-  );
+  const results: unknown[][] = [];
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < chunks.length; i = next++) {
+      results[i] = await client.multicall({ contracts: chunks[i] as never, allowFailure: false, batchSize: 0, ...at });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
   return results.flat() as T[];
 }
