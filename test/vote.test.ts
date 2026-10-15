@@ -13,7 +13,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { broadcastVote, castVote, prepareVote, VoteSent } from "../src/vote.ts";
+import { broadcastVote, castVote, nonceTaken, prepareVote, VoteSent } from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -30,6 +30,7 @@ type Behaviour = {
   minedHash?: Hex;
   verifyFails?: boolean;
   sendFails?: boolean;
+  balance?: bigint;
 };
 
 /** A client that answers castVote's reads and records what it is asked to send. */
@@ -61,7 +62,7 @@ function fakeChain(b: Behaviour = {}) {
       assert.equal(args, undefined, "the latest block");
       return { timestamp: 1_790_812_797n };
     },
-    getBalance: async () => 10n ** 18n,
+    getBalance: async () => b.balance ?? 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
     waitForTransactionReceipt: async ({
       hash,
@@ -203,6 +204,30 @@ test("a send that fails still counts as this process's vote: it may have reached
   assert.deepEqual([tx.nonce, tx.maxFeePerGas], [3, 1_250n], "a quarter more than the recorded fees");
 });
 
+test("a nonce is taken once the keeper's nonce in the block being built is past it", async () => {
+  const { chain } = fakeChain({ nonce: 3, pending: 4 });
+  assert.equal(await nonceTaken(chain, 3), true);
+  assert.equal(await nonceTaken(chain, 4), false);
+  chain.client.getTransactionCount = (async () => {
+    throw new Error("timeout");
+  }) as never;
+  assert.equal(await nonceTaken(chain, 3), false, "unknown counts as not taken");
+});
+
+test("before the last blocks, the keeper must be able to pay for a vote twice; in them, once", async () => {
+  const cost = 150_000n * 1_000n + 5_000n; // gas times max fee, plus the L1 fee
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const short = fakeChain({ balance: 2n * cost - 1n });
+  await assert.rejects(castVote(short.chain, signer, vote, false, far), /fund the keeper: .* needs 300010000:/);
+  assert.equal(short.sent.length, 0);
+  await prepareVote(short.chain, signer, vote, false, target);
+  await prepareVote(fakeChain({ balance: cost }).chain, signer, vote, false, target);
+  await assert.rejects(
+    prepareVote(fakeChain({ balance: cost - 1n }).chain, signer, vote, false, target),
+    /fund the keeper/,
+  );
+});
+
 test("a receipt of an earlier vote under the same nonce means this one must be sent again", async () => {
   const { chain } = fakeChain({ minedHash: `0x${"cd".repeat(32)}` });
   await assert.rejects(
@@ -216,7 +241,7 @@ test("a failed verification after mining is reported as sent", async () => {
 });
 
 test("the module ABI names the Voter's and the conduit's errors that a simulated vote passes through", () => {
-  for (const name of ["EpochFlipInProgress", "VoteDelayNotMet", "InsufficientVotingPower"]) {
+  for (const name of ["EpochFlipInProgress", "VoteDelayNotMet", "EpochStale", "InsufficientVotingPower"]) {
     assert.equal(decodeErrorResult({ abi: moduleAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
   }
   const role = `0x${"ab".repeat(32)}` as Hex;

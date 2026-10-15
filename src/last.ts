@@ -6,7 +6,7 @@ import type { Prices } from "./prices.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
 import { expected, select, type Vote } from "./select.ts";
-import { broadcastVote, prepareVote, verifyVote, type Prepared } from "./vote.ts";
+import { broadcastVote, nonceTaken, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
 const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
 const PRICES_BY_MS = 5_000; // before the flip
@@ -177,9 +177,13 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     sending.push(
       broadcastVote(chain, { ...prepared, signed }, flipMs).then(
         (hash) => log.info("vote sent", { hash }),
-        (error: unknown) => {
+        async (error: unknown) => {
+          const notSent = { nonce: tx.nonce, error: errorMessage(error) };
+          if (await nonceTaken(chain, tx.nonce)) {
+            return log.warning("vote not sent: an earlier vote took its nonce", notSent);
+          }
           failures++;
-          log.error("vote not sent", { error: errorMessage(error) });
+          log.error("vote not sent", notSent);
         },
       ),
     );

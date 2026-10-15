@@ -5,7 +5,7 @@ export type Candidate = { pool: Address; rewardsUsd: number; otherVotes: bigint;
 export type Vote = { pools: Address[]; weights: bigint[] };
 
 const BPS = 10_000;
-const MIN_GAIN = 0.01; // re-vote only when the expected reward improves by this fraction
+const MIN_GAIN_USD = 1; // re-vote only when the expected reward improves by this much
 const MIN_SHARE = 0.001; // pools that would get less are left out to save gas
 const MAX_POOLS = 40; // more could take a vote past the gas a Base transaction may use
 
@@ -79,13 +79,13 @@ export function toVote(pools: { pool: Address }[], fractions: number[]): Vote {
   return { pools: funded.map((i) => pools[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
 }
 
-/** The water-filling allocation and its vote; the vote is null when nothing pays or the gain is under MIN_GAIN. */
+/** The water-filling allocation and its vote; the vote is null when nothing pays or the gain is under MIN_GAIN_USD. */
 export function select(candidates: Candidate[], power: bigint): { fractions: number[] | null; vote: Vote | null } {
   const fractions = waterFill(candidates, power);
   if (!fractions) return { fractions, vote: null };
   const rounded = fractions.map((f) => Math.round(f * BPS) / BPS);
   const current = candidates.map((c) => Number(c.ownVotes) / Number(power));
   const next = expected(candidates, rounded, power);
-  if (next - expected(candidates, current, power) <= MIN_GAIN * next) return { fractions, vote: null };
+  if (next - expected(candidates, current, power) <= MIN_GAIN_USD) return { fractions, vote: null };
   return { fractions, vote: toVote(candidates, fractions) };
 }

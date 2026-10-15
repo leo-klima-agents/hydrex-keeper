@@ -32,7 +32,7 @@ type Tx = {
   nonce: number;
 };
 
-/** The block a vote is for: its timestamp (s), and the conduit's `lastVoted` as read on it. */
+/** The block a vote in the last blocks is for: its timestamp (s), and the conduit's `lastVoted` as read on it. */
 type Target = { time: bigint; lastVoted: bigint };
 
 export type Prepared = { tx: Tx; signed?: Hex | undefined; lastVoted?: bigint | undefined };
@@ -95,7 +95,11 @@ export async function prepareVote(
     nonce,
   } satisfies Tx;
   const cost = tx.gas * tx.maxFeePerGas + l1Fee;
-  if (balance < 2n * cost) throw new Error(`fund the keeper: ${keeper} has ${balance} wei, a vote costs up to ${cost}`);
+  // A vote before the last blocks must leave enough to vote in them.
+  const needed = (target ? 1n : 2n) * cost;
+  if (balance < needed) {
+    throw new Error(`fund the keeper: ${keeper} has ${balance} wei, needs ${needed}: a vote costs up to ${cost}`);
+  }
   log.info("vote prepared", { pools: vote.pools, weights: vote.weights, gas: tx.gas, nonce, tip, congested });
 
   const lastVoted = target?.lastVoted;
@@ -123,6 +127,17 @@ export async function broadcastVote(
   if (Date.now() >= until) throw new Error("out of time before sending");
   lastSentBy.set(chain.client, { ...tx, lastVoted }); // before sending: a send that fails may still have reached a node
   return chain.broadcast(signed, until);
+}
+
+/**
+ * Whether the keeper's nonce is past `nonce` in the block being built. A vote decided before the one it replaces landed
+ * reuses that one's nonce, and nodes then refuse it.
+ */
+export async function nonceTaken({ client, keeper }: Chain, nonce: number): Promise<boolean> {
+  return client.getTransactionCount({ address: keeper, blockTag: "pending" }).then(
+    (next) => next > nonce,
+    () => false,
+  );
 }
 
 /** Prepares and sends module.vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
