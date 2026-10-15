@@ -2,9 +2,10 @@
 
 A static page where holders of vote-escrowed positions on metaDEXes hand their votes and rewards to a relay, and take
 them back. Hydrex calls these relays conduits; Aerodrome and Velodrome call them relays. Version 1 supports one:
-Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The page is served from IPFS through an ENS name on
-eth.limo. This plan is for the agent that builds it. The facts below were checked on Base on 2026-10-15; check them
-again before relying on them.
+Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The same static build is served from GitHub Pages
+(or a similar host), so that Safe{Wallet} can open it as a Safe App, and from IPFS through an ENS name on eth.limo. This
+plan is for the agent that builds it. The facts below were checked on Base on 2026-10-15; check them again before
+relying on them.
 
 ## Why it exists
 
@@ -23,7 +24,7 @@ again before relying on them.
 - Wallet view: the user's accounts, their status, and joining, leaving and setting the payout address.
 - A read-only view of any address, for Safe signers and for research.
 - Browser-extension and in-app wallets, and Coinbase Wallet with its smart wallet, through wagmi.
-- Safes, through a batch file for Safe{Wallet}'s Transaction Builder.
+- Safes, with the page opened as a Safe App inside Safe{Wallet}.
 
 **Out of v1:**
 
@@ -148,12 +149,12 @@ first load because esbuild splits by file: viem files that both the page and the
 `baseAccount` depends on `@coinbase/cdp-sdk`. `coinbaseWallet` uses `@coinbase/wallet-sdk`, which also reaches Coinbase
 Smart Wallet / Base Account through keys.coinbase.com; confirm that with a real Base Account.
 
-Version 1 uses `injected` and `coinbaseWallet` only. That build installs 24 packages, and its first load is 71 KB. The
-others are left out: `metaMask` because `injected` already finds MetaMask's extension, `baseAccount` because
-`coinbaseWallet` reaches the same smart wallets, `walletConnect` for its weight, and `safe` because Safe cannot frame
-the page (below).
+Version 1 uses `injected`, `coinbaseWallet` and `safe`. That build installs 28 packages, and its first load is 73 KB;
+Safe's SDK loads only when the page runs inside Safe{Wallet}. The others are left out: `metaMask` because `injected`
+already finds MetaMask's extension, `baseAccount` because `coinbaseWallet` reaches the same smart wallets, and
+`walletConnect` for its weight.
 
-### Safe{Wallet} and eth.limo
+### Safe{Wallet}, eth.limo and GitHub Pages
 
 - **How Safe Apps load:** Safe{Wallet} fetches the app's `manifest.json` with a plain GET, then shows the app in an
   iframe.
@@ -166,20 +167,23 @@ the page (below).
   Safe's own Transaction Builder loaded in the same set-up.
 - **Other gateways:** 4everland and inbrowser.link send the same `X-Frame-Options`. The ipfs.io / dweb.link gateway now
   answers with a notice that it is switching to a service-worker gateway only.
-- **So:** the page cannot run as a Safe App from eth.limo, and Safes use the Transaction Builder export instead. A Safe
-  App would need a second copy on a host that allows framing. GitHub Pages sends no framing headers, but that route is
-  untested.
-- **Side benefit:** the same headers stop other sites from framing the page to trick its users.
+- **GitHub Pages:** sends `Access-Control-Allow-Origin: *` and no framing headers. In the same test, a live GitHub Pages
+  site (`pages-themes.github.io/minimal`) loaded inside Safe{Wallet}'s frame. pages.github.com did not, apparently
+  because of that page's own scripts, so test this page in Safe{Wallet} early.
+- **So:** the page runs as a Safe App from GitHub Pages or a similar host, and from eth.limo only as a normal page.
+- **Clickjacking:** eth.limo's headers stop other sites from framing the page; GitHub Pages lets any site frame it. See
+  [Content Security Policy](#content-security-policy).
 
 ## Principles
 
 Copy hydrex-keeper's way of working:
 
 - **Small surface.**
-  - **Runtime packages:** `viem`, `@wagmi/core`, `@wagmi/connectors` and `@coinbase/wallet-sdk`, each pinned to an exact
-    version. No UI framework, CSS framework, analytics, trackers, external fonts, CDNs or remote images.
-  - **Loading:** Coinbase's SDK loads only when someone picks Coinbase Wallet, so a bad SDK release reaches only its
-    users.
+  - **Runtime packages:** `viem`, `@wagmi/core`, `@wagmi/connectors`, `@coinbase/wallet-sdk`,
+    `@safe-global/safe-apps-sdk` and `@safe-global/safe-apps-provider`, each pinned to an exact version. No UI
+    framework, CSS framework, analytics, trackers, external fonts, CDNs or remote images.
+  - **Loading:** Coinbase's SDK loads only when someone picks Coinbase Wallet, and Safe's only inside Safe{Wallet}, so a
+    bad SDK release reaches only its own users.
   - **Network:** at run time the page talks only to the listed RPCs, the user's wallet, and the services that wallet's
     SDK needs.
 - **Reproducible.** The same commit gives the same `dist/` and the same CID on any machine. CI proves it.
@@ -201,9 +205,10 @@ Copy hydrex-keeper's way of working:
 ## Stack
 
 - **Language:** TypeScript checked by `tsc`, bundled for the browser by `esbuild` (one pinned binary, deterministic
-  output) with `format: "esm"` and `splitting: true`, so Coinbase's SDK becomes its own chunk. No Vite.
+  output) with `format: "esm"` and `splitting: true`, so the Coinbase and Safe SDKs become their own chunks. No Vite.
 - **Wallets:** `@wagmi/core`.
-  - **Connectors:** `createConfig` with `injected` and `coinbaseWallet`.
+  - **Connectors:** `createConfig` with `injected`, `coinbaseWallet` and `safe`. The `safe` connector works only inside
+    Safe{Wallet}'s frame; connect it automatically there.
   - **Discovery and reconnect:** EIP-6963 discovery stays on (`multiInjectedProviderDiscovery`). wagmi's storage in
     `localStorage` and `reconnect` restore the last wallet.
   - **Telemetry:** turn off every SDK's analytics or telemetry option, and let the CSP block what remains unless the
@@ -218,10 +223,11 @@ Copy hydrex-keeper's way of working:
   stack, and inline SVG icons.
 - **Routing:** none. `#0x…` opens the read-only view of an address. The hash never reaches the gateway.
 - **Budget:**
-  - **Limits:** CI fails if the first load passes 90 KB gzipped (71 KB measured), or the CSS 10 KB. It prints every
+  - **Limits:** CI fails if the first load passes 90 KB gzipped (73 KB measured), or the CSS 10 KB. It prints every
     chunk's size.
-  - **Imports:** import `injected` from `@wagmi/core` and `coinbaseWallet` from `@wagmi/connectors/coinbaseWallet`.
-    Never import the `@wagmi/connectors` barrel: it puts every SDK in the build, whether used or not.
+  - **Imports:** import `injected` from `@wagmi/core`, and `coinbaseWallet` and `safe` from their own entry points, such
+    as `@wagmi/connectors/safe`. Never import the `@wagmi/connectors` barrel: it puts every SDK in the build, whether
+    used or not.
   - **Duplicates:** dedupe shared packages; today `ox` ships in more than one version.
 
 ## Built for more relays
@@ -249,6 +255,8 @@ user.
 
 ```
 index.html             CSP meta tag, root element, one script and one stylesheet
+manifest.json          Safe App manifest: name, description, icon
+icon.svg               the icon it points to
 src/
   abi.ts               parseAbi fragments
   config.ts            wagmi config: chains, transports, connectors
@@ -257,7 +265,6 @@ src/
     hydrex-conduit.ts  reads, status, calls and checks for Hydrex conduits
   status.ts            shared account statuses (pure)
   write.ts             call ordering, batching, simulation
-  safe.ts              Transaction Builder batch file (pure)
   format.ts            numbers, dates, addresses (pure)
   view.ts              render and h()
   main.ts              state and wiring
@@ -302,11 +309,11 @@ The page never mentions that Hydrex's automations ended, and shows no payout his
 
 ### States to design
 
-- **Wallet:** none, several, Coinbase's SDK failing to load, and the wrong network.
+- **Wallet:** none, several, Coinbase's SDK failing to load, the wrong network, and the page opened inside Safe{Wallet}.
 - **Accounts:** none (link to Hydrex), and every account status above.
 - **Transactions:** pending, success, rejected, and reverted (in plain words).
 - **Problems:** an unreachable RPC, and a failed startup check.
-- **Viewing:** a read-only address, and a Safe's address with the export.
+- **Viewing:** a read-only address.
 
 ### Writes
 
@@ -315,9 +322,10 @@ The page never mentions that Hydrex's automations ended, and shows no payout his
   with one confirmation. Otherwise send one transaction after another, with progress, in the safe order.
 - **Simulate first:** simulate every call from the owner before asking the wallet. Show the revert reason in plain
   words, and send nothing that fails.
-- **Safe:** the read-only view of a Safe's address offers its calls, in the safe order, as a file for Safe{Wallet}'s
-  Transaction Builder. The signers import it there, check the decoded calls, and propose one Safe transaction. Follow
-  the Transaction Builder's current file format, and give the steps on the page.
+- **Safe:** inside Safe{Wallet}, the `safe` connector proposes the calls. If Safe reports atomic `sendCalls` support,
+  they go as one Safe transaction; otherwise as one Safe transaction each, in the safe order. Safe returns a Safe
+  transaction hash, not a transaction hash: show the proposal as waiting for the other signers, and re-read once it
+  executes.
 - **After sending:** wait for the receipt or the calls status, then re-read and re-render. Never trust an optimistic
   state.
 
@@ -343,9 +351,19 @@ connect-src <RPC origins> <wallet SDK origins>; frame-src <wallet SDK origins>; 
 
 - **Wallet origins:** take each SDK's origins from its documentation, then confirm them in the browser. Every wallet
   must work, and the console must show no CSP violation the wallet needs. List each origin and its reason in the README.
-- **Framing:** a meta tag cannot set `frame-ancestors`. eth.limo already sends `frame-ancestors 'self'` and
-  `X-Frame-Options: SAMEORIGIN`; say in the README that the page relies on the gateway for this.
-- **Links:** share links to eth.limo and to subdomain gateways only, because path gateways put every site on one origin.
+- **Framing:** a meta tag cannot set `frame-ancestors`.
+  - **eth.limo:** sends `frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so no other site can frame the page
+    there.
+  - **Safe App host:** must let app.safe.global frame the page, and nothing else. Prefer a host that can send
+    `Content-Security-Policy: frame-ancestors 'self' https://app.safe.global` from a headers file, such as Cloudflare
+    Pages or Netlify. GitHub Pages sends no such header, so any site could frame the page there.
+  - **Check in the page:** when framed, render only if `location.ancestorOrigins` (or `document.referrer` where that is
+    missing) shows `https://app.safe.global`, and otherwise say why the page is blank. This backs up the header; it does
+    not replace it.
+- **Safe App manifest:** `manifest.json` sits at the site's root and is served with `Access-Control-Allow-Origin: *`,
+  because Safe{Wallet} fetches it from its own origin. GitHub Pages does this already.
+- **Links:** share links to eth.limo, to the Safe App host and to subdomain gateways only, because path gateways put
+  every site on one origin.
 
 ## Research
 
@@ -393,7 +411,7 @@ screenshots of other sites out of the repository.
 ## Testing
 
 - **Unit:** `node --test` on the pure modules: call encoding against viem's `encodeFunctionData`, account status from
-  reads, the next-flip date, the safe order of calls, the Transaction Builder file, the registry, and formatting.
+  reads, the next-flip date, the safe order of calls, the registry, and formatting.
 - **Fork:**
   - Run `anvil --fork-url <Base RPC>` at a pinned block, and drive Chromium with Playwright, using the preinstalled
     browser.
@@ -403,21 +421,22 @@ screenshots of other sites out of the repository.
   - Take screenshots at 390 and 1440 px, light and dark.
 - **Coinbase:** a smoke test checks that Coinbase's SDK chunk loads under the CSP and opens its popup, without signing
   anything.
-- **Safe export:** Playwright opens Safe{Wallet} read-only for the large Safe, opens the Transaction Builder, imports
-  the exported file, and checks the calls it shows. Nothing is signed.
+- **Safe App:** serve a build over HTTPS, from a preview deployment or a local server. In Playwright, open Safe{Wallet}
+  read-only for the large Safe with that URL as a custom app. Check that the page loads in the frame, connects through
+  `safe` and shows the Safe's accounts. Nothing is signed.
 - **Real wallets:** a written checklist the user runs before each release, with a small account:
   - Browser extensions: MetaMask, Rabby and Coinbase Wallet.
   - In-app browsers on a phone: MetaMask, Coinbase Wallet / Base App and Rabby.
   - Coinbase's smart wallet (Base Account), through the Coinbase Wallet button.
-  - A Safe: export, import into the Transaction Builder, propose, sign and execute.
+  - A Safe, inside Safe{Wallet}: propose, sign and execute a join and a leave.
 - **CI:** Prettier, `tsc`, unit tests, REUSE, the build, the size budget, a second clean build compared byte for byte
   with the first, and the fork tests when a `BASE_RPC_URL` secret is set.
 
 ## Build, CID and release
 
 - **Build:** `npm run build` runs `scripts/build.ts`. It calls the esbuild API with minification, splitting, ES2022,
-  relative paths and `legalComments: "linked"`, and copies `index.html` and `style.css` into `dist/`. Chunk names come
-  from content hashes. The output has no timestamps and no absolute paths.
+  relative paths and `legalComments: "linked"`, and copies `index.html`, `manifest.json`, `icon.svg` and `style.css`
+  into `dist/`. Chunk names come from content hashes. The output has no timestamps and no absolute paths.
 - **CID:**
   - `npm run cid` runs a pinned Kubo release, downloaded and checked by SHA-256 rather than taken from npm:
     `ipfs add --only-hash --cid-version=1 --raw-leaves -r dist`.
@@ -425,8 +444,11 @@ screenshots of other sites out of the repository.
 - **Release:**
   1. A tag builds the site, prints the CID in the release notes, and uploads the CAR to at least two pinning services,
      using CI secrets.
-  2. The ENS name's owner, a Safe if possible, sets the contenthash to `ipfs://<CID>`.
-  3. The README explains how anyone can rebuild a tag and compare the CID with the contenthash.
+  2. The same tag deploys the same `dist/` to the Safe App host with pinned Actions. CI then fetches every served file
+     and compares it with the build.
+  3. The ENS name's owner, a Safe if possible, sets the contenthash to `ipfs://<CID>`.
+  4. The README explains how anyone can rebuild a tag and compare it with the CID behind the ENS name and with the files
+     on the Safe App host.
 
 ## Milestones
 
@@ -441,17 +463,17 @@ Ask the user at the end of each milestone before going on.
    public RPCs.
 4. **Wallets:** `injected` and `coinbaseWallet`, account statuses, join, leave and payout, with simulation, batching and
    the startup checks. Then the fork and Coinbase tests.
-5. **Safe:** the Transaction Builder export, tested in Playwright and then by the user with a real Safe.
+5. **Safe:** the Safe App manifest, the `safe` connector, the framing check and a first deployment to the Safe App host,
+   tested in Playwright and then by the user with a real Safe.
 6. **Polish:** all states, copy, accessibility, the cold-read loop, mobile, and the in-wallet browsers.
-7. **Release:** the first CID, pinning, the contenthash, and the verification steps written down.
+7. **Release:** the first CID, pinning, the contenthash, the Safe App host, and the verification steps written down.
 
 ## Still to ask the user
 
 1. **Names:** the repository's final name and owner (working name `metadex-relays`), the product's name on the page, and
    the ENS name, kept generic too.
-2. **Safe App, only if wanted:** a second copy of each release on a host that allows framing, such as GitHub Pages,
-   would let Safe run the page as a Safe App and bring back the `safe` connector. It is untested and adds a host to
-   trust.
+2. **Safe App host:** GitHub Pages, or a host that can send `frame-ancestors`, such as Cloudflare Pages or Netlify; the
+   account that owns it; and whether it gets its own domain.
 3. **Copy:** the user signs off the wording about votes, claims and payouts once hydrex-keeper's README describes
    claiming.
 
@@ -460,10 +482,10 @@ Ask the user at the end of each milestone before going on.
 - **Wallets:** a Hydrex user with a browser-extension or in-app wallet, or Coinbase's smart wallet, can join, leave and
   set the payout address, on a phone or a desktop.
 - **Understood:** a cold reader understands what joining changes, when it takes effect and how to undo it.
-- **Safe:** a Safe signer can see the Safe's accounts and export a file that imports into Safe{Wallet}'s Transaction
-  Builder and simulates cleanly there.
+- **Safe:** a Safe signer can open the page as a Safe App in Safe{Wallet}, from the Safe App host, and propose calls
+  that simulate cleanly.
 - **Reproducible:** two clean builds of the same commit give the same CID, and the README tells anyone how to check it
-  against the ENS contenthash.
+  against the ENS contenthash and the files on the Safe App host.
 - **Network and CI:** the page makes no requests beyond the listed RPCs, the wallet and the origins in the README. It
   stays within budget and passes CI.
 - **Rechecked:** every fact in this plan that the page relies on has been checked again, and `docs/research.md` records
