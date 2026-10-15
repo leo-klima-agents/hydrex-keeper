@@ -2,9 +2,9 @@
 
 A static page where holders of vote-escrowed positions on metaDEXes hand their votes and rewards to a relay, and take
 them back. Hydrex calls these relays conduits; Aerodrome and Velodrome call them relays. Version 1 supports one:
-Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The same static build is served from GitHub Pages,
-so that Safe{Wallet} can open it as a Safe App, and from IPFS through an ENS name on eth.limo. This plan is for the
-agent that builds it. The facts below were checked on Base on 2026-10-15; check them again before relying on them.
+Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The page is a static site on GitHub Pages, which
+also lets Safe{Wallet} open it as a Safe App. This plan is for the agent that builds it. The facts below were checked on
+Base on 2026-10-15; check them again before relying on them.
 
 ## Why it exists
 
@@ -32,6 +32,9 @@ agent that builds it. The facts below were checked on Base on 2026-10-15; check 
 - Payout history: not shown for now.
 - Relays other than Carbon Impact.
 - Anything that needs a server.
+- IPFS and an ENS name: later, if an on-chain record of the official build or a home outside GitHub becomes worth the
+  extra release steps. The build stays reproducible so that adding them is a release-workflow change. GitHub Pages stays
+  the Safe App host either way, because Safe{Wallet} cannot frame eth.limo (below).
 
 ## Facts
 
@@ -153,7 +156,7 @@ Safe's SDK loads only when the page runs inside Safe{Wallet}. The others are lef
 already finds MetaMask's extension, `baseAccount` because `coinbaseWallet` reaches the same smart wallets, and
 `walletConnect` for its weight.
 
-### Safe{Wallet}, eth.limo and GitHub Pages
+### Safe{Wallet} and hosting
 
 - **How Safe Apps load:** Safe{Wallet} fetches the app's `manifest.json` with a plain GET, then shows the app in an
   iframe.
@@ -169,8 +172,8 @@ already finds MetaMask's extension, `baseAccount` because `coinbaseWallet` reach
 - **GitHub Pages:** sends `Access-Control-Allow-Origin: *` and no framing headers. In the same test, a live GitHub Pages
   site (`pages-themes.github.io/minimal`) loaded inside Safe{Wallet}'s frame. pages.github.com did not, apparently
   because of that page's own scripts, so test this page in Safe{Wallet} early.
-- **So:** the page runs as a Safe App from GitHub Pages, and from eth.limo only as a normal page. Other sites can frame
-  it on GitHub Pages too; see [Copies and framing](#copies-and-framing).
+- **So:** the page runs as a Safe App from GitHub Pages. Other sites can frame it there too; see
+  [Copies and framing](#copies-and-framing).
 
 ## Principles
 
@@ -184,7 +187,7 @@ Copy hydrex-keeper's way of working:
     bad SDK release reaches only its own users.
   - **Network:** at run time the page talks only to the listed RPCs, the user's wallet, and the services that wallet's
     SDK needs.
-- **Reproducible.** The same commit gives the same `dist/` and the same CID on any machine. CI proves it.
+- **Reproducible.** The same commit gives the same `dist/` on any machine. CI proves it.
 - **Plain code.** Small functions, no classes, strict TypeScript (`strict`, `exactOptionalPropertyTypes`,
   `noUncheckedIndexedAccess`, `erasableSyntaxOnly`, `verbatimModuleSyntax`), and `.ts` imports that Node runs directly.
 - **Comments.** None where the code says it. A one-line doc comment on an export only when its name does not say what it
@@ -219,7 +222,7 @@ Copy hydrex-keeper's way of working:
   Text goes in through `textContent` only, never `innerHTML`, because token symbols and names come from the chain.
 - **Styling:** one CSS file with custom properties, light and dark through `prefers-color-scheme`, the system font
   stack, and inline SVG icons.
-- **Routing:** none. `#0x…` opens the read-only view of an address. The hash never reaches the gateway.
+- **Routing:** none. `#0x…` opens the read-only view of an address. The hash never reaches the server.
 - **Budget:**
   - **Limits:** CI fails if the first load passes 90 KB gzipped (73 KB measured), or the CSS 10 KB. It prints every
     chunk's size.
@@ -301,8 +304,7 @@ The page lists relays. Version 1 lists one, Carbon Impact; design for several an
    - Hydrex can change these settings.
    - Leaving is one transaction, at any time.
    - Link each contract to Basescan and each repository to GitHub.
-6. **Footer:** the official addresses of the page, the version, commit and CID, how to check them, and links to the
-   repositories.
+6. **Footer:** the page's official address, the version and commit, how to check them, and links to the repositories.
 
 The page never mentions that Hydrex's automations ended, and shows no payout history.
 
@@ -350,12 +352,11 @@ connect-src <RPC origins> <wallet SDK origins>; frame-src <wallet SDK origins>; 
 
 - **Wallet origins:** take each SDK's origins from its documentation, then confirm them in the browser. Every wallet
   must work, and the console must show no CSP violation the wallet needs. List each origin and its reason in the README.
-- **Framing:** a meta tag cannot set `frame-ancestors`. eth.limo forbids framing; GitHub Pages allows it, which
-  Safe{Wallet} needs. See [Copies and framing](#copies-and-framing).
+- **Framing:** a meta tag cannot set `frame-ancestors`, and GitHub Pages sends no framing header, which Safe{Wallet}
+  needs. See [Copies and framing](#copies-and-framing).
 - **Safe App manifest:** `manifest.json` sits at the site's root and is served with `Access-Control-Allow-Origin: *`,
   because Safe{Wallet} fetches it from its own origin. GitHub Pages does this already.
-- **Links:** share only the official addresses, the eth.limo name and the GitHub Pages URL. Path gateways put every site
-  on one origin.
+- **Links:** share only the official GitHub Pages URL.
 
 ### Copies and framing
 
@@ -364,9 +365,9 @@ On GitHub Pages, other sites can also frame the real page. Accept both, and defe
 
 - **Wallet prompts:** every action ends in a wallet prompt that shows the exact call and the site asking. A framing site
   cannot skip that prompt or type into the page, and a copy cannot borrow the official address.
-- **Official addresses:** publish the GitHub Pages URL and the ENS name in the README, in hydrex-keeper's README and
-  wherever users already look, and show them in the page's footer.
-- **Verifiable builds:** anyone can rebuild a tag and check that both official addresses serve that code.
+- **Official address:** publish the GitHub Pages URL in the README, in hydrex-keeper's README and wherever users already
+  look, and show it in the page's footer.
+- **Verifiable builds:** anyone can rebuild a tag and check that GitHub Pages serves that code.
 - **No frame check:** don't add code that hides the page when framed. It stops framing, not copying; in Firefox it has
   to rely on the referrer, which the framing site can strip; and a mistake would blank the page for real Safe users.
 
@@ -437,23 +438,16 @@ screenshots of other sites out of the repository.
 - **CI:** Prettier, `tsc`, unit tests, REUSE, the build, the size budget, a second clean build compared byte for byte
   with the first, and the fork tests when a `BASE_RPC_URL` secret is set.
 
-## Build, CID and release
+## Build and release
 
 - **Build:** `npm run build` runs `scripts/build.ts`. It calls the esbuild API with minification, splitting, ES2022,
   relative paths and `legalComments: "linked"`, and copies `index.html`, `manifest.json`, `icon.svg` and `style.css`
   into `dist/`. Chunk names come from content hashes. The output has no timestamps and no absolute paths.
-- **CID:**
-  - `npm run cid` runs a pinned Kubo release, downloaded and checked by SHA-256 rather than taken from npm:
-    `ipfs add --only-hash --cid-version=1 --raw-leaves -r dist`.
-  - Release builds also export a CAR file and upload that, so every pinning service ends up with the same CID.
 - **Release:**
-  1. A tag builds the site, prints the CID in the release notes, and uploads the CAR to at least two pinning services,
-     using CI secrets.
-  2. The same tag deploys the same `dist/` to GitHub Pages with `actions/upload-pages-artifact` and
-     `actions/deploy-pages`, pinned by SHA. CI then fetches every served file and compares it with the build.
-  3. The ENS name's owner, a Safe if possible, sets the contenthash to `ipfs://<CID>`.
-  4. The README explains how anyone can rebuild a tag and compare it with the CID behind the ENS name and with the files
-     on GitHub Pages.
+  1. A tag builds the site and deploys `dist/` to GitHub Pages with `actions/upload-pages-artifact` and
+     `actions/deploy-pages`, pinned by SHA.
+  2. CI then fetches every served file and compares it with the build.
+  3. The README explains how anyone can rebuild a tag and compare it with the files on GitHub Pages.
 
 ## Milestones
 
@@ -461,7 +455,7 @@ Ask the user at the end of each milestone before going on.
 
 1. **Research:** the findings, the personas, a note on Aerodrome's and Velodrome's relays, and two visual directions.
 2. **Skeleton:**
-   - **Set-up:** the repository, CI, REUSE, Prettier, tsconfig, the build with splitting, the budget and the CID.
+   - **Set-up:** the repository, CI, REUSE, Prettier, tsconfig, the build with splitting, and the budget.
    - **README:** in hydrex-keeper's sections: what it does, what it can and cannot do, deployment, development, failure
      modes, limitations, licence.
 3. **Read-only page:** the registry, live relay numbers, this week's vote, and the read-only address view, all from
@@ -471,12 +465,11 @@ Ask the user at the end of each milestone before going on.
 5. **Safe:** the Safe App manifest, the `safe` connector and a first deployment to GitHub Pages, tested in Playwright
    and then by the user with a real Safe.
 6. **Polish:** all states, copy, accessibility, the cold-read loop, mobile, and the in-wallet browsers.
-7. **Release:** the first CID, pinning, the contenthash, GitHub Pages, and the verification steps written down.
+7. **Release:** the first deployment from a tag, and the verification steps written down.
 
 ## Still to ask the user
 
-1. **Names:** the repository's final name and owner (working name `metadex-relays`), the product's name on the page, and
-   the ENS name, kept generic too.
+1. **Names:** the repository's final name and owner (working name `metadex-relays`), and the product's name on the page.
 2. **GitHub Pages:** the account or organization that publishes it, and whether it gets its own domain. A custom domain
    adds a DNS account to secure; the github.io address does not.
 3. **Copy:** the user signs off the wording about votes, claims and payouts once hydrex-keeper's README describes
@@ -489,8 +482,8 @@ Ask the user at the end of each milestone before going on.
 - **Understood:** a cold reader understands what joining changes, when it takes effect and how to undo it.
 - **Safe:** a Safe signer can open the page as a Safe App in Safe{Wallet}, from GitHub Pages, and propose calls that
   simulate cleanly.
-- **Reproducible:** two clean builds of the same commit give the same CID, and the README tells anyone how to check it
-  against the ENS contenthash and the files on GitHub Pages.
+- **Reproducible:** two clean builds of the same commit are identical, and the README tells anyone how to check them
+  against the files on GitHub Pages.
 - **Network and CI:** the page makes no requests beyond the listed RPCs, the wallet and the origins in the README. It
   stays within budget and passes CI.
 - **Rechecked:** every fact in this plan that the page relies on has been checked again, and `docs/research.md` records
