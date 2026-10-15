@@ -32,7 +32,6 @@ const SLIPPAGE_BPS = 500;
 const MAX_SWAP_LOSS = 0.15; // how far below the value sold, at the job's prices, a swap's minimum return may be
 const RETIRE_PERCENT = 97n; // of maxKvcmIn, what the tonnes retired may cost at the quote
 const RESERVE = parseEther("0.001"); // what a claim must leave the keeper, for the next votes
-const MAX_CLAIMS_PER_NFT = 3; // per execution, each from the bribe contracts and tokens the previous ones left
 const MARGIN_MS = 60_000; // no claim starts closer than this to the end of the claims
 // Gas, to choose what a claim includes; its simulation has the last word.
 const BASE_GAS = 1_300_000n; // module, Safe, conduit, retirement and payout
@@ -271,8 +270,9 @@ async function claimRewards(run: Run, start: bigint, until: number, swapper: Swa
 
   let sent = 0;
   let failures = 0;
+  // Each claim takes at least one pair that no earlier one asked for, and plans leave those out: a veNFT's claims end.
   claiming: for (const [i, nft] of nfts.entries()) {
-    for (let n = 0; n < MAX_CLAIMS_PER_NFT; n++) {
+    for (;;) {
       if (until - Date.now() < MARGIN_MS) {
         // A failure, as when the minter leaves no time to claim; the next claims take what is left.
         const left = nfts.slice(i).filter((rest) => (nextPlan(ctx, rest)?.usd ?? 0) >= MIN_CLAIM_USD);

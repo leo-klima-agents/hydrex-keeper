@@ -41,8 +41,8 @@ them to kVCM, retires part of the kVCM, and pays the rest to the veNFT's owner, 
   token, up to 50 epochs since its last claim there, including what it earned before it delegated to the conduit.
 - **When it pays:** a claim asks each of its contracts for each of its tokens, at about 0.3M gas apiece on top of 1.3M,
   and Base caps a transaction at 16.8M. So a claim takes the contracts that pay most in the tokens that pay most, within
-  10M gas, and is sent only if it collects at least $5 and its gas costs at most 5% of that. What a claim leaves stays
-  claimable: a veNFT gets up to three claims per execution, and what is still under $5 waits for a later one.
+  10M gas, and is sent only if it collects at least $5 and its gas costs at most 5% of that. Further claims take what it
+  leaves, until no claim of the rest would pass these rules; the rest waits for a later execution.
 - **Swaps:** each token but kVCM goes to kVCM through KyberSwap's aggregator, the router the conduit approves, at up to
   5% slippage. The job decodes the calldata: it must sell exactly what the claim takes, for kVCM paid to the conduit,
   through a router the conduit approves. A swap whose minimum return is worth less than 85% of what it sells, at the

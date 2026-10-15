@@ -444,6 +444,27 @@ test("a dry run simulates each claim after those it prepared, and signs them wit
   assert.equal(sent.length, 0);
 });
 
+test("a veNFT is claimed for as long as what it has left is worth a claim", async () => {
+  // 60 more pools whose two contracts each owe veNFT 2 $1 of USDC: a claim of USDC alone asks 26 contracts at most.
+  const w = world();
+  for (let i = 0; i < 60; i++) {
+    const [fees, other] = [addr(300 + 2 * i), addr(301 + 2 * i)];
+    w.pools.push([
+      [fees, [USDC]],
+      [other, [USDC]],
+    ]);
+    w.earned.set(key(2, fees, USDC), usdc(1));
+    w.earned.set(key(2, other, USDC), usdc(1));
+  }
+  const { chain, sent } = fakeChain(w);
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  const claimed = sent.map(decode);
+  assert.equal(claimed.length, 6, "$114 from 7 contracts, then $26 four times and $12 from the 116 left");
+  const asked = claimed.flatMap(({ fees, bribes }) => [...fees, ...bribes]);
+  assert.equal(new Set(asked).size, 3 + 120, "every contract that owes veNFT 2, once");
+  assert.equal(asked.length, 3 + 120);
+});
+
 test("a claim too large for a transaction is planned again, smaller than it was", async () => {
   // Each contract and token costs 1.07M gas, over three times what the plan expects: the first plan, of 5.6M gas, uses
   // 12.5M, just over the limit. Shrinking the 10M budget by as much would plan the same claim until out of tries.
