@@ -500,10 +500,13 @@ test("claims wait for the minter to start the epoch, and fail if it does not in 
   assert.equal(late.sent.length, 0);
 });
 
-test("no claim starts in the last minute of the claims", async () => {
+test("no claim starts in the last minute of the claims, and claims left then fail the execution", async () => {
   const { chain, sent } = fakeChain();
-  assert.equal(await claims(runOf(chain), START, Date.now() + 30_000, fakeSwapper().swapper), 0);
+  assert.equal(await claims(runOf(chain), START, Date.now() + 30_000, fakeSwapper().swapper), 1);
   assert.equal(sent.length, 0);
+  const little = fakeChain(world({ earned: new Map([[key(2, E1, USDC), usdc(4)]]) }));
+  const done = await claims(runOf(little.chain), START, Date.now() + 30_000, fakeSwapper().swapper);
+  assert.equal(done, 0, "nothing left worth a claim");
 });
 
 const pair = (bribe: Address, token: Address, usd: number, fees = false): Pair => ({ bribe, fees, token, usd });

@@ -32,7 +32,6 @@ const SLIPPAGE_BPS = 500;
 const MAX_SWAP_LOSS = 0.15; // how far below the value sold, at the job's prices, a swap's minimum return may be
 const RETIRE_PERCENT = 97n; // of maxKvcmIn, what the tonnes retired may cost at the quote
 const RESERVE = parseEther("0.001"); // what a claim must leave the keeper, for the next votes
-const MAX_CLAIMS = 20; // per execution
 const MAX_CLAIMS_PER_NFT = 3; // per execution, each from the bribe contracts and tokens the previous ones left
 const MARGIN_MS = 60_000; // no claim starts closer than this to the end of the claims
 // Gas, to choose what a claim includes; its simulation has the last word.
@@ -272,10 +271,15 @@ async function claimRewards(run: Run, start: bigint, until: number, swapper: Swa
 
   let sent = 0;
   let failures = 0;
-  claiming: for (const nft of nfts) {
-    for (let n = 0; n < MAX_CLAIMS_PER_NFT && sent < MAX_CLAIMS; n++) {
+  claiming: for (const [i, nft] of nfts.entries()) {
+    for (let n = 0; n < MAX_CLAIMS_PER_NFT; n++) {
       if (until - Date.now() < MARGIN_MS) {
-        log.warning("out of time: the rest waits for the next claims", { tokenId: nft.id });
+        // A failure, as when the minter leaves no time to claim; the next claims take what is left.
+        const left = nfts.slice(i).filter((rest) => (nextPlan(ctx, rest)?.usd ?? 0) >= MIN_CLAIM_USD);
+        if (left.length) {
+          failures++;
+          log.error("out of time: claims left for the next ones", { tokenIds: left.map(({ id }) => id) });
+        }
         break claiming;
       }
       try {
@@ -293,19 +297,25 @@ async function claimRewards(run: Run, start: bigint, until: number, swapper: Swa
   return failures + ctx.anomalies;
 }
 
+/** The pairs of `nft` that no claim of this execution asked for. */
+const untaken = (nft: Nft) => nft.pairs.filter((p) => !nft.taken.has(pairKey(p.bribe, p.token)));
+
+/** The most valuable claim left for `nft` within `budget` gas, without the tokens left out of the execution. */
+function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET): ClaimPlan | undefined {
+  const pairs = untaken(nft).filter((p) => !ctx.unswapped.has(lower(p.token)));
+  return planClaim(pairs, budget, ctx.usdPerGas, (token) => !isPayout(ctx.conduit, token), nft.caps);
+}
+
 /** Claims once for `nft`, the most valuable pairs worth claiming. Returns whether it claimed. */
 async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
   const { chain, conduit, account, dryRun, until } = ctx;
-  const swapped = (token: Address) => !isPayout(conduit, token);
-  const left = (pair: Pair) => !nft.taken.has(pairKey(pair.bribe, pair.token));
   let budget = GAS_BUDGET;
   let replans = 0;
   for (let round = 0; round < ROUNDS; round++) {
-    const pairs = nft.pairs.filter((p) => left(p) && !ctx.unswapped.has(lower(p.token)));
-    const plan = planClaim(pairs, budget, ctx.usdPerGas, swapped, nft.caps);
+    const plan = nextPlan(ctx, nft, budget);
     if (!plan && budget < GAS_BUDGET) throw new Error(`no claim fits in ${MAX_GAS_USED} gas`);
     if (!plan || plan.usd < MIN_CLAIM_USD) {
-      const usd = nft.pairs.filter(left).reduce((sum, p) => sum + p.usd, 0);
+      const usd = untaken(nft).reduce((sum, p) => sum + p.usd, 0);
       log.info("not claimed: too little", { tokenId: nft.id, claimable: plan?.usd ?? 0, left: usd });
       return false;
     }

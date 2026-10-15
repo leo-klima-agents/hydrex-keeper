@@ -129,8 +129,9 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
   to vote or claim and logs `fund the keeper`.
 - **Claims:** a claim that cannot be built or simulated, or that reverts, fails the execution, whose retry claims what
   is still due. One that may have been sent without a receipt in time, or that the keeper cannot pay for, also stops the
-  claims. KyberSwap is retried three times; a token it has no route for is left out, and one it answers wrongly for is
-  left out and fails the execution.
+  claims. Claims still worth making when the hour ends fail the execution too; the next week's take them. KyberSwap is
+  retried three times; a token it has no route for is left out, and one it answers wrongly for is left out and fails the
+  execution.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter
