@@ -133,14 +133,18 @@ const conduitCall = ({ conduit }: Chain, functionName: string, args: readonly un
   args,
 });
 
+/** What a claim from a pair's contract in its token is worth: what it takes, and what it makes claimable later. */
+const worth = (p: Pair) => p.usd + (p.later ?? 0);
+
 /** Whether a claim worth `usd` is worth its gas, `gasUsd`. */
 export const worthClaiming = (usd: number, gasUsd: number) => usd >= MIN_CLAIM_USD && gasUsd <= usd * MAX_GAS_SHARE;
 
 /**
  * The most valuable claim within `budget` gas, from a veNFT's `pairs`: the bribe contracts that pay most in the k
- * tokens that pay most, for the best k. A claim asks each bribe contract for each token, at PAIR_GAS, and swaps each
- * token that `swapped` says needs it. A bribe contract is left out unless it pays for its gas, at `usdPerGas`, over
- * MAX_GAS_SHARE, and if it would take a token past its cap in `caps`, in USD.
+ * tokens that pay most, for the best k, counting what they make claimable later. A claim asks each bribe contract for
+ * each token, at PAIR_GAS, and swaps each token that `swapped` says needs it. A bribe contract is left out unless it
+ * pays for its gas, at `usdPerGas`, over MAX_GAS_SHARE, and if what it owes now would take a token past its cap in
+ * `caps`, in USD.
  */
 export function planClaim(
   pairs: Pair[],
@@ -150,7 +154,7 @@ export function planClaim(
   caps: ReadonlyMap<Address, number> = new Map(),
 ): ClaimPlan | undefined {
   const totals = new Map<Address, number>();
-  for (const { token, usd } of pairs) totals.set(token, (totals.get(token) ?? 0) + usd);
+  for (const p of pairs) totals.set(p.token, (totals.get(p.token) ?? 0) + worth(p));
   const ranked = [...totals]
     .filter(([, usd]) => usd > 0)
     .sort((a, b) => b[1] - a[1])
@@ -166,12 +170,13 @@ export function planClaim(
       const fixed = BASE_GAS + BigInt(tokens.filter(swapped).length) * SWAP_GAS;
       if (budget - fixed < perBribe) break;
       const contracts = new Map<Address, { fees: boolean; usd: number; byToken: Map<Address, number> }>();
-      for (const { bribe, fees, token, usd } of pairs) {
-        if (!tokens.includes(token)) continue;
-        const contract = contracts.get(bribe) ?? { fees, usd: 0, byToken: new Map<Address, number>() };
-        contract.usd += usd;
-        contract.byToken.set(token, (contract.byToken.get(token) ?? 0) + usd);
-        contracts.set(bribe, contract);
+      for (const p of pairs) {
+        if (!tokens.includes(p.token)) continue;
+        const contract = contracts.get(p.bribe) ?? { fees: p.fees, usd: 0, byToken: new Map<Address, number>() };
+        contract.usd += worth(p);
+        // Against the caps, what the claim swaps: what is owed now, not what it makes claimable later.
+        contract.byToken.set(p.token, (contract.byToken.get(p.token) ?? 0) + p.usd);
+        contracts.set(p.bribe, contract);
       }
       const room = Number((budget - fixed) / perBribe);
       const floor = (Number(perBribe) * usdPerGas) / MAX_GAS_SHARE;
@@ -322,14 +327,9 @@ const newNft = (id: bigint, owner: Address): Nft => ({
 /** The pairs of `nft` that no claim of this execution asked for. */
 const untaken = (nft: Nft) => nft.pairs.filter((p) => !nft.taken.has(pairKey(p.bribe, p.token)));
 
-/** What a claim from a pair's contract in its token is worth: what it takes, and what it makes claimable later. */
-const worth = (p: Pair) => p.usd + (p.later ?? 0);
-
 /** The most valuable claim left for `nft` within `budget` gas, without the tokens left out of its claims. */
 function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET): ClaimPlan | undefined {
-  const pairs = untaken(nft)
-    .filter((p) => !ctx.unswapped.has(lower(p.token)) && !nft.unswapped.has(lower(p.token)))
-    .map((p) => ({ ...p, usd: worth(p) }));
+  const pairs = untaken(nft).filter((p) => !ctx.unswapped.has(lower(p.token)) && !nft.unswapped.has(lower(p.token)));
   return planClaim(pairs, budget, ctx.usdPerGas, (token) => !isPayout(ctx.conduit, token), nft.caps);
 }
 

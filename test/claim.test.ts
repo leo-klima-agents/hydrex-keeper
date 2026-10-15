@@ -717,6 +717,12 @@ test("a contract that owes more of a capped token than its cap is still claimed 
   assert.deepEqual([plan.tokens, plan.bribes, plan.usd], [[USDC], [E1, E2], 70]);
 });
 
+test("a cap counts what a claim swaps, not what it makes claimable past the 50 epochs earned() reads", () => {
+  const pairs = [{ ...pair(E1, HYDX, 400), later: 300 }, pair(E2, HYDX, 200)];
+  const plan = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[HYDX, 500]]))!;
+  assert.deepEqual([plan.tokens, plan.bribes, plan.usd], [[HYDX], [E1], 700], "E1 swaps $400, under the cap");
+});
+
 test("a bribe contract that does not pay for its gas is left out", () => {
   const usdPerGas = 1e-8; // 300k gas costs $0.003, so a contract must pay $0.06
   const plan = planClaim([pair(E1, USDC, 0.07), pair(E2, USDC, 0.05)], 10_000_000n, usdPerGas, swapped)!;
