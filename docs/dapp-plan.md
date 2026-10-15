@@ -1,29 +1,36 @@
-# Plan: the Carbon Impact dApp
+# Plan: the relay dApp
 
-A static page where a veHYDX holder joins or leaves Hydrex's Klima "Carbon Impact" conduit, chooses where payouts go,
-and sees what the conduit does. It is served from IPFS through an ENS name on eth.limo. This plan is for the agent that
-builds it. The facts below were checked on Base on 2026-10-15; check them again before relying on them.
+A static page where holders of vote-escrowed positions on metaDEXes hand their votes and rewards to a relay, and take
+them back. Hydrex calls these relays conduits; Aerodrome and Velodrome call them relays. Version 1 supports one:
+Hydrex's "Carbon Impact" conduit, whose votes Klima's keeper casts. The page is served from IPFS through an ENS name on
+eth.limo. This plan is for the agent that builds it. The facts below were checked on Base on 2026-10-15; check them
+again before relying on them.
 
 ## Why it exists
 
 - Hydrex's app no longer offers the conduit. On hydrex.fi/accounts, the automation picker shows only "No Automation",
   and an account already in a conduit sees "Automations ended. Please switch to No Automation." with a "Switch now"
-  button that leaves it.
+  button that leaves it. The page never mentions this.
 - On chain, the conduit is still open: the VotingEscrow keeps its approval config active, and it holds 897,042 votes.
-- This page is therefore the only interface for joining. It must be simple enough for a Hydrex user and small enough to
-  audit.
+- This page is therefore the only interface for joining it. It must be simple enough for a Hydrex user and small enough
+  to audit, and other relays may be added later.
 
 ## Scope
 
 **In:**
 
-- Read-only view: what the conduit does, its live numbers, this week's vote.
+- Read-only view: what each relay does, its live numbers, this week's vote.
 - Wallet view: the user's accounts, their status, and joining, leaving and setting the payout address.
 - A read-only view of any address, for Safe signers and for research.
-- An export of the same calls as a Safe Transaction Builder batch.
+- Every wallet the wagmi connectors cover, including Safe.
 
-**Out of v1:** claiming, swapping and voting (the keeper's job), locking HYDX (link to Hydrex), per-account payout
-history (see [Decisions](#decisions-to-ask-the-user)), and anything that needs a server.
+**Out of v1:**
+
+- Claiming, swapping and voting: the keeper's job.
+- Locking HYDX: link to Hydrex instead.
+- Payout history: not shown for now.
+- Relays other than Carbon Impact.
+- Anything that needs a server.
 
 ## Facts
 
@@ -43,8 +50,7 @@ history (see [Decisions](#decisions-to-ask-the-user)), and anything that needs a
 
 The VotingEscrow, its approval logic and the conduit are verified on Sourcify. The conduit's source is
 `contracts/conduits/KlimaVeTokenConduit.sol` in
-[hydrexfi/hydrex-periphery](https://github.com/hydrexfi/hydrex-periphery). The conduit was deployed at block 43,846,350
-(2026-03-25).
+[hydrexfi/hydrex-periphery](https://github.com/hydrexfi/hydrex-periphery).
 
 ### Calls
 
@@ -63,8 +69,6 @@ The VotingEscrow, its approval logic and the conduit are verified on Sourcify. T
   `retirementMessage`, `veToken` and `voter` on the conduit.
 - **This week's vote:** `_epochTimestamp()`, `lastVoted(conduit)`, `poolVote(conduit, i)` until it reverts, and
   `votes(conduit, pool)` on the Voter; then `token0`, `token1` and `symbol` for the pool names.
-- **Events:** `ConduitApprovalExecuted` on the VotingEscrow; `ClaimSwapAndDistributeCompleted` (owner indexed),
-  `CarbonRetired` and `PayoutRecipientUpdated` on the conduit.
 
 Live values on 2026-10-15: `retireBps` 3333, `treasuryFeeBps` 0, distribution tokens kVCM and AZUSD,
 `totalTonnesRetired` 5691402532019280852579 (check its decimals before showing it), and conduit approval actions
@@ -81,14 +85,14 @@ Live values on 2026-10-15: `retireBps` 3333, `treasuryFeeBps` 0, distribution to
 - Hydrex controls the conduit's `EXECUTOR_ROLE` and admin settings: routers, distribution tokens, retirement share,
   treasury fee (at most 1%) and payout overrides.
 
-### Timing
+### Timing and payouts
 
 - Epochs flip on Thursday at 00:00 UTC. The keeper counts the conduit's votes as of the epoch start, so an account that
   joins counts from the next flip. Hydrex's app shows "Current payout" and "Next payout" for this reason.
 - Claim-redirect approval takes effect at once. Verify, from the contracts, which epochs' rewards the conduit may then
   claim for a newly joined account, and say so on the page.
-- `hydrex-keeper` votes but does not claim yet. Find out who calls `claimSwapAndDistribute` and how often, and promise
-  nothing about payouts until the user confirms.
+- `hydrex-keeper` votes every week and claims each account's rewards. Take when and how it claims from its README, and
+  describe payouts only from that README and the conduit's live settings.
 
 ### Who uses it (snapshot of 2026-10-15)
 
@@ -119,21 +123,39 @@ through Multicall3 and classifies each owner by its code.
   sends `Access-Control-Allow-Origin: *` but is undocumented, so the page must not depend on it. Earning Power is about
   1.3 times voting power there; find out where that factor comes from before showing either number.
 
-### Limits of public RPCs
+### Wallet connectors, measured
 
-- **Reads:** fine through Multicall3.
-- **Logs:** `mainnet.base.org` allows 200 blocks per `eth_getLogs` and rate-limits; `base.drpc.org` 10,000 on its free
-  plan; `1rpc.io/base` 50; `base-rpc.publicnode.com` only recent blocks.
-- **Consequence:** the conduit's 8.8M blocks of history cannot come from public RPCs in a browser. History needs an
-  indexer, which is a decision for the user.
+`@wagmi/connectors` 8.2.0 offers `injected` (with EIP-6963 discovery), `baseAccount`, `coinbaseWallet`, `metaMask`,
+`walletConnect` and `safe`. It also has `tempoWallet`, which serves the Tempo chain rather than Base, and `mock`, which
+is for tests.
+
+Each connector loads its wallet SDK with a dynamic import. A test build with all six connectors set up, split by
+esbuild, measured:
+
+| What                                     | Gzipped | Loaded                             |
+| ---------------------------------------- | ------- | ---------------------------------- |
+| First load (viem, wagmi, connectors)     | 230 KB  | always                             |
+| `@walletconnect/ethereum-provider`       | 480 KB  | when WalletConnect is used         |
+| `@metamask/connect-evm`                  | 220 KB  | when MetaMask's SDK is used        |
+| `@safe-global/safe-apps-provider`        | 180 KB  | when opened inside a Safe          |
+| `@base-org/account`                      | 150 KB  | when Base Account is used          |
+| `@coinbase/wallet-sdk`                   | 35 KB   | when Coinbase Wallet's SDK is used |
+| `viem` + `@wagmi/core` + `injected` only | 72 KB   | for comparison                     |
+
+All of them together come to about 140 distinct packages, against about 20 for viem and wagmi core alone.
 
 ## Principles
 
 Copy hydrex-keeper's way of working:
 
-- **Small surface.** Runtime dependencies are `viem` and `mipd`, pinned to exact versions, plus any wallet SDK the user
-  approves. No UI framework, CSS framework, analytics, trackers, external fonts, CDNs or remote images. At run time the
-  page talks only to the listed RPCs and the user's wallet.
+- **Small surface.**
+  - **Runtime packages:** `viem`, `@wagmi/core`, `@wagmi/connectors` and the wallet SDKs its connectors load, each
+    pinned to an exact version. No UI framework, CSS framework, analytics, trackers, external fonts, CDNs or remote
+    images.
+  - **Loading:** each wallet SDK loads only when someone picks that wallet, so a bad SDK release reaches only its own
+    users.
+  - **Network:** at run time the page talks only to the listed RPCs, the user's wallet, and the services that wallet's
+    SDK needs.
 - **Reproducible.** The same commit gives the same `dist/` and the same CID on any machine. CI proves it.
 - **Plain code.** Small functions, no classes, strict TypeScript (`strict`, `exactOptionalPropertyTypes`,
   `noUncheckedIndexedAccess`, `erasableSyntaxOnly`, `verbatimModuleSyntax`), and `.ts` imports that Node runs directly.
@@ -147,101 +169,142 @@ Copy hydrex-keeper's way of working:
   - **CI and updates:** GitHub Actions pinned by commit SHA with the version in a comment,
     `permissions: contents: read`, and Dependabot weekly for Actions and npm.
 - **Install without scripts.** Use `npm ci --ignore-scripts` everywhere, and commit `package-lock.json`.
+- **Review every dependency change.** A pull request that changes the lockfile shows the dependency tree and chunk sizes
+  before and after, and a human reads the diff of any wallet SDK that changed.
 
 ## Stack
 
 - **Language:** TypeScript checked by `tsc`, bundled for the browser by `esbuild` (one pinned binary, deterministic
-  output). No Vite.
-- **Chain:** `viem` with `createClient` and actions imported from `viem/actions`, so only what is used ships. Base comes
-  from `viem/chains`.
-- **Wallets:** `mipd` for EIP-6963 discovery, with viem's `custom` transport over the chosen provider. Remember the last
-  wallet's `rdns` in `localStorage`, and reconnect silently with `eth_accounts`. React to `accountsChanged`,
-  `chainChanged` and `disconnect`.
-- **Reads:** before a wallet connects, viem's `fallback` over the public RPCs; afterwards, the wallet's provider first
-  and the public RPCs after it.
+  output) with `format: "esm"` and `splitting: true`, so each wallet SDK becomes its own chunk. No Vite.
+- **Wallets:** `@wagmi/core`.
+  - **Connectors:** `createConfig` with `injected`, `baseAccount`, `coinbaseWallet`, `metaMask`, `walletConnect` and
+    `safe`.
+  - **Discovery and reconnect:** EIP-6963 discovery stays on (`multiInjectedProviderDiscovery`). wagmi's storage in
+    `localStorage` and `reconnect` restore the last wallet.
+  - **Telemetry:** turn off every SDK's analytics or telemetry option, and let the CSP block what remains unless the
+    wallet breaks without it.
+  - **No TanStack Query:** don't install `@tanstack/query-core`; wagmi's plain actions are enough.
+- **Chain:** chains and transports come from the relay registry. Each chain gets viem's `fallback` over its public RPCs.
+  Use wagmi's actions: `readContracts`, `simulateContract`, `writeContract`, `getCapabilities`, `sendCalls`,
+  `waitForCallsStatus`, `waitForTransactionReceipt` and `switchChain`.
 - **Rendering:** one `render(state)` that rebuilds the page from state with a small `h(tag, props, ...children)` helper.
   Text goes in through `textContent` only, never `innerHTML`, because token symbols and names come from the chain.
-- **Styling:** one CSS file with custom properties, light and dark through `prefers-color-scheme`, the system font stack
-  (or one self-hosted OFL font if the brand needs it), and inline SVG icons.
+- **Styling:** one CSS file with custom properties, light and dark through `prefers-color-scheme`, the system font
+  stack, and inline SVG icons.
 - **Routing:** none. `#0x…` opens the read-only view of an address. The hash never reaches the gateway.
-- **Budget:** the measured baseline for this flow is 66 KB of gzipped JS. CI fails above 90 KB of gzipped JS or 10 KB of
-  gzipped CSS, not counting a wallet SDK the user approves.
+- **Budget:**
+  - **Limits:** CI fails if the first load passes 250 KB gzipped, or the CSS 10 KB. It prints every chunk's size.
+  - **Shrinking:** find what makes the first load three times the injected-only build, and cut it where wagmi allows.
+  - **Duplicates:** dedupe shared packages; today `ox` ships in more than one version.
+
+## Built for more relays
+
+Other metaDEX relays and conduits may come later. Make room for them without building them:
+
+- **Registry:** `relays.json` lists the supported relays. Each entry has its chain, protocol, kind, name, contract
+  addresses and pinned code hashes. Version 1 has one entry. Like `tokens.json` in hydrex-keeper, it changes only by
+  pull request.
+- **Kinds:** everything kind-specific lives in one file per kind. Version 1 has `hydrex-conduit` only: reads, status,
+  calls and startup checks. Adding a relay of a known kind is a registry entry; adding a kind is a new file.
+- **Shared code:** the account list, statuses, call ordering, batching, simulation and rendering work from what a kind
+  returns, and never call a Hydrex contract directly.
+- **Read the others first:** before designing the shared types and screens, read how Aerodrome's and Velodrome's relays
+  work. As far as we know they use managed veNFTs, through `Voter.depositManaged` and `withdrawManaged`, with their own
+  timing rules. Don't bake in Hydrex's model, such as a claim redirect, a per-owner payout address or one relay per
+  account. Build nothing for them yet.
+- **Words:** on screen, use each protocol's own words: "conduit" or "automation" on Hydrex, "relay" on Aerodrome. In the
+  code and the README, "relay" is the generic word.
 
 ## Repository
 
-A new repository next to hydrex-keeper (ask the user for its name, for example `hydrex-conduit-app`):
+A new repository next to hydrex-keeper. The working name is `metadex-relays`, generic on purpose; confirm it with the
+user.
 
 ```
-index.html        CSP meta tag, root element, one script and one stylesheet
+index.html             CSP meta tag, root element, one script and one stylesheet
+manifest.json          Safe App manifest
 src/
-  abi.ts          parseAbi fragments for the calls above
-  chain.ts        addresses, clients, RPC list, startup checks
-  read.ts         accounts, conduit, epoch and vote reads, each batched through Multicall3
-  status.ts       an account's status from its reads (pure)
-  write.ts        join, leave and payout calls; batching; simulation
-  wallet.ts       discovery, connect, reconnect, wallet events
-  safe.ts         Transaction Builder JSON (pure)
-  format.ts       numbers, dates, addresses (pure)
-  view.ts         render and h()
-  main.ts         state and wiring
+  abi.ts               parseAbi fragments
+  config.ts            wagmi config: chains, transports, connectors
+  relays.ts            loads relays.json; startup checks
+  kinds/
+    hydrex-conduit.ts  reads, status, calls and checks for Hydrex conduits
+  status.ts            shared account statuses (pure)
+  write.ts             call ordering, batching, simulation
+  format.ts            numbers, dates, addresses (pure)
+  view.ts              render and h()
+  main.ts              state and wiring
 style.css
-conduits.json     names of Hydrex's conduits by address, reviewed by pull request like tokens.json
-scripts/          build.ts, budget.ts, members.ts
-test/             unit tests for pure modules; e2e/ for fork tests
-docs/research.md  research findings, in words
+relays.json            supported relays, reviewed by pull request
+hydrex-conduits.json   names of Hydrex's other conduits by address, for labels
+scripts/               build.ts, budget.ts, members.ts
+test/                  unit tests for pure modules; e2e/ for fork tests
+docs/research.md       research findings, in words
 ```
 
 ## The page
 
 ### What it shows
 
-1. **Top:** one sentence on what Carbon Impact does. Then live numbers: tonnes retired, the share of kVCM retired, the
-   payout tokens, the conduit's votes, and the time to the next flip in local time and UTC.
-2. **This week's vote:** the pools, by token symbols, with their shares, and when the keeper last voted.
-3. **Your accounts:** one row per account, showing its type in Hydrex's words, its voting power, when its lock ends, and
-   a status:
+The page lists relays. Version 1 lists one, Carbon Impact; design for several anyway.
+
+1. **Top:** the product's name and one sentence on what a relay does.
+2. **Relay card:** for each relay:
+   - **What it does:** one sentence.
+   - **Live numbers:** tonnes retired, the share of kVCM retired, the payout tokens, the relay's votes, and the time to
+     the next flip in local time and UTC.
+   - **This week's vote:** the pools, by token symbols, with their shares, and when the keeper last voted.
+3. **Your accounts:** one row per account, showing its protocol, its type in that protocol's words, its voting power,
+   when its lock ends, and a status:
    - In Carbon Impact.
    - Joined, counts from Thursday \<date\>.
-   - In another automation, named from `conduits.json`, or "delegated to 0x…".
+   - In another automation, named from `hydrex-conduits.json`, or "delegated to 0x…".
    - Not automated.
    - Lock ended, with no power and a link to extend it on Hydrex.
 4. **Payout address:** the effective recipient for the owner, and a field to change it.
 5. **What joining allows,** in plain words, from live values:
    - The conduit can claim this account's rewards, swap them through the routers Hydrex approved, retire this share of
      the kVCM as carbon credits in this name, and send the rest to the payout address.
-   - Klima's keeper chooses the votes each week.
+   - Klima's keeper chooses the votes and claims the rewards. Say when, from hydrex-keeper's README.
    - Hydrex can change these settings.
    - Leaving is one transaction, at any time.
    - Link each contract to Basescan and each repository to GitHub.
 6. **Footer:** the version, commit and CID; how to check them; links to the repositories.
 
+The page never mentions that Hydrex's automations ended, and shows no payout history.
+
 ### States to design
 
-No wallet, several wallets, wrong network, no accounts (link to Hydrex), every account status above, a pending
-transaction, success, rejection, a revert (in plain words), an unreachable RPC, a failed startup check, and a read-only
-address.
+- **Wallet:** none, several, a wallet SDK that fails to load, the wrong network, and the page opened inside
+  Safe{Wallet}.
+- **Accounts:** none (link to Hydrex), and every account status above.
+- **Transactions:** pending, success, rejected, and reverted (in plain words).
+- **Problems:** an unreachable RPC, and a failed startup check.
+- **Viewing:** a read-only address.
 
 ### Writes
 
 - **Join selected:** for each selected account in another automation, first a leave of that conduit, then a join.
-- **Batching:** if `wallet_getCapabilities` reports atomic batching on Base, send everything as one `sendCalls` with one
-  confirmation. Otherwise send one transaction after another, with progress, in the safe order.
-- **Simulate first:** run every call with `eth_call` from the owner before asking the wallet. Show the revert reason in
-  plain words, and send nothing that fails.
-- **Safe owners:** in the read-only view, export the same calls as a Transaction Builder JSON file to import in
-  Safe{Wallet}. Check the format against Safe's documentation, and have the user test one import.
-- **After sending:** wait for the receipt, then re-read and re-render. Never trust an optimistic state.
+- **Batching:** if `getCapabilities` reports atomic batching on the relay's chain, send everything as one `sendCalls`
+  with one confirmation. Otherwise send one transaction after another, with progress, in the safe order.
+- **Simulate first:** simulate every call from the owner before asking the wallet. Show the revert reason in plain
+  words, and send nothing that fails.
+- **Safe:** inside Safe{Wallet}, the `safe` connector proposes the calls as one Safe transaction. Outside it, a Safe
+  connects through WalletConnect. Check whether Safe reports `sendCalls` support, and fall back to the safe order if
+  not.
+- **After sending:** wait for the receipt or the calls status, then re-read and re-render. Never trust an optimistic
+  state.
 
 ### Safety checks at startup
 
-Before allowing a write, confirm all of these:
+Before allowing a write to a relay, confirm all of these:
 
-- The chain ID is 8453.
-- The conduit's `veToken` and `voter` match the constants.
+- The chain ID matches the registry.
+- The conduit's `veToken` and `voter` match the registry.
 - `getConduitApprovalConfig(conduit)` returns `[3, 5]` and active.
-- The conduit's code hash matches the one pinned in `chain.ts`.
+- The conduit's code hash matches the registry.
 
-If any check fails, disable writes and say why.
+If any check fails, disable writes to that relay and say why.
 
 ### Content Security Policy
 
@@ -249,11 +312,15 @@ If any check fails, disable writes and say why.
 
 ```
 default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self';
-connect-src <the RPC origins>; base-uri 'none'; form-action 'none'
+connect-src <RPC origins> <wallet SDK origins>; frame-src <wallet SDK origins>; base-uri 'none'; form-action 'none'
 ```
 
-A meta tag cannot set `frame-ancestors`, so say so in the README. Share links to eth.limo and to subdomain gateways
-only: path gateways put every site on one origin.
+- **Wallet origins:** take each SDK's origins from its documentation, then confirm them in the browser. Every wallet
+  must work, and the console must show no CSP violation the wallet needs. List each origin and its reason in the README.
+- **Framing:** a meta tag cannot set `frame-ancestors`, and Safe needs to load the page in a frame. Check what eth.limo
+  sends, and record the trade-off in the README.
+- **Links:** share links to eth.limo and to subdomain gateways only, because path gateways put every site on one origin.
+- **Safe App manifest:** check that Safe can read `manifest.json` from the gateway, including its CORS headers.
 
 ## Research
 
@@ -273,17 +340,21 @@ screenshots of other sites out of the repository.
      key or seed phrase.
    - Note the vocabulary, layout, colors, type, spacing, components and empty states, and what is confusing.
 3. **Comparable interfaces.**
-   - Study how others present delegating or automating a vote-escrow position. Candidates are Aerodrome's Relays,
-     Velodrome, Convex, Beefy and Hydrex's own conduit cards.
-   - Study how good wallets and dApps preview a transaction. Rabby, Coinbase Wallet and Safe{Wallet} are good
-     references.
+   - Study how others present delegating or automating a vote-escrow position: Aerodrome's and Velodrome's relays,
+     Convex, Beefy, and Hydrex's own conduit cards. The relay pages also show what a second kind of relay will need.
+   - Study how good wallets and dApps preview a transaction, and how they offer many wallets in one picker. Rabby,
+     Coinbase Wallet and Safe{Wallet} are good references.
    - Keep the patterns that remove steps or doubt: one main action, what happens next, when it takes effect, and how to
      undo it.
-4. **Brand.**
-   - Ask the user for Klima Protocol's brand assets and guidelines, and study klimaprotocol.com.
-   - The page should feel familiar to a Hydrex user and still be clearly Klima's. Do not imitate Hydrex's branding.
-   - Propose two visual directions as static HTML mock-ups with fixture data, with screenshots at 390 and 1440 px. Let
-     the user choose before wiring anything.
+4. **Visual identity.**
+   - **Klima:** no brand assets for now: no logos, colours, fonts or imagery. Name Klima in plain text only where a fact
+     needs it, such as who runs the keeper.
+   - **Others:** don't imitate Hydrex, Aerodrome or any other protocol's branding, and use no protocol or token logos.
+     Text symbols are enough.
+   - **Identity:** an original, neutral one that fits the generic name: a calm palette with one accent colour, the
+     system font stack, generous spacing, and accessible contrast in light and dark.
+   - **Choosing:** propose two directions as static HTML mock-ups with fixture data, with screenshots at 390 and 1440
+     px. Let the user choose before wiring anything.
 5. **Testing the design.**
    - **Cold read:** give a fresh subagent with no context only the screenshots, and ask what the page does, what joining
      changes, when it takes effect, and how to leave. Fix every wrong answer, then repeat.
@@ -297,23 +368,29 @@ screenshots of other sites out of the repository.
 ## Testing
 
 - **Unit:** `node --test` on the pure modules: call encoding against viem's `encodeFunctionData`, account status from
-  reads, the next-flip date, the safe order of calls, the Safe JSON, and formatting.
+  reads, the next-flip date, the safe order of calls, the registry, and formatting.
 - **Fork:**
   - Run `anvil --fork-url <Base RPC>` at a pinned block, and drive Chromium with Playwright, using the preinstalled
     browser.
   - An init script injects an EIP-6963 test wallet that forwards to anvil and impersonates real owners: a member, a
-    non-member, an owner in another conduit, an owner of an expired lock, and the large Safe (read-only view and
-    export).
+    non-member, an owner in another conduit, an owner of an expired lock, and the large Safe.
   - Assert the on-chain results with `getLockDelegatee` and `getClaimRedirectApproved`.
   - Take screenshots at 390 and 1440 px, light and dark.
+- **Connectors:** a smoke test for each connector checks that its chunk loads under the CSP and opens its flow, without
+  signing anything.
+- **Real wallets:** a written checklist the user runs before each release, with a small account:
+  - Browser extensions: MetaMask, Rabby and Coinbase Wallet.
+  - Base Account.
+  - A mobile wallet through WalletConnect.
+  - A Safe, both inside Safe{Wallet} and through WalletConnect.
 - **CI:** Prettier, `tsc`, unit tests, REUSE, the build, the size budget, a second clean build compared byte for byte
   with the first, and the fork tests when a `BASE_RPC_URL` secret is set.
 
 ## Build, CID and release
 
-- **Build:** `npm run build` runs `scripts/build.ts`. It calls the esbuild API with minification, ES2022, relative paths
-  and `legalComments: "linked"`, and copies `index.html` and `style.css` into `dist/`. The output has no timestamps and
-  no absolute paths.
+- **Build:** `npm run build` runs `scripts/build.ts`. It calls the esbuild API with minification, splitting, ES2022,
+  relative paths and `legalComments: "linked"`, and copies `index.html`, `manifest.json` and `style.css` into `dist/`.
+  Chunk names come from content hashes. The output has no timestamps and no absolute paths.
 - **CID:**
   - `npm run cid` runs a pinned Kubo release, downloaded and checked by SHA-256 rather than taken from npm:
     `ipfs add --only-hash --cid-version=1 --raw-leaves -r dist`.
@@ -328,42 +405,37 @@ screenshots of other sites out of the repository.
 
 Ask the user at the end of each milestone before going on.
 
-1. **Research and decisions:** the findings, the personas, two visual directions, and answers to the questions below.
+1. **Research:** the findings, the personas, a note on Aerodrome's and Velodrome's relays, and two visual directions.
 2. **Skeleton:**
-   - **Set-up:** the repository, CI, REUSE, Prettier, tsconfig, the build, the budget and the CID.
+   - **Set-up:** the repository, CI, REUSE, Prettier, tsconfig, the build with splitting, the budget and the CID.
    - **README:** in hydrex-keeper's sections: what it does, what it can and cannot do, deployment, development, failure
      modes, limitations, licence.
-3. **Read-only page:** live conduit numbers, this week's vote, and the read-only address view, all from public RPCs.
-4. **Wallet:** discovery, connect, account statuses, join, leave and payout, with simulation, batching and the startup
-   checks. Then the fork tests.
-5. **Safe:** the Transaction Builder export, tested by the user.
+3. **Read-only page:** the registry, live relay numbers, this week's vote, and the read-only address view, all from
+   public RPCs.
+4. **Wallets:** every connector, account statuses, join, leave and payout, with simulation, batching and the startup
+   checks. Then the fork and connector tests.
+5. **Safe:** the Safe App manifest and the `safe` connector, plus WalletConnect from a Safe, tested by the user.
 6. **Polish:** all states, copy, accessibility, the cold-read loop, mobile, and the in-wallet browsers.
 7. **Release:** the first CID, pinning, the contenthash, and the verification steps written down.
 
-## Decisions to ask the user
+## Still to ask the user
 
-1. **Names:** the repository's name and owner, and the ENS name the page will live at.
-2. **Wallets:**
-   - **Smart wallets:** support Coinbase Smart Wallet / Base Account on desktop with `@base-org/account`? It has two of
-     the 14 owners. Measure its size and dependencies first. The alternative is in-app browsers only.
-   - **WalletConnect:** add it? It needs a Reown project ID and a heavier dependency.
-   - **Safe:** a Safe App mode on top of the Transaction Builder export?
-3. **History:** none in v1, or one of these sources:
-   - Blockscout's API, if it works from a browser.
-   - Etherscan's API, with a key that ships publicly.
-   - Hydrex's undocumented API.
-   - An indexer of Klima's own.
-4. **Promises:** what the page may say about claims and payouts, since the keeper does not claim yet. Whether to mention
-   Hydrex's "Automations ended" banner, and in what words. Whether Hydrex has been told about the page.
-5. **Brand:** assets, colours, fonts and tone, and whether token logos from hydrex-lists may be used. That repository
-   has no licence file.
+1. **Names:** the repository's final name and owner (working name `metadex-relays`), the product's name on the page, and
+   the ENS name, kept generic too.
+2. **WalletConnect:** a Reown project ID, with the eth.limo origin on its allow list. The ID ships in the page.
+3. **Copy:** the user signs off the wording about votes, claims and payouts once hydrex-keeper's README describes
+   claiming.
 
 ## Done when
 
-- A Hydrex user with a browser-extension wallet can join, leave and set the payout address on a phone or a desktop. A
-  cold reader understands what joining changes, when it takes effect and how to undo it.
-- A Safe signer can see the Safe's accounts and export a batch that imports and simulates cleanly in Safe{Wallet}.
-- Two clean builds of the same commit give the same CID, and the README tells anyone how to check it against the ENS
-  contenthash.
-- The page makes no requests beyond the listed RPCs and the wallet, stays within budget, and passes CI.
-- Every fact in this plan that the page relies on has been checked again, and `docs/research.md` records what changed.
+- **Any wallet:** a Hydrex user with any wallet the connectors cover can join, leave and set the payout address, on a
+  phone or a desktop.
+- **Understood:** a cold reader understands what joining changes, when it takes effect and how to undo it.
+- **Safe:** a Safe signer can open the page inside Safe{Wallet}, or connect through WalletConnect, and propose calls
+  that simulate cleanly.
+- **Reproducible:** two clean builds of the same commit give the same CID, and the README tells anyone how to check it
+  against the ENS contenthash.
+- **Network and CI:** the page makes no requests beyond the listed RPCs, the wallet and the origins in the README. It
+  stays within budget and passes CI.
+- **Rechecked:** every fact in this plan that the page relies on has been checked again, and `docs/research.md` records
+  what changed.
