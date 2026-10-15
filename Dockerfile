@@ -1,4 +1,4 @@
-FROM node:26.10.0-trixie-slim@sha256:930557a230abacbc3f4fd9b8648abf8f4bee1e17cb72195dcdfb2f709bc85b33 AS build
+FROM node:26.12.0-trixie-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 # typescript is also an optional peer of viem's abitype, so --omit=dev alone keeps it.
@@ -7,7 +7,7 @@ COPY src/ src/
 COPY tokens.json ./
 
 # No shell, no package manager, non-root. Node runs the .ts sources directly.
-FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:2ee7b2c54a3e37dfc248af81c9f6bcdcaa50abe4af44aa47a3388431031b9283
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:044d090d0c3ccfd30722126ebe46704885698970c8a303419dc0d704d628f0da
 WORKDIR /app
 COPY --from=build /app /app
 ENTRYPOINT ["/nodejs/bin/node", "src/main.ts"]
