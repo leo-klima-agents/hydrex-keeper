@@ -129,20 +129,23 @@ through Multicall3 and classifies each owner by its code.
 `walletConnect` and `safe`. It also has `tempoWallet`, which serves the Tempo chain rather than Base, and `mock`, which
 is for tests.
 
-Each connector loads its wallet SDK with a dynamic import. A test build with all six connectors set up, split by
-esbuild, measured:
+Each connector loads its wallet SDK with a dynamic import, and `@wagmi/core` itself depends only on `eventemitter3`,
+`mipd` and `zustand`. A test build split by esbuild, with each connector imported from its own entry point, measured
+this against `injected` alone. That baseline is 69 KB gzipped on first load, and 21 installed packages for viem, wagmi
+core and the connectors package:
 
-| What                                     | Gzipped | Loaded                             |
-| ---------------------------------------- | ------- | ---------------------------------- |
-| First load (viem, wagmi, connectors)     | 230 KB  | always                             |
-| `@walletconnect/ethereum-provider`       | 480 KB  | when WalletConnect is used         |
-| `@metamask/connect-evm`                  | 220 KB  | when MetaMask's SDK is used        |
-| `@safe-global/safe-apps-provider`        | 180 KB  | when opened inside a Safe          |
-| `@base-org/account`                      | 150 KB  | when Base Account is used          |
-| `@coinbase/wallet-sdk`                   | 35 KB   | when Coinbase Wallet's SDK is used |
-| `viem` + `@wagmi/core` + `injected` only | 72 KB   | for comparison                     |
+| Connector        | Installed packages it adds | First load | Loaded when chosen |
+| ---------------- | -------------------------- | ---------- | ------------------ |
+| `coinbaseWallet` | 3                          | +2 KB      | 34 KB              |
+| `safe`           | 4                          | +3 KB      | 177 KB             |
+| `metaMask`       | 78                         | +2 KB      | 218 KB             |
+| `baseAccount`    | 93                         | +146 KB    | 86 KB              |
+| `walletConnect`  | 178                        | +60 KB     | 465 KB             |
 
-All of them together come to about 140 distinct packages, against about 20 for viem and wagmi core alone.
+With all six, the build installs 360 packages and the first load is 232 KB. `baseAccount` and `walletConnect` grow the
+first load because esbuild splits by file: viem files that both the page and the SDK use move into the first load.
+`baseAccount` depends on `@coinbase/cdp-sdk`. `coinbaseWallet` uses `@coinbase/wallet-sdk`, which also reaches Coinbase
+Smart Wallet / Base Account through keys.coinbase.com; confirm that with a real Base Account.
 
 ## Principles
 
@@ -194,7 +197,10 @@ Copy hydrex-keeper's way of working:
 - **Routing:** none. `#0x…` opens the read-only view of an address. The hash never reaches the gateway.
 - **Budget:**
   - **Limits:** CI fails if the first load passes 250 KB gzipped, or the CSS 10 KB. It prints every chunk's size.
-  - **Shrinking:** find what makes the first load three times the injected-only build, and cut it where wagmi allows.
+  - **Imports:** import `injected` from `@wagmi/core` and every other connector from its own entry point, such as
+    `@wagmi/connectors/walletConnect`. Never import the `@wagmi/connectors` barrel: it puts every SDK in the build,
+    whether used or not.
+  - **Shrinking:** check whether wagmi or esbuild settings can keep the SDKs' viem files out of the first load.
   - **Duplicates:** dedupe shared packages; today `ox` ships in more than one version.
 
 ## Built for more relays
