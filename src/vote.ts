@@ -79,19 +79,26 @@ export async function prepareVote(
 
 /**
  * The transaction that makes `call` from the keeper, simulated: a vote just after the block it is for, by default the
- * latest, and a claim in the node's next block. Throws if it would revert. Returns its maximum `cost` and its
- * `expectedCost` at the current fees, in wei, L1 fee included, and the keeper's `balance`.
+ * latest, and a claim in the node's next block, after `before`, calls a dry run prepared but did not send. Throws if it
+ * would revert. Returns its maximum `cost` and its `expectedCost` at its fees, in wei, L1 fee included, and the keeper's
+ * `balance`.
  */
-export async function prepareCall(chain: Chain, { functionName, args }: ModuleCall, target?: Target) {
+export async function prepareCall(
+  chain: Chain,
+  { functionName, args }: ModuleCall,
+  target?: Target,
+  before: readonly ModuleCall[] = [],
+) {
   const { client, module, keeper } = chain;
   const data = encodeFunctionData({ abi: moduleAbi, functionName, args } as never);
-  const call = { account: keeper, to: module, abi: moduleAbi, functionName, args } as const;
+  const toCall = (c: ModuleCall) => ({ account: keeper, to: module, abi: moduleAbi, ...c }) as const;
   // The simulated block builds on the latest one, which may already be the one at `time`. A claim does not depend on
   // the time, and pinning it could fall behind a node ahead of the one that gave the latest block.
   const time = functionName === "vote" ? (target?.time ?? (await client.getBlock()).timestamp) : undefined;
   const blockOverrides = time === undefined ? {} : { blockOverrides: { time: time + 1n } };
+  const calls = [...before, { functionName, args } as ModuleCall].map(toCall);
   const [[block], suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
-    client.simulateBlocks({ blocks: [{ ...blockOverrides, calls: [call as never] }] }),
+    client.simulateBlocks({ blocks: [{ ...blockOverrides, calls: calls as never[] }] }),
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: keeper, blockTag: "latest" }),
@@ -99,7 +106,7 @@ export async function prepareCall(chain: Chain, { functionName, args }: ModuleCa
     client.getBalance({ address: keeper, blockTag: "pending" }),
     client.estimateL1Fee({ account: keeper, to: module, data }),
   ]);
-  const simulated = block!.calls[0]!;
+  const simulated = block!.calls.at(-1)!;
   const what = functionName === "vote" ? "the vote" : "the claim";
   if (simulated.status !== "success") throw simulated.error ?? new Error(`${what} would revert`);
   const baseFee = history.baseFeePerGas.at(-1); // the next block's
@@ -130,7 +137,8 @@ export async function prepareCall(chain: Chain, { functionName, args }: ModuleCa
   } satisfies Tx;
   const cost = tx.gas * tx.maxFeePerGas + l1Fee;
   const { gasUsed, logs } = simulated;
-  const expectedCost = gasUsed * (baseFee + tip) + l1Fee;
+  // At what the transaction pays per gas, its tip included, which a replacement bumps.
+  const expectedCost = gasUsed * min(tx.maxFeePerGas, baseFee + tx.maxPriorityFeePerGas) + l1Fee;
   return {
     tx,
     cost,

@@ -37,21 +37,24 @@ them to kVCM, retires part of the kVCM, and pays the rest to the veNFT's owner, 
   veNFT ever minted, unless the conduit may not claim for it or its owner is excluded. For now, the veNFTs of the Klima
   Foundation's Safe, `0xa79cd47655156b299762DFE92A67980805ce5a31`, are excluded: `EXCLUDED_OWNERS` in `src/claim.ts`.
 - **What:** each veNFT's rewards, as the contracts' `earned` gives them, in the tokens of `tokens.json`, from the bribe
-  and fee contracts the conduit voted on in the last 12 epochs.
+  and fee contracts the conduit voted on in the last 12 epochs. A claim takes all that a contract owes the veNFT in a
+  token, up to 50 epochs since its last claim there, including what it earned before it delegated to the conduit.
 - **When it pays:** a claim asks each of its contracts for each of its tokens, at about 0.3M gas apiece on top of 1.3M,
   and Base caps a transaction at 16.8M. So a claim takes the contracts that pay most in the tokens that pay most, within
   10M gas, and is sent only if it collects at least $5 and its gas costs at most 5% of that. What a claim leaves stays
   claimable: a veNFT gets up to three claims per execution, and what is still under $5 waits for a later one.
 - **Swaps:** each token but kVCM goes to kVCM through KyberSwap's aggregator, the router the conduit approves, at up to
-  5% slippage. The job decodes the calldata: it must sell exactly what the claim takes, to the conduit, for a minimum
-  worth at least 85% of what it sells at the job's prices, or the token is left out. The claim's simulation must show it
-  taking no more than it swaps, so that nothing is left in the conduit.
+  5% slippage. The job decodes the calldata: it must sell exactly what the claim takes, for kVCM paid to the conduit,
+  through a router the conduit approves. A swap whose minimum return is worth less than 85% of what it sells, at the
+  job's prices, is planned again with at most half as much of the token. The claim's simulation must show it taking
+  exactly what it swaps of each token, so that nothing is left in the conduit.
 - **Retirement:** the conduit retires `retireBps`, a third, of the kVCM the claim is sure to get: `maxKvcmIn` is that
   share of the kVCM claimed and of the swaps' minimum returns, and the tonnes retired cost 97% of it at Carbonmark's
   quote.
 
-Claims go one at a time, each after the receipt of the one before. A claim needs its maximum cost and 0.001 ETH more in
-the keeper, so that it never spends what the next votes need.
+Claims go one at a time, each once the one before is a block deep, and none starts in the last minute of the hour after
+the flip. A claim needs its maximum cost and 0.001 ETH more in the keeper, so that it never spends what the next votes
+need.
 
 ## What it can and cannot do
 
@@ -97,8 +100,8 @@ to re-run.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build and deploys the job and its schedule. Run it again after
    any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs it with KMS, but
-   sends nothing; `sh/run.sh --now` sends it. `sh/run.sh --dry-run --claim` does the same with the claims. The logs are
-   in Cloud Run, one JSON object per line.
+   sends nothing; `sh/run.sh --now` sends it. `sh/run.sh --dry-run --claim` does the same with the claims, outside the
+   hours in which the schedule votes or claims. The logs are in Cloud Run, one JSON object per line.
 
 ## Checks
 
@@ -117,15 +120,17 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
 
 - **Base RPC:** a read that fails, or gets no answer within 250 ms, also goes to the next URL. A vote or a claim goes to
   every URL; in the last blocks, a vote that no URL accepts fails the execution, unless the vote it replaces landed
-  first. Finding the delegators reads the delegatee of every veNFT ever minted, about 124 eth_calls of 12M gas.
+  first. The claims' reads are heavier: the delegatee of every veNFT ever minted, about 124 eth_calls of 12M gas, then
+  what each delegator earned. Each goes to one URL, and to the next only if it fails or takes over 30 s.
 - **Prices:** DefiLlama and Alchemy, and CoinGecko if `COINGECKO_SECRET` is set; a price is the median of their quotes,
   or the lower of two. A token without a price counts as zero, and the vote fails if no token has one.
 - **Keeper balance:** a vote needs twice its maximum cost in the keeper, so that it leaves enough to vote in the last
   blocks; a vote in the last blocks needs it once; a claim needs it and 0.001 ETH more. Short of that, the job refuses
   to vote or claim and logs `fund the keeper`.
 - **Claims:** a claim that cannot be built or simulated, or that reverts, fails the execution, whose retry claims what
-  is still due; one that may have been sent without a receipt in time also stops the claims. KyberSwap is retried three
-  times; a token it has no route for, or whose swap would lose too much, is left out of the claim instead.
+  is still due. One that may have been sent without a receipt in time, or that the keeper cannot pay for, also stops the
+  claims. KyberSwap is retried three times; a token it has no route for is left out, and one it answers wrongly for is
+  left out and fails the execution.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter
@@ -146,7 +151,8 @@ and base images.
 - The expected reward assumes the others' votes stay put. The last pass misses votes sent in the last 2 s or so, and
   rewards paid in the last minute, which is rare.
 - Claims take only the rewards in the tokens of `tokens.json`, from the contracts the conduit voted on in the last 12
-  epochs, and only those of a veNFT delegated to it when the epoch that ended began. The owner can claim the rest.
+  epochs, and only those of a veNFT delegated to it when the epoch that ended began. The owner can claim the rest. But
+  from those contracts, a claim also takes what the veNFT earned before it delegated, swaps it and retires a third.
 - Rewards that never add up to $5 in a claim are never claimed. Swaps go to kVCM only, and lose more as they grow: about
   1% for $100 of USDC, 5% for $1,000.
 

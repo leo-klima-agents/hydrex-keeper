@@ -27,7 +27,16 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
     },
   } as unknown as Client;
   const broadcast = async () => assert.fail("reads never send");
-  return { client, broadcast, module: addr(99), conduit: CONDUIT, keeper: addr(98), voter: VOTER, ve: VE };
+  return {
+    client,
+    bulk: client,
+    broadcast,
+    module: addr(99),
+    conduit: CONDUIT,
+    keeper: addr(98),
+    voter: VOTER,
+    ve: VE,
+  };
 }
 
 const pools = [POOL_A, POOL_B, POOL_C, POOL_D];

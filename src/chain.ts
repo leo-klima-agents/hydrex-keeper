@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   createTransport,
+  fallback,
   http,
   keccak256,
   shouldThrow,
@@ -17,6 +18,7 @@ export const WEEK = 7n * 24n * 60n * 60n;
 export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and rejects 2,264
 export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
 const TIMEOUT_MS = 5_000;
+const BULK_TIMEOUT_MS = 30_000; // a 1,000-call eth_call of the claims takes up to 2 s
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
@@ -107,15 +109,27 @@ export function broadcaster(rpcUrls: string[]) {
   };
 }
 
-function makeClient(rpcUrls: string[]) {
-  const client = createPublicClient({ chain: base, transport: hedged(rpcUrls), pollingInterval: 1_000 });
+function makeClient(transport: Transport) {
+  const client = createPublicClient({ chain: base, transport, pollingInterval: 1_000 });
   return client.extend(publicActionsL2());
 }
 
 export type Client = ReturnType<typeof makeClient>;
 
+/**
+ * For reads too heavy to hedge, such as the claims' scan of every veNFT: each request goes to one URL, unbatched, and to
+ * the next only if it fails or takes over BULK_TIMEOUT_MS.
+ */
+const bulkTransport = (rpcUrls: string[]) =>
+  fallback(
+    rpcUrls.map((url) => http(url, { batch: false, timeout: BULK_TIMEOUT_MS, retryCount: 0 })),
+    { retryCount: 0 },
+  );
+
 export type Chain = {
   client: Client;
+  /** For heavy reads, unhedged. */
+  bulk: Client;
   broadcast: ReturnType<typeof broadcaster>;
   module: Address;
   conduit: Address;
@@ -125,7 +139,7 @@ export type Chain = {
 };
 
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
-  const client = makeClient(rpcUrls);
+  const client = makeClient(hedged(rpcUrls));
   const [conduit, keeper] = (await readMany<Address>(client, [
     { address: module, abi: moduleAbi, functionName: "CONDUIT" },
     { address: module, abi: moduleAbi, functionName: "KEEPER" },
@@ -134,7 +148,8 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
     { address: conduit, abi: conduitAbi, functionName: "voter" },
     { address: conduit, abi: conduitAbi, functionName: "veToken" },
   ])) as [Address, Address];
-  return { client, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
+  const bulk = makeClient(bulkTransport(rpcUrls));
+  return { client, bulk, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

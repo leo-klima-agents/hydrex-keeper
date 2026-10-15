@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { decodeFunctionData, getAddress, isAddress, isAddressEqual, isHex, type Address, type Hex } from "viem";
 import { kyberAbi } from "./abi.ts";
+import { errorMessage } from "./log.ts";
 
 const API = "https://aggregator-api.kyberswap.com/base/api/v1";
 const CLIENT_ID = "hydrex-keeper";
@@ -25,6 +26,9 @@ export type Swapper = (request: SwapRequest, until: number) => Promise<Swap>;
 /** Refused by KyberSwap, for instance for want of a route: asking again would not help. */
 export class SwapRefused extends Error {}
 
+/** KyberSwap answered with something else than the swap asked for: a change on its side, or worse. */
+export class BadSwap extends Error {}
+
 const isObject = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" && body !== null && !Array.isArray(body);
 
@@ -36,7 +40,7 @@ export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
   return async ({ tokenIn, tokenOut, amountIn, account, slippageBps }, until) => {
     const query = new URLSearchParams({ tokenIn, tokenOut, amountIn: String(amountIn) });
     const { routeSummary } = await kyber(`${API}/routes?${query}`, undefined, fetchFn, until);
-    if (!isObject(routeSummary)) throw new Error("KyberSwap: malformed route");
+    if (!isObject(routeSummary)) throw new BadSwap("KyberSwap: malformed route");
     const body = JSON.stringify({
       routeSummary,
       sender: account,
@@ -47,9 +51,14 @@ export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
     const built = await kyber(`${API}/route/build`, body, fetchFn, until);
     const { routerAddress, data, amountOut } = built;
     if (typeof routerAddress !== "string" || !isAddress(routerAddress) || typeof data !== "string" || !isHex(data)) {
-      throw new Error("KyberSwap: malformed calldata");
+      throw new BadSwap("KyberSwap: malformed calldata");
     }
-    const { desc } = decodeFunctionData({ abi: kyberAbi, data }).args[0];
+    let desc;
+    try {
+      desc = decodeFunctionData({ abi: kyberAbi, data }).args[0].desc;
+    } catch (error) {
+      throw new BadSwap(`KyberSwap: calldata is not a swap: ${errorMessage(error)}`);
+    }
     const asked =
       isAddressEqual(desc.srcToken, tokenIn) &&
       isAddressEqual(desc.dstToken, tokenOut) &&
@@ -57,7 +66,7 @@ export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
       desc.amount === amountIn;
     if (!asked) {
       const got = `${desc.amount} of ${desc.srcToken} for ${desc.dstToken} to ${desc.dstReceiver}`;
-      throw new Error(`KyberSwap built another swap: ${got}`);
+      throw new BadSwap(`KyberSwap built another swap: ${got}`);
     }
     const quoted = typeof amountOut === "string" && /^\d+$/.test(amountOut) ? BigInt(amountOut) : desc.minReturnAmount;
     return { router: getAddress(routerAddress), data, amountIn, amountOut: quoted, minOut: desc.minReturnAmount };

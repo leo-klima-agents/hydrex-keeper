@@ -43,12 +43,23 @@ async function main(): Promise<number> {
 
   const run: Run = { chain, tokens, prices: priceFeed(source), account, dryRun };
   const epoch = await readEpoch(chain);
-  const what = claimNow ? "claims" : immediately ? "day before" : due(epoch.flip, now());
+  const scheduled = due(epoch.flip, now());
+  // A claim sent by hand could take the nonce of a vote or claim the schedule sends then.
+  const sends = { claims: "claims", "day before": "vote of a day before the flip", "last blocks": "last-block votes" };
+  if (claimNow && scheduled) throw new Error(`--claim would race the scheduled ${sends[scheduled]}: run it later`);
+  const what = claimNow ? "claims" : immediately ? "day before" : scheduled;
   if (what === "claims") {
     // The flip just past: the Voter's next one while the minter has not started its epoch.
     const flip = epoch.flip <= now() ? epoch.flip : epoch.start;
     const until = claimNow ? Date.now() + Number(HORIZON) * 1000 : Number(flip + HORIZON) * 1000;
     return (await claims(run, flip, until)) ? 1 : 0;
+  }
+  if (!what && epoch.flip <= now() && now() - epoch.flip < 2n * HORIZON) {
+    // A retry of claims that waited for the minter all hour: they failed already, and nothing else is due.
+    log.warning("nothing due: the hour of the claims is over, and the minter has not started the epoch", {
+      flip: epoch.flip,
+    });
+    return 0;
   }
   assertFresh(epoch);
   if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");

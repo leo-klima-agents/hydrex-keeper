@@ -91,6 +91,7 @@ function fakeChain(b: Behaviour = {}) {
   };
   const chain: Chain = {
     client,
+    bulk: client,
     broadcast,
     module: MODULE,
     conduit: CONDUIT,
