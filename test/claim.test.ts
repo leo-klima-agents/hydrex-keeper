@@ -90,6 +90,11 @@ type World = {
   pending?: boolean;
   /** A pair, by `key`, half of which a claim leaves owed, as when it is owed for more than 50 epochs. */
   partial?: string;
+  /**
+   * What veNFTs earned in the last epoch from pairs, by `key`, that they never claimed from and whose contracts' first
+   * bribe was 60 epochs ago: past the 50 epochs earned() reads.
+   */
+  hidden?: Map<string, bigint>;
 };
 
 const key = (id: unknown, bribe: Address, token: Address) => `${id}${bribe}${token}`.toLowerCase();
@@ -258,6 +263,8 @@ function fakeChain(w: World = world()) {
         return !unapproved.has(String(b));
       case `${VE}.balanceOfNFTAt`:
         return powers[String(a)];
+      case `${VE}.getFirstEscrowPoint`:
+        return [{ bias: 0n, slope: 0n, permanent: 0n }, Number(START - 100n * WEEK)];
       case `${CONDUIT}.kvcm`:
         return KVCM;
       case `${CONDUIT}.retireBps`:
@@ -293,6 +300,16 @@ function fakeChain(w: World = world()) {
         return listed.get(address)![Number(a)];
       case "rewardData":
         return [0n, b === ENDED ? 1_000n : 0n, 0n];
+      case "tokenTimestamp":
+        return w.hidden?.has(key(a, address, b as Address)) ? 0n : START - WEEK;
+      case "firstBribeTimestamp": {
+        const old = [...(w.hidden?.keys() ?? [])].some((k) => k.includes(address.toLowerCase()));
+        return START - (old ? 60n : 30n) * WEEK;
+      }
+      case "earnedTokenId": {
+        const epoch = BigInt(args[2] as bigint);
+        return epoch === START - WEEK ? (w.hidden?.get(key(a, address, b as Address)) ?? 0n) : 0n;
+      }
       case "earned":
         earnedFor.add(String(a));
         if (w.hide === b && reads > 1) return 0n;
@@ -605,6 +622,24 @@ test("a claim that refusals leave empty after a smaller plan is too little, not 
   const { swapper } = fakeSwapper({ refuse: (token) => token === USDC && ++asks > 1 });
   assert.equal(await claims(runOf(chain), START, until(), swapper), 0);
   assert.equal(sent.length, 0);
+});
+
+test("a claim also asks for rewards past the 50 epochs earned() reads, to make them claimable", async () => {
+  const hidden = new Map([[key(2, E2, ODD[0]!), 8n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  const claim = decode(sent[0]!);
+  assert.ok(claim.bribes.includes(E2) && claim.tokens.includes(ODD[0]!), "E2 asked for its hidden token");
+});
+
+test("a veNFT whose rewards are past the 50 epochs earned() reads gets the claim that makes them claimable", async () => {
+  // veNFT 4 has $1 of USDC to claim, and $8 more past earned()'s epochs.
+  const hidden = new Map([[key(4, E2, ODD[0]!), 8n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  const claim = sent.map(decode).find(({ id }) => id === 4n);
+  assert.ok(claim, "veNFT 4 is claimed for");
+  assert.ok(claim.bribes.includes(E2) && claim.tokens.includes(ODD[0]!));
 });
 
 test("a claim that would leave some of a token in the conduit is not sent, whether it swaps it or not", async () => {

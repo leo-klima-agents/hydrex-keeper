@@ -41,13 +41,19 @@ const MAX_GAS_USED = 12_000_000n; // as simulated: the gas limit is half again, 
 const REPLANS = 4; // smaller plans after simulations over MAX_GAS_USED
 const ROUNDS = 12; // plans per claim: smaller, without a token KyberSwap cannot swap, or with less of one
 const EARNED_CHUNK = 25; // earned() loops over the epochs since the last claim: 25 calls can take 15M gas
+const WINDOW = 50n; // epochs earned() reads from a veNFT's last claim from a contract in a token, and a claim moves
 const CONCURRENCY = 4; // eth_calls in flight for the largest reads
 const MINTER_POLL_MS = 5_000;
 const TONNE = 10n ** 18n;
 const WETH: Address = "0x4200000000000000000000000000000000000006";
 
-/** What one bribe contract owes a veNFT in one token; `fees` for a pool's fee contract, its internal bribe. */
-export type Pair = { bribe: Address; fees: boolean; token: Address; usd: number };
+/**
+ * What one bribe contract owes a veNFT in one token; `fees` for a pool's fee contract, its internal bribe. `later` is
+ * what it owes past the epochs earned() reads, which a claim from it in that token moves earned() to, for a later claim.
+ */
+export type Pair = { bribe: Address; fees: boolean; token: Address; usd: number; later?: number };
+
+type Paying = Pick<Pair, "bribe" | "fees" | "token">;
 
 /** One claim: each of `fees` and `bribes` asked for each of `tokens`, worth `usd`, for about `gas`. */
 export type ClaimPlan = { tokens: Address[]; fees: Address[]; bribes: Address[]; usd: number; gas: bigint };
@@ -252,18 +258,23 @@ async function claimRewards(run: Run, start: bigint, until: number, swapper: Swa
     unswapped: new Set(),
     anomalies: 0,
   };
-  const earned = await readMany<bigint>(
-    chain.bulk,
-    nfts.flatMap(({ id }) => paying.map(({ bribe, token }) => bribeCall(bribe, "earned", [id, token]))),
-    { chunk: EARNED_CHUNK, concurrency: CONCURRENCY },
-  );
+  const [earned, hidden] = await Promise.all([
+    readMany<bigint>(
+      chain.bulk,
+      nfts.flatMap(({ id }) => paying.map(({ bribe, token }) => bribeCall(bribe, "earned", [id, token]))),
+      { chunk: EARNED_CHUNK, concurrency: CONCURRENCY },
+    ),
+    readHidden(chain, nfts, paying, start),
+  ]);
   nfts.forEach((nft, i) => {
     nft.pairs = paying.flatMap((p, j) => {
       const amount = earned[i * paying.length + j]!;
-      return amount > 0n ? [{ ...p, usd: valueOf(ctx, p.token, amount) }] : [];
+      const later = hidden[i]!.get(pairKey(p.bribe, p.token)) ?? 0n;
+      if (amount === 0n && later === 0n) return [];
+      return [{ ...p, usd: valueOf(ctx, p.token, amount), later: valueOf(ctx, p.token, later) }];
     });
   });
-  const total = ({ pairs }: Nft) => pairs.reduce((sum, p) => sum + p.usd, 0);
+  const total = ({ pairs }: Nft) => pairs.reduce((sum, p) => sum + worth(p), 0);
   nfts.sort((a, b) => total(b) - total(a));
   log.info("claims", { epoch: ended, delegators: delegators.length, claimable: nfts.length, pairs: paying.length });
   for (const nft of nfts) log.info("delegator", { tokenId: nft.id, owner: nft.owner, usd: total(nft) });
@@ -311,9 +322,14 @@ const newNft = (id: bigint, owner: Address): Nft => ({
 /** The pairs of `nft` that no claim of this execution asked for. */
 const untaken = (nft: Nft) => nft.pairs.filter((p) => !nft.taken.has(pairKey(p.bribe, p.token)));
 
+/** What a claim from a pair's contract in its token is worth: what it takes, and what it makes claimable later. */
+const worth = (p: Pair) => p.usd + (p.later ?? 0);
+
 /** The most valuable claim left for `nft` within `budget` gas, without the tokens left out of its claims. */
 function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET): ClaimPlan | undefined {
-  const pairs = untaken(nft).filter((p) => !ctx.unswapped.has(lower(p.token)) && !nft.unswapped.has(lower(p.token)));
+  const pairs = untaken(nft)
+    .filter((p) => !ctx.unswapped.has(lower(p.token)) && !nft.unswapped.has(lower(p.token)))
+    .map((p) => ({ ...p, usd: worth(p) }));
   return planClaim(pairs, budget, ctx.usdPerGas, (token) => !isPayout(ctx.conduit, token), nft.caps);
 }
 
@@ -329,7 +345,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       throw new Error(`no claim fits in ${MAX_GAS_USED} gas`);
     }
     if (!plan || plan.usd < MIN_CLAIM_USD) {
-      const usd = untaken(nft).reduce((sum, p) => sum + p.usd, 0);
+      const usd = untaken(nft).reduce((sum, p) => sum + worth(p), 0);
       log.info("not claimed: too little", { tokenId: nft.id, claimable: plan?.usd ?? 0, left: usd });
       return false;
     }
@@ -359,11 +375,16 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
     }
     checkTaken(conduit, simulated.logs, built);
     const [, , , fees, bribes, tokens, retireTonnes, maxKvcmIn] = built.call.args;
+    const asked = [...fees, ...bribes];
+    const unlocked = untaken(nft)
+      .filter((p) => asked.includes(p.bribe) && tokens.includes(p.token))
+      .reduce((sum, p) => sum + (p.later ?? 0), 0);
     const gasUsd = Number(formatEther(expectedCost)) * ctx.ethUsd;
     const fields = {
       tokenId: nft.id,
       owner: nft.owner,
       usd: built.usd,
+      unlocked,
       gasUsd,
       tokens,
       fees,
@@ -374,7 +395,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       gasPlanned: plan.gas,
       gasUsed: simulated.gasUsed,
     };
-    if (!worthClaiming(built.usd, gasUsd)) {
+    if (!worthClaiming(built.usd + unlocked, gasUsd)) {
       log.info("not claimed: not worth its gas", fields);
       return false;
     }
@@ -387,7 +408,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
     log.info("claim prepared", { ...fields, gas: tx.gas, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     const prepared = await signTx(account, tx, dryRun);
     const { signed } = prepared;
-    const pairs = [...fees, ...bribes].flatMap((bribe) => tokens.map((token) => pairKey(bribe, token)));
+    const pairs = asked.flatMap((bribe) => tokens.map((token) => pairKey(bribe, token)));
     if (!signed || dryRun) {
       log.info(signed ? "dry run: signed, not sent" : "not signed, not sent", { tokenId: nft.id });
       nft.prepared.push(built.call);
@@ -623,7 +644,7 @@ async function readDelegators(chain: Chain, at: bigint) {
  * The bribe contracts of every pool, live or not, that the conduit voted on in one of `epochs`, each with the tokens of
  * `tokens` that it paid in one of those: what the conduit's delegators may have earned.
  */
-async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]) {
+async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]): Promise<Paying[]> {
   const { bulk, conduit } = chain;
   const read: Reader = <T>(calls: Call[]) => readMany<T>(bulk, calls, { concurrency: CONCURRENCY });
   const seen = new Set<string>();
@@ -648,6 +669,46 @@ async function readPayingPairs(chain: Chain, tokens: Address[], epochs: bigint[]
     const paid = on.map(() => data[k++]![1]!).some((amount) => amount > 0n);
     return paid ? [{ bribe, fees, token }] : [];
   });
+}
+
+/**
+ * What each of `nfts` earned from each of `paying`, by pair key, past the epochs earned() reads: 50 from its last claim
+ * there, or from its creation or the contract's first bribe if it never claimed there. Up to 50 more epochs, to `start`:
+ * those a claim from that contract in that token moves earned() to.
+ */
+async function readHidden(chain: Chain, nfts: Nft[], paying: Paying[], start: bigint): Promise<Map<string, bigint>[]> {
+  const read = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
+  const bribes = [...new Set(paying.map(({ bribe }) => bribe))];
+  const [stamps, firsts, points] = await Promise.all([
+    read<bigint>(
+      nfts.flatMap(({ id }) => paying.map(({ bribe, token }) => bribeCall(bribe, "tokenTimestamp", [id, token]))),
+    ),
+    read<bigint>(bribes.map((bribe) => bribeCall(bribe, "firstBribeTimestamp"))),
+    read<readonly [unknown, number]>(nfts.map(({ id }) => veCall(chain, "getFirstEscrowPoint", [id]))),
+  ]);
+  const firstOf = new Map(bribes.map((bribe, i) => [bribe, firsts[i]!]));
+  const past = nfts.flatMap(({ id }, n) =>
+    paying.flatMap(({ bribe, token }, j) => {
+      // Where earned() starts, as BribeV2 sets it.
+      const first = firstOf.get(bribe)!;
+      let from = stamps[n * paying.length + j]!;
+      if (from < first) {
+        const created = (BigInt(points[n]![1]) / WEEK) * WEEK;
+        from = created > first ? created : first - WEEK;
+      }
+      const end = from + WINDOW * WEEK;
+      const count = end < start ? (start - end) / WEEK : 0n;
+      return Array.from({ length: Number(count < WINDOW ? count : WINDOW) }, (_, k) => ({
+        n,
+        pair: pairKey(bribe, token),
+        call: bribeCall(bribe, "earnedTokenId", [id, token, end + BigInt(k) * WEEK]),
+      }));
+    }),
+  );
+  const amounts = await read<bigint>(past.map(({ call }) => call));
+  const hidden = nfts.map(() => new Map<string, bigint>());
+  past.forEach(({ n, pair }, i) => hidden[n]!.set(pair, (hidden[n]!.get(pair) ?? 0n) + amounts[i]!));
+  return hidden;
 }
 
 /** The USD value of `amount` of `token` at the job's prices; zero if it has none. */

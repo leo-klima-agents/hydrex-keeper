@@ -39,6 +39,9 @@ them to kVCM, retires part of the kVCM, and pays the rest to the veNFT's owner, 
 - **What:** each veNFT's rewards, as the contracts' `earned` gives them, in the tokens of `tokens.json`, from the bribe
   and fee contracts the conduit voted on in the last 12 epochs. A claim takes all that a contract owes the veNFT in a
   token, up to 50 epochs since its last claim there, including what it earned before it delegated to the conduit.
+  `earned` reads only those 50 epochs, counted from the veNFT's creation if it never claimed there; a claim moves them
+  on. So the job also reads what lies past them, counts it as part of a claim's worth, and asks for it in claims, which
+  makes it claimable the next week.
 - **When it pays:** a claim asks each of its contracts for each of its tokens, at about 0.3M gas apiece on top of 1.3M,
   and Base caps a transaction at 16.8M. So a claim takes the contracts that pay most in the tokens that pay most, within
   10M gas, and is sent only if it collects at least $5 and its gas costs at most 5% of that. Further claims take what it
@@ -46,15 +49,16 @@ them to kVCM, retires part of the kVCM, and pays the rest to the veNFT's owner, 
 - **Swaps:** each token but kVCM goes to kVCM through KyberSwap's aggregator, the router the conduit approves, at up to
   5% slippage. The job decodes the calldata: it must sell exactly what the claim takes, for kVCM paid to the conduit,
   through a router the conduit approves. A swap whose minimum return is worth less than 85% of what it sells, at the
-  job's prices, is planned again with at most half as much of the token. The claim's simulation must show it taking
-  exactly what it swaps of each token, so that nothing is left in the conduit.
+  job's prices, is planned again with at most half as much of the token, or without it. The claim's simulation must show
+  it taking exactly what it swaps of each token, so that nothing is left in the conduit.
 - **Retirement:** the conduit retires `retireBps`, a third, of the kVCM the claim is sure to get: `maxKvcmIn` is that
-  share of the kVCM claimed and of the swaps' minimum returns, and the tonnes retired cost 97% of it at Carbonmark's
-  quote.
+  share of the kVCM claimed and of the swaps' minimum returns, and the tonnes retired cost at most 97% of it at
+  Carbonmark's quote.
 
-Claims go one at a time, the veNFT with the most to claim first, each once the one before is a block deep, and none
-starts in the last minute of the hour after the flip. A claim needs its maximum cost and 0.001 ETH more in the keeper,
-so that it never spends what the next votes need.
+Claims go one at a time, the veNFT with the most to claim first, each once the one before is a block deep, with reads
+and simulation at a block no older than its; none starts in the last minute of the hour after the flip. A claim needs
+its maximum cost and 0.001 ETH more in the keeper, so that it never spends what the next votes need, and is never sent
+while another transaction of the keeper is pending, which may be a vote: the claims stop instead.
 
 ## What it can and cannot do
 
@@ -100,8 +104,9 @@ to re-run.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build and deploys the job and its schedule. Run it again after
    any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs it with KMS, but
-   sends nothing; `sh/run.sh --now` sends it. `sh/run.sh --dry-run --claim` does the same with the claims, outside the
-   hours in which the schedule votes or claims. The logs are in Cloud Run, one JSON object per line.
+   sends nothing; `sh/run.sh --now` sends it. `sh/run.sh --dry-run --claim` does the same with the claims; without
+   `--dry-run`, `--claim` is refused in the hours in which the schedule votes or claims. The logs are in Cloud Run, one
+   JSON object per line.
 
 ## Checks
 
@@ -129,9 +134,9 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
   to vote or claim and logs `fund the keeper`.
 - **Claims:** a claim that cannot be built or simulated, or that reverts, fails the execution, whose retry claims what
   is still due. One that may have been sent without a receipt in time, or that the keeper cannot pay for, also stops the
-  claims. Claims still worth making when the hour ends fail the execution too; the next week's take them. KyberSwap is
-  retried three times; a token it has no route for is left out, and one it answers wrongly for is left out and fails the
-  execution.
+  claims, as does another transaction of the keeper pending. Claims still worth making when the hour ends fail the
+  execution too; the next week's take them. KyberSwap is retried three times; a token it has no route for is left out of
+  that veNFT's claims, and one it answers wrongly for is left out of all and fails the execution.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter

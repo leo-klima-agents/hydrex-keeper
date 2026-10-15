@@ -52,6 +52,8 @@ export const veAbi = parseAbi([
   "function balanceOfNFTAt(uint256 tokenId, uint256 timestamp) view returns (uint256)",
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function isApprovedClaimRedirectOrOwner(address operator, uint256 tokenId) view returns (bool)",
+  "struct Point { int128 bias; int128 slope; int128 permanent; }",
+  "function getFirstEscrowPoint(uint256 tokenId) view returns (Point point, uint48 timestamp)",
 ]);
 
 export const bribeAbi = parseAbi([
@@ -60,6 +62,9 @@ export const bribeAbi = parseAbi([
   "function rewardData(address token, uint256 epoch) view returns (uint256 periodFinish, uint256 rewardsPerEpoch, uint256 lastUpdateTime)",
   "function balanceOfOwnerAt(address owner, uint256 epoch) view returns (uint256)",
   "function earned(uint256 tokenId, address token) view returns (uint256)",
+  "function earnedTokenId(uint256 tokenId, address token, uint48 timestamp) view returns (uint256)",
+  "function tokenTimestamp(uint256 tokenId, address token) view returns (uint256)",
+  "function firstBribeTimestamp() view returns (uint256)",
 ]);
 
 // Carbonmark's retirement aggregator, through which the conduit retires kVCM.
