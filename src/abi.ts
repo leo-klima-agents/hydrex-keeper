@@ -5,6 +5,7 @@ export const moduleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
   "function vote(address[] pools, uint256[] weights)",
+  "function claimSwapAndDistribute(uint256 veTokenId, address[] targets, bytes[] swaps, address[] feeAddresses, address[] bribeAddresses, address[] claimTokens, uint256 retireTonnes, uint256 maxKvcmIn)",
   "error NotKeeper()",
   "error ExecutionFailed()",
   // Raised by the conduit or the Voter; the module re-raises them.
@@ -18,6 +19,16 @@ export const moduleAbi = parseAbi([
 export const conduitAbi = parseAbi([
   "function voter() view returns (address)",
   "function veToken() view returns (address)",
+  "function kvcm() view returns (address)",
+  "function distributionTokens(uint256 index) view returns (address)",
+  "function isApprovedRouter(address router) view returns (bool)",
+  "function retireBps() view returns (uint256)",
+  "function retirementAggregator() view returns (address)",
+  "function creditToken() view returns (address)",
+  "function creditTokenId() view returns (uint256)",
+  "function carbonClass() view returns (address)",
+  "event ClaimSwapAndDistributeCompleted(uint256 indexed tokenId, address indexed owner, address indexed recipient, address[] claimedTokens, uint256[] claimedAmounts, address[] distributedTokens, uint256[] distributedAmounts, uint256[] treasuryFees)",
+  "event CarbonRetired(address indexed creditToken_, uint256 retireTonnes, uint256 kvcmSpent)",
 ]);
 
 export const voterAbi = parseAbi([
@@ -34,10 +45,38 @@ export const voterAbi = parseAbi([
   "function lastVoted(address voter) view returns (uint256)",
 ]);
 
-export const veAbi = parseAbi(["function getPastVotes(address account, uint256 timestamp) view returns (uint256)"]);
+export const veAbi = parseAbi([
+  "function getPastVotes(address account, uint256 timestamp) view returns (uint256)",
+  "function totalNftsMinted() view returns (uint256)",
+  "function delegates(uint256 tokenId, uint48 timestamp) view returns (address)",
+  "function balanceOfNFTAt(uint256 tokenId, uint256 timestamp) view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function isApprovedClaimRedirectOrOwner(address operator, uint256 tokenId) view returns (bool)",
+  "struct Point { int128 bias; int128 slope; int128 permanent; }",
+  "function getFirstEscrowPoint(uint256 tokenId) view returns (Point point, uint48 timestamp)",
+]);
 
 export const bribeAbi = parseAbi([
   "function rewardsListLength() view returns (uint256)",
   "function rewardTokens(uint256 index) view returns (address)",
   "function rewardData(address token, uint256 epoch) view returns (uint256 periodFinish, uint256 rewardsPerEpoch, uint256 lastUpdateTime)",
+  "function balanceOfOwnerAt(address owner, uint256 epoch) view returns (uint256)",
+  "function earned(uint256 tokenId, address token) view returns (uint256)",
+  "function earnedTokenId(uint256 tokenId, address token, uint48 timestamp) view returns (uint256)",
+  "function tokenTimestamp(uint256 tokenId, address token) view returns (uint256)",
+  "function firstBribeTimestamp() view returns (uint256)",
+]);
+
+// Carbonmark's retirement aggregator, through which the conduit retires kVCM.
+export const retirementAbi = parseAbi([
+  "function quoteRetireCreditViaKlima(address creditToken, uint256 tokenId, uint256 amount, address inputToken, address carbonClass, uint256 couponTonnes) view returns (uint256 tonnes, uint256 price, uint256, uint256)",
+]);
+
+// KyberSwap's MetaAggregationRouterV2, the conduit's approved router.
+export const kyberAbi = parseAbi([
+  "struct SwapDescriptionV2 { address srcToken; address dstToken; address[] srcReceivers; uint256[] srcAmounts; address[] feeReceivers; uint256[] feeAmounts; address dstReceiver; uint256 amount; uint256 minReturnAmount; uint256 flags; bytes permit; }",
+  "struct SwapExecutionParams { address callTarget; address approveTarget; bytes targetData; SwapDescriptionV2 desc; bytes clientData; }",
+  "function swap(SwapExecutionParams execution) payable returns (uint256 returnAmount, uint256 gasUsed)",
+  "function swapGeneric(SwapExecutionParams execution) payable returns (uint256 returnAmount, uint256 gasUsed)",
+  "function swapSimpleMode(address caller, SwapDescriptionV2 desc, bytes executorData, bytes clientData) returns (uint256 returnAmount, uint256 gasUsed)",
 ]);

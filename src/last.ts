@@ -6,7 +6,7 @@ import type { Prices } from "./prices.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
 import { expected, select, type Vote } from "./select.ts";
-import { broadcastVote, nonceTaken, prepareVote, verifyVote, type Prepared } from "./vote.ts";
+import { broadcastTx, markMined, nonceTaken, prepareVote, verifyVote, type Prepared } from "./vote.ts";
 
 const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
 const PRICES_BY_MS = 5_000; // before the flip
@@ -15,6 +15,9 @@ const PLAN_EVERY_MS = 100;
 const MAX_PLANS = 3; // in flight
 const RETRY_DELAY_MS = 5_000;
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
+
+/** A vote sent, by the hash of its signed transaction. */
+type Sent = { hash: Hex; vote: Vote; nonce: number };
 
 /** What to send in the block with timestamp `time` (ms), from a read at `readAt` (ms). */
 export type Plan = {
@@ -155,7 +158,7 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
   }
 
   // Signatures of one transaction differ, so copies of it are found by its unsigned hash.
-  const sent = new Map<Hex, { hash: Hex; vote: Vote }>();
+  const sent = new Map<Hex, Sent>();
   const sending: Promise<void>[] = [];
   const send = (best: Plan | undefined, time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
@@ -172,10 +175,10 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
     if (dryRun) return log.info("dry run: signed, not sent", fields);
     const id = keccak256(serializeTransaction(tx));
     if (sent.has(id)) return log.info("already sent", at);
-    sent.set(id, { hash: keccak256(signed), vote: best.vote! });
+    sent.set(id, { hash: keccak256(signed), vote: best.vote!, nonce: tx.nonce });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
-      broadcastVote(chain, { ...prepared, signed }, flipMs).then(
+      broadcastTx(chain, { ...prepared, signed }, flipMs).then(
         (hash) => log.info("vote sent", { hash }),
         async (error: unknown) => {
           const notSent = { nonce: tx.nonce, error: errorMessage(error) };
@@ -204,10 +207,10 @@ export async function lastBlocks(run: Run, flip: bigint): Promise<number> {
  * Logs where each sent vote landed, checks the last one before the flip, and that the Voter shows a vote this epoch.
  * Returns the number of failures.
  */
-async function outcome({ chain, dryRun }: Run, flip: bigint, sent: { hash: Hex; vote: Vote }[]): Promise<number> {
+async function outcome({ chain, dryRun }: Run, flip: bigint, sent: Sent[]): Promise<number> {
   let failures = 0;
   let last: { hash: Hex; vote: Vote; block: bigint } | undefined;
-  for (const { hash, vote } of sent) {
+  for (const { hash, vote, nonce } of sent) {
     try {
       const receipt = await chain.client.getTransactionReceipt({ hash }).catch((error: unknown) => {
         if (error instanceof TransactionReceiptNotFoundError) return undefined;
@@ -217,6 +220,7 @@ async function outcome({ chain, dryRun }: Run, flip: bigint, sent: { hash: Hex; 
         log.info("vote not mined: replaced or dropped", { hash });
         continue;
       }
+      markMined(chain, nonce); // so that the claims after the flip do not take its nonce again
       const fields = { hash, block: receipt.blockNumber, status: receipt.status };
       const { timestamp } = await chain.client.getBlock({ blockNumber: receipt.blockNumber });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);

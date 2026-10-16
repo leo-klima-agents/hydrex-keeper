@@ -1,7 +1,11 @@
 import {
+  ContractFunctionExecutionError,
+  ContractFunctionRevertedError,
   createPublicClient,
   createTransport,
+  fallback,
   http,
+  isAddressEqual,
   keccak256,
   shouldThrow,
   type Address,
@@ -17,8 +21,11 @@ export const WEEK = 7n * 24n * 60n * 60n;
 export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and rejects 2,264
 export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
 const TIMEOUT_MS = 5_000;
+const BULK_TIMEOUT_MS = 30_000; // a 1,000-call eth_call of the claims takes up to 2 s
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
+
+export const lower = (address: Address) => address.toLowerCase() as Address;
 
 /** The host of an RPC URL, for logs: provider URLs carry their API key. */
 export const hostOf = (url: string) => (URL.canParse(url) ? new URL(url).host : "invalid URL");
@@ -101,21 +108,33 @@ export function broadcaster(rpcUrls: string[]) {
     return Promise.any(sends).then(
       () => hash,
       (error: AggregateError) => {
-        throw new Error(`no RPC accepted the vote: ${reasons(error.errors).join("; ")}`);
+        throw new Error(`no RPC accepted the transaction: ${reasons(error.errors).join("; ")}`);
       },
     );
   };
 }
 
-function makeClient(rpcUrls: string[]) {
-  const client = createPublicClient({ chain: base, transport: hedged(rpcUrls), pollingInterval: 1_000 });
+function makeClient(transport: Transport) {
+  const client = createPublicClient({ chain: base, transport, pollingInterval: 1_000 });
   return client.extend(publicActionsL2());
 }
 
 export type Client = ReturnType<typeof makeClient>;
 
+/**
+ * For reads too heavy to hedge, such as the claims' scan of every veNFT: each request goes to one URL, unbatched, and to
+ * the next only if it fails or takes over BULK_TIMEOUT_MS.
+ */
+const bulkTransport = (rpcUrls: string[]) =>
+  fallback(
+    rpcUrls.map((url) => http(url, { batch: false, timeout: BULK_TIMEOUT_MS, retryCount: 0 })),
+    { retryCount: 0 },
+  );
+
 export type Chain = {
   client: Client;
+  /** For heavy reads, unhedged. */
+  bulk: Client;
   broadcast: ReturnType<typeof broadcaster>;
   module: Address;
   conduit: Address;
@@ -125,7 +144,7 @@ export type Chain = {
 };
 
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
-  const client = makeClient(rpcUrls);
+  const client = makeClient(hedged(rpcUrls));
   const [conduit, keeper] = (await readMany<Address>(client, [
     { address: module, abi: moduleAbi, functionName: "CONDUIT" },
     { address: module, abi: moduleAbi, functionName: "KEEPER" },
@@ -134,7 +153,8 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
     { address: conduit, abi: conduitAbi, functionName: "voter" },
     { address: conduit, abi: conduitAbi, functionName: "veToken" },
   ])) as [Address, Address];
-  return { client, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
+  const bulk = makeClient(bulkTransport(rpcUrls));
+  return { client, bulk, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };
@@ -143,25 +163,64 @@ export function voterCall({ voter }: Chain, functionName: string, args: readonly
   return { address: voter, abi: voterAbi, functionName, args };
 }
 
-type ReadOptions = { blockNumber?: bigint; blockTag?: "pending" | undefined };
+type ReadOptions = {
+  blockNumber?: bigint;
+  blockTag?: "pending" | undefined;
+  /** Calls per eth_call, lower for calls heavy enough to reach a node's gas cap. */
+  chunk?: number;
+  /** eth_calls in flight, for reads too large to send at once. */
+  concurrency?: number;
+};
 
 /**
  * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
  * requests. Every call must succeed.
  */
-export async function readMany<T>(
+export async function readMany<T>(client: Client, calls: readonly Call[], options: ReadOptions = {}): Promise<T[]> {
+  return (await multicall(client, calls, false, options)) as T[];
+}
+
+/** Like readMany, but a call that reverts reads as undefined. Any other failure, such as a node's, throws. */
+export async function readEach<T>(
   client: Client,
   calls: readonly Call[],
-  { blockNumber, blockTag }: ReadOptions = {},
-): Promise<T[]> {
+  options: ReadOptions = {},
+): Promise<(T | undefined)[]> {
+  const settled = (await multicall(client, calls, true, options)) as { status: string; result?: T; error?: unknown }[];
+  return settled.map(({ status, result, error }, i) => {
+    if (status === "success") return result;
+    if (reverted(error, calls[i]!)) return undefined;
+    throw error;
+  });
+}
+
+/**
+ * Whether `error` is the revert of `call` itself. A node's failure to make the multicall fails each of its calls too,
+ * and may look like a revert, but of the multicall contract.
+ */
+const reverted = (error: unknown, { address }: Call) =>
+  error instanceof ContractFunctionExecutionError &&
+  error.contractAddress !== undefined &&
+  isAddressEqual(error.contractAddress, address) &&
+  error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
+
+async function multicall(
+  client: Client,
+  calls: readonly Call[],
+  allowFailure: boolean,
+  { blockNumber, blockTag, chunk = CHUNK, concurrency = Infinity }: ReadOptions,
+): Promise<unknown[]> {
   const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
-  const chunks = Array.from({ length: Math.ceil(calls.length / CHUNK) }, (_, i) =>
-    calls.slice(i * CHUNK, (i + 1) * CHUNK),
+  const chunks = Array.from({ length: Math.ceil(calls.length / chunk) }, (_, i) =>
+    calls.slice(i * chunk, (i + 1) * chunk),
   );
-  const results = await Promise.all(
-    chunks.map((contracts) =>
-      client.multicall({ contracts: contracts as never, allowFailure: false, batchSize: 0, ...at }),
-    ),
-  );
-  return results.flat() as T[];
+  const results: unknown[][] = [];
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < chunks.length; i = next++) {
+      results[i] = await client.multicall({ contracts: chunks[i] as never, allowFailure, batchSize: 0, ...at });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
+  return results.flat();
 }

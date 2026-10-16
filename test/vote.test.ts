@@ -13,7 +13,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { broadcastVote, castVote, nonceTaken, prepareVote, VoteSent } from "../src/vote.ts";
+import { broadcastTx, castVote, markMined, nonceTaken, prepareVote, VoteSent } from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -37,16 +37,20 @@ type Behaviour = {
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
   const simulatedAt: bigint[] = [];
+  const simulatedOn: (bigint | undefined)[] = [];
   const client = {
     simulateBlocks: async ({
       blocks,
+      blockNumber,
       blockTag,
     }: {
       blocks: { blockOverrides: { time: bigint } }[];
+      blockNumber?: bigint;
       blockTag?: string;
     }) => {
-      assert.equal(blockTag, undefined, "simulates on top of the latest block");
+      assert.equal(blockTag, undefined, "simulates on top of the latest block, or of the one read");
       simulatedAt.push(blocks[0]!.blockOverrides.time);
+      simulatedOn.push(blockNumber);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
       return [{ calls: [b.reverts ? failure : { status: "success", gasUsed: 100_000n }] }];
     },
@@ -60,7 +64,7 @@ function fakeChain(b: Behaviour = {}) {
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
     getBlock: async (args?: object) => {
       assert.equal(args, undefined, "the latest block");
-      return { timestamp: 1_790_812_797n };
+      return { number: 41n, timestamp: 1_790_812_797n };
     },
     getBalance: async () => b.balance ?? 10n ** 18n,
     estimateL1Fee: async () => 5_000n,
@@ -86,11 +90,12 @@ function fakeChain(b: Behaviour = {}) {
   } as unknown as Client;
   const broadcast = async (signed: Hex) => {
     sent.push(signed);
-    if (b.sendFails) throw new Error("no RPC accepted the vote: timeout");
+    if (b.sendFails) throw new Error("no RPC accepted the transaction: timeout");
     return `0x${"ab".repeat(32)}` as Hex;
   };
   const chain: Chain = {
     client,
+    bulk: client,
     broadcast,
     module: MODULE,
     conduit: CONDUIT,
@@ -98,7 +103,7 @@ function fakeChain(b: Behaviour = {}) {
     voter: VOTER,
     ve: addr(6),
   };
-  return { chain, sent, simulatedAt };
+  return { chain, sent, simulatedAt, simulatedOn };
 }
 
 const vote = { pools: [POOL], weights: [100n] };
@@ -153,10 +158,11 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
 });
 
 test("a vote is simulated just after the block it is for, and not sent if it would revert", async () => {
-  const { chain, simulatedAt } = fakeChain();
+  const { chain, simulatedAt, simulatedOn } = fakeChain();
   await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 0n });
   await castVote(chain, signer, vote, false, far);
   assert.deepEqual(simulatedAt, [1_790_812_800n, 1_790_812_798n]);
+  assert.deepEqual(simulatedOn, [undefined, 41n], "a vote before the last blocks, on the block whose time it takes");
   const reverting = fakeChain({ reverts: true });
   await assert.rejects(castVote(reverting.chain, signer, vote, false, far), /VoteDelayNotMet/);
   assert.equal(reverting.sent.length, 0);
@@ -186,12 +192,24 @@ test("a pending vote of unknown fees is replaced at twice the fees; one this pro
 test("once the Voter shows a later vote than the sent one was decided on, the nonce moves past it", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
   const first = await prepareVote(chain, signer, vote, false, { time: 1_790_812_797n, lastVoted: 100n });
-  await broadcastVote(chain, { ...first, signed: first.signed! }, far);
+  await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const next = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 1_790_812_797n });
   assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, 1_000n], "next nonce, no bump: the node lags");
   const still = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 100n });
   assert.deepEqual([still.tx.nonce, still.tx.maxFeePerGas], [3, 1_250n], "not yet in a block: replaced");
   assert.equal(sent.length, 1);
+});
+
+test("once the receipt of the transaction sent last was seen, the nonce moves past it, whatever the node says", async () => {
+  const { chain } = fakeChain({ nonce: 3 });
+  const first = await prepareVote(chain, signer, vote, false);
+  await broadcastTx(chain, { ...first, signed: first.signed! }, far);
+  markMined(chain, 2);
+  const replacing = await prepareVote(chain, signer, vote, false);
+  assert.deepEqual([replacing.tx.nonce, replacing.tx.maxFeePerGas], [3, 1_250n], "not that one: replaced");
+  markMined(chain, 3);
+  const next = await prepareVote(chain, signer, vote, false);
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, 1_000n], "next nonce, no bump: the node lags");
 });
 
 test("a send that fails still counts as this process's vote: it may have reached a node", async () => {
