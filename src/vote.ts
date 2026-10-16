@@ -37,7 +37,6 @@ type Target = { time: bigint; lastVoted: bigint };
 
 export type Prepared = { tx: Tx; signed?: Hex | undefined; lastVoted?: bigint | undefined };
 
-/** A call of the module by the keeper. */
 export type ModuleCall =
   | { functionName: "vote"; args: readonly [Address[], bigint[]] }
   | {
@@ -74,10 +73,9 @@ export async function prepareVote(
 }
 
 /**
- * The transaction that makes `call` from the keeper, simulated: a vote just after the block it is for, by default the
- * latest, and a claim in the block after `at`, by default the latest, after `before`, calls a dry run prepared but did
- * not send. Throws if it would revert. Returns its maximum `cost` and its `expectedCost` at its fees, in wei, L1 fee
- * included, the keeper's `balance`, and whether another transaction of the keeper is `queued` at its nonce.
+ * Builds and simulates the keeper's transaction for `call`, after the calls in `before`, which a dry run built but did
+ * not send. Throws if it would revert. Costs are in wei, L1 fee included. `queued` is whether another transaction of
+ * the keeper is pending at its nonce.
  */
 export async function prepareCall(
   chain: Chain,
@@ -87,9 +85,9 @@ export async function prepareCall(
   const { client, module, keeper } = chain;
   const data = encodeFunctionData({ abi: moduleAbi, functionName, args } as never);
   const toCall = (c: ModuleCall) => ({ account: keeper, to: module, abi: moduleAbi, ...c }) as const;
-  // A vote in the last blocks is simulated on the latest block, which may already be the one at its `time`. Another
-  // vote is simulated just after the latest block, on that block: a node ahead of the one that gave it would refuse a
-  // time before its own latest block's. A claim does not depend on the time.
+  // Votes are simulated just after the latest block, which may already be the one a last-block vote is for. Other
+  // votes name that block by number, since a node further ahead would refuse a time before its own latest block.
+  // Claims need no time.
   const head = functionName === "vote" && !target ? await client.getBlock() : undefined;
   const time = target?.time ?? head?.timestamp;
   const blockOverrides = time === undefined ? {} : { blockOverrides: { time: time + 1n } };
@@ -135,7 +133,6 @@ export async function prepareCall(
   } satisfies Tx;
   const cost = tx.gas * tx.maxFeePerGas + l1Fee;
   const { gasUsed, logs } = simulated;
-  // At what the transaction pays per gas, its tip included, which a replacement bumps.
   const expectedCost = gasUsed * min(tx.maxFeePerGas, baseFee + tx.maxPriorityFeePerGas) + l1Fee;
   return {
     tx,
@@ -149,7 +146,6 @@ export async function prepareCall(
   };
 }
 
-/** Signs `tx`, unless there is no key, or, in a dry run, no metadata server. */
 export async function signTx(account: LocalAccount | undefined, tx: Tx, dryRun: boolean): Promise<Prepared> {
   if (!account) {
     log.warning("signing skipped: no KMS key configured");
@@ -177,7 +173,6 @@ export async function broadcastTx(
   return chain.broadcast(signed, until);
 }
 
-/** Records that the receipt of the transaction this process sent last, at `nonce`, was seen. */
 export function markMined({ client }: Chain, nonce: number): void {
   const lastSent = lastSentBy.get(client);
   if (lastSent?.nonce === nonce) lastSentBy.set(client, { ...lastSent, mined: true });

@@ -21,7 +21,7 @@ export const WEEK = 7n * 24n * 60n * 60n;
 export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and rejects 2,264
 export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
 const TIMEOUT_MS = 5_000;
-const BULK_TIMEOUT_MS = 30_000; // a 1,000-call eth_call of the claims takes up to 2 s
+const BULK_TIMEOUT_MS = 30_000;
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
@@ -121,10 +121,6 @@ function makeClient(transport: Transport) {
 
 export type Client = ReturnType<typeof makeClient>;
 
-/**
- * For reads too heavy to hedge, such as the claims' scan of every veNFT: each request goes to one URL, unbatched, and to
- * the next only if it fails or takes over BULK_TIMEOUT_MS.
- */
 const bulkTransport = (rpcUrls: string[]) =>
   fallback(
     rpcUrls.map((url) => http(url, { batch: false, timeout: BULK_TIMEOUT_MS, retryCount: 0 })),
@@ -133,7 +129,7 @@ const bulkTransport = (rpcUrls: string[]) =>
 
 export type Chain = {
   client: Client;
-  /** For heavy reads, unhedged. */
+  /** For heavy reads, which take seconds: they go to one URL at a time instead of being hedged. */
   bulk: Client;
   broadcast: ReturnType<typeof broadcaster>;
   module: Address;
@@ -166,9 +162,7 @@ export function voterCall({ voter }: Chain, functionName: string, args: readonly
 type ReadOptions = {
   blockNumber?: bigint;
   blockTag?: "pending" | undefined;
-  /** Calls per eth_call, lower for calls heavy enough to reach a node's gas cap. */
   chunk?: number;
-  /** eth_calls in flight, for reads too large to send at once. */
   concurrency?: number;
 };
 
@@ -180,7 +174,7 @@ export async function readMany<T>(client: Client, calls: readonly Call[], option
   return (await multicall(client, calls, false, options)) as T[];
 }
 
-/** Like readMany, but a call that reverts reads as undefined. Any other failure, such as a node's, throws. */
+/** Like readMany, but a call that reverts gives undefined. Other errors still throw. */
 export async function readEach<T>(
   client: Client,
   calls: readonly Call[],
@@ -195,8 +189,8 @@ export async function readEach<T>(
 }
 
 /**
- * Whether `error` is the revert of `call` itself. A node's failure to make the multicall fails each of its calls too,
- * and may look like a revert, but of the multicall contract.
+ * Whether `call` itself reverted. When a node fails, every call in the multicall fails too, with what looks like a
+ * revert, but of the multicall contract.
  */
 const reverted = (error: unknown, { address }: Call) =>
   error instanceof ContractFunctionExecutionError &&

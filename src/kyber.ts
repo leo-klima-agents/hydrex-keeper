@@ -10,28 +10,21 @@ export type SwapRequest = {
   tokenIn: Address;
   tokenOut: Address;
   amountIn: bigint;
-  /** Pays `tokenIn` and receives `tokenOut`. */
   account: Address;
   slippageBps: number;
 };
 
-/** Calldata for `router` that sells exactly `amountIn` and pays at least `minOut`; `amountOut` is the quote. */
 export type Swap = { router: Address; data: Hex; amountIn: bigint; amountOut: bigint; minOut: bigint };
 
-/** Builds a swap; `until` (ms) bounds retries and timeouts. */
 export type Swapper = (request: SwapRequest, until: number) => Promise<Swap>;
 
-/** Refused by KyberSwap, for instance for want of a route: asking again would not help. */
+/** KyberSwap refused, for example for lack of a route. Asking again would not help. */
 export class SwapRefused extends Error {}
 
-/** KyberSwap answered with something else than the swap asked for: a change on its side, or worse. */
+/** KyberSwap's answer is not the swap asked for. */
 export class BadSwap extends Error {}
 
-/**
- * KyberSwap's aggregator: a route, then its calldata, for a swap paid from and to `account`. The calldata, for any of
- * the router's entry points, is decoded and must sell exactly the amount and token asked for, for the token asked for,
- * to `account`.
- */
+/** Gets a swap from KyberSwap, then decodes its calldata and checks that it is the swap asked for. */
 export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
   return async ({ tokenIn, tokenOut, amountIn, account, slippageBps }, until) => {
     const query = new URLSearchParams({ tokenIn, tokenOut, amountIn: String(amountIn) });
@@ -70,10 +63,6 @@ export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
   };
 }
 
-/**
- * The `data` of a KyberSwap answer to `init`, retried as getJson does. An error code in an answer that is not a server
- * error or a rate limit is final.
- */
 async function kyber(
   url: string,
   init: RequestInit,

@@ -16,7 +16,6 @@ const MAX_PLANS = 3; // in flight
 const RETRY_DELAY_MS = 5_000;
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 
-/** A vote sent, by the hash of its signed transaction. */
 type Sent = { hash: Hex; vote: Vote; nonce: number };
 
 /** What to send in the block with timestamp `time` (ms), from a read at `readAt` (ms). */
@@ -220,7 +219,7 @@ async function outcome({ chain, dryRun }: Run, flip: bigint, sent: Sent[]): Prom
         log.info("vote not mined: replaced or dropped", { hash });
         continue;
       }
-      markMined(chain, nonce); // so that the claims after the flip do not take its nonce again
+      markMined(chain, nonce); // so that the claims after the flip do not reuse its nonce
       const fields = { hash, block: receipt.blockNumber, status: receipt.status };
       const { timestamp } = await chain.client.getBlock({ blockNumber: receipt.blockNumber });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);

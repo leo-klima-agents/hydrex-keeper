@@ -12,7 +12,7 @@ MAX_RETRIES=3
 # Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the job has work to do.
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-MIN_KEEPER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, before claims, which leave 0.001 ETH, stop
+MIN_KEEPER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, to warn before claims stop at 0.001 ETH
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 

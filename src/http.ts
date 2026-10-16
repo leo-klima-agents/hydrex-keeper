@@ -7,9 +7,8 @@ export const isObject = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" && body !== null && !Array.isArray(body);
 
 /**
- * The JSON body of `url`, retried with backoff while there is time before `until` (ms); `valid` rejects a malformed
- * answer. If `final` returns an error for an answer, from its status and body, that error is thrown at once. Errors
- * name the service, not the URL, which may hold a key.
+ * Fetches JSON from `url`, retrying until `until` (ms). `valid` rejects a malformed answer, and an error that `final`
+ * returns is thrown without retrying. Errors name the service, not the URL, which may hold an API key.
  */
 export async function getJson(
   name: string,

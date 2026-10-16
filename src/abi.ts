@@ -67,12 +67,12 @@ export const bribeAbi = parseAbi([
   "function firstBribeTimestamp() view returns (uint256)",
 ]);
 
-// Carbonmark's retirement aggregator, through which the conduit retires kVCM.
+// Carbonmark's retirement aggregator.
 export const retirementAbi = parseAbi([
   "function quoteRetireCreditViaKlima(address creditToken, uint256 tokenId, uint256 amount, address inputToken, address carbonClass, uint256 couponTonnes) view returns (uint256 tonnes, uint256 price, uint256, uint256)",
 ]);
 
-// KyberSwap's MetaAggregationRouterV2, the conduit's approved router.
+// KyberSwap's MetaAggregationRouterV2.
 export const kyberAbi = parseAbi([
   "struct SwapDescriptionV2 { address srcToken; address dstToken; address[] srcReceivers; uint256[] srcAmounts; address[] feeReceivers; uint256[] feeAmounts; address dstReceiver; uint256 amount; uint256 minReturnAmount; uint256 flags; bytes permit; }",
   "struct SwapExecutionParams { address callTarget; address approveTarget; bytes targetData; SwapDescriptionV2 desc; bytes clientData; }",

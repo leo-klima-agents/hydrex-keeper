@@ -16,7 +16,6 @@ type Swap = { srcToken?: Address; dstToken?: Address; dstReceiver?: Address; amo
 
 type Entry = "swap" | "swapGeneric" | "swapSimpleMode";
 
-/** Calldata of the router's `entry`, as KyberSwap builds it, for `request` unless overridden. */
 function calldata(
   { srcToken = USDC, dstToken = KVCM, dstReceiver = CONDUIT, amount = 10_000_000n, minReturn }: Swap,
   entry: Entry = "swap",
@@ -54,7 +53,6 @@ const built = (swap: Swap = {}, entry?: Entry) => ({
   data: { routerAddress: ROUTER, data: calldata(swap, entry), amountOut: "374416742845163634687" },
 });
 
-/** Answers each request with the next response; records the requests. */
 function fakeFetch(responses: (() => Response)[]) {
   const requests: { url: string; init: RequestInit }[] = [];
   const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {

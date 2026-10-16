@@ -18,7 +18,6 @@ export function bribeCall(address: Address, functionName: string, args: readonly
 
 const decimalsCall = (address: Address): Call => ({ address, abi: erc20Abi, functionName: "decimals" });
 
-/** The decimals of `tokens`, by lowercase address. */
 export async function readDecimals(client: Client, tokens: Address[]): Promise<Map<string, number>> {
   const decimals = await readMany<number>(client, tokens.map(decimalsCall));
   return new Map(tokens.map((token, i) => [lower(token), decimals[i]!]));
@@ -54,13 +53,10 @@ export function assertFresh(epoch: Epoch): void {
   }
 }
 
-/** Reads calls that must all succeed, as readMany does with a client and options. */
 export type Reader = <T>(calls: Call[]) => Promise<T[]>;
 
-/** A bribe contract of a pool's gauge: its external bribe, or its fee contract (`fees`), the internal one. */
 export type Bribe = { pool: Address; bribe: Address; fees: boolean; alive: boolean };
 
-/** The bribe contracts of every pool of the Voter, external then internal, and whether the pool's gauge is alive. */
 export async function readBribes(chain: Chain, read: Reader): Promise<Bribe[]> {
   const [count] = await read<bigint>([voterCall(chain, "length")]);
   const pools = await read<Address>(
@@ -84,7 +80,6 @@ export async function readBribes(chain: Chain, read: Reader): Promise<Bribe[]> {
   );
 }
 
-/** Each of `bribes` once per token of `tokens` that it lists as a reward. */
 export async function readRewardTokens<B extends { bribe: Address }>(
   read: Reader,
   bribes: B[],
