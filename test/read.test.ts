@@ -11,6 +11,7 @@ const [GAUGE_A, GAUGE_B, GAUGE_C, GAUGE_D] = [addr(6), addr(7), addr(16), addr(1
 const [EXT_A, INT_A, EXT_B, INT_B] = [addr(8), addr(9), addr(10), addr(11)] as const;
 const [EXT_C, INT_C, EXT_D, INT_D] = [addr(18), addr(19), addr(20), addr(21)] as const;
 const [TOK_1, TOK_2, TOK_3] = [addr(12), addr(13), addr(14)] as const;
+const V2 = addr(22);
 
 type Call = { address: Address; functionName: string; args?: readonly unknown[] };
 
@@ -55,6 +56,7 @@ const internalBribes: Record<string, Address> = {
 };
 const weights: Record<string, bigint> = { [POOL_A]: 1000n, [POOL_B]: 500n };
 const ownVotes: Record<string, bigint> = { [POOL_A]: 100n, [POOL_B]: 0n };
+const v2Votes: Record<string, bigint> = { [POOL_A]: 40n, [POOL_B]: 0n };
 const rewardTokens: Record<string, Address[]> = {
   [EXT_A]: [TOK_1, TOK_2],
   [INT_A]: [],
@@ -64,21 +66,21 @@ const rewardTokens: Record<string, Address[]> = {
   [INT_D]: [],
 };
 const amounts: Record<string, bigint> = { [EXT_A + TOK_1]: 7n, [EXT_A + TOK_2]: 0n, [INT_B + TOK_1]: 3n };
-const voterState = { start: 1000n, lastVoted: 1000n };
+const voterState = { start: 1000n, lastVoted: 1000n, v2LastVoted: 1000n };
 let calendarAt: unknown;
 
 function table({ address, functionName, args = [] }: Call): unknown {
   const arg = args[0] as string;
   if (address === VE && functionName === "getPastVotes") {
     calendarAt = args[1];
-    return 10n;
+    return arg === V2 ? 7n : 10n;
   }
   if (address === VOTER) {
     switch (functionName) {
       case "_epochTimestamp":
         return voterState.start;
       case "lastVoted":
-        return voterState.lastVoted;
+        return arg === V2 ? voterState.v2LastVoted : voterState.lastVoted;
       case "length":
         return BigInt(pools.length);
       case "pools":
@@ -94,7 +96,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
       case "weights":
         return weights[arg];
       case "votes":
-        return ownVotes[args[1] as string];
+        return (arg === V2 ? v2Votes : ownVotes)[args[1] as string];
     }
   }
   if (functionName === "rewardsListLength") return BigInt(rewardTokens[address]!.length);
@@ -124,8 +126,8 @@ test("readVotes reads the epoch and the votes on each pool, in one multicall for
   assert.deepEqual(await readVotes(chain, rewards), {
     epoch,
     pools: [
-      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n },
-      { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n },
+      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, v2Votes: 0n },
+      { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n, v2Votes: 0n },
     ],
   });
   await readVotes(chain, Array<(typeof rewards)[number]>(498).fill(rewards[0]!));
@@ -143,6 +145,31 @@ test("readVotes reads the epoch and the votes on each pool, in one multicall for
     );
   } finally {
     voterState.lastVoted = 1000n;
+  }
+});
+
+test("with the immutable conduit, readVotes also reads its votes and power, in one multicall for up to 331 pools", async () => {
+  const chain = { ...fakeChain(table), v2: { conduit: V2, proposer: addr(23) } };
+  const rewards = await readRewards(chain, [TOK_1]);
+  multicalls = 0;
+  const v2 = { power: 7n, lastVoted: 1000n, votedThisEpoch: true };
+  assert.deepEqual(await readVotes(chain, rewards), {
+    epoch: { ...epoch, v2 },
+    pools: [
+      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, v2Votes: 40n },
+      { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n, v2Votes: 0n },
+    ],
+  });
+  await readVotes(chain, Array<(typeof rewards)[number]>(331).fill(rewards[0]!));
+  assert.equal(multicalls, 2);
+  assert.deepEqual(await readEpoch(chain), { ...epoch, v2 });
+  voterState.v2LastVoted = 999n;
+  try {
+    const { epoch: stale, pools } = await readVotes(chain, rewards);
+    assert.deepEqual(stale.v2, { power: 7n, lastVoted: 999n, votedThisEpoch: false });
+    assert.equal(pools[0]!.v2Votes, 0n, "last epoch's votes of the immutable conduit do not count");
+  } finally {
+    voterState.v2LastVoted = 1000n;
   }
 });
 

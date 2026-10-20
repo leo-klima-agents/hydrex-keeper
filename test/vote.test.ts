@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   concatHex,
   decodeErrorResult,
+  encodeFunctionData,
   encodeAbiParameters,
   parseTransaction,
   toFunctionSelector,
@@ -11,9 +12,9 @@ import {
   type Hex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { moduleAbi } from "../src/abi.ts";
+import { immutableAbi, moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { broadcastTx, castVote, markMined, nonceTaken, prepareVote, VoteSent } from "../src/vote.ts";
+import { broadcastTx, castVote, markMined, nonceTaken, prepareVote, v2Sender, VoteSent } from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -269,4 +270,57 @@ test("the module ABI names the Voter's and the conduit's errors that a simulated
   ]);
   const decoded = decodeErrorResult({ abi: moduleAbi, data });
   assert.deepEqual([decoded.errorName, decoded.args], ["AccessControlUnauthorizedAccount", [MODULE, role]]);
+});
+
+const proposer = privateKeyToAccount(generatePrivateKey());
+const V2 = addr(7);
+
+test("the immutable conduit's vote goes from the proposer straight to the conduit", async () => {
+  const { chain, sent } = fakeChain({ nonce: 5 });
+  chain.v2 = { conduit: V2, proposer: proposer.address };
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  const tx = parseTransaction(sent[0]!);
+  assert.equal(tx.to, V2);
+  assert.equal(tx.nonce, 5);
+  const moduleVote = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args: [vote.pools, vote.weights] });
+  assert.equal(tx.data, moduleVote, "the same vote(address[],uint256[]) as the module's");
+  assert.throws(() => v2Sender(fakeChain().chain), /no immutable conduit/);
+});
+
+test("the keeper's and the proposer's pending votes are tracked apart", async () => {
+  const { chain, sent } = fakeChain({ nonce: 3, receipt: "timeout" });
+  chain.v2 = { conduit: V2, proposer: proposer.address };
+  await castVote(chain, signer, vote, false, far);
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  assert.equal(
+    parseTransaction(sent[1]!).maxFeePerGas,
+    1_000n,
+    "the keeper's pending vote does not bump the proposer's",
+  );
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  assert.equal(parseTransaction(sent[2]!).maxFeePerGas, 1_250n, "its own does");
+  markMined(chain, 3, proposer.address);
+  const keeperNext = await prepareVote(chain, signer, vote, false);
+  assert.deepEqual(
+    [keeperNext.tx.nonce, keeperNext.tx.maxFeePerGas],
+    [3, 1_250n],
+    "the proposer's receipt is not the keeper's",
+  );
+});
+
+test("a proposer short of funds is told so", async () => {
+  const { chain } = fakeChain({ balance: 1n });
+  chain.v2 = { conduit: V2, proposer: proposer.address };
+  await assert.rejects(castVote(chain, proposer, vote, false, far, v2Sender(chain)), /fund the proposer: 0x/);
+});
+
+test("the immutable conduit's ABI names its own errors and the Voter's it passes through", () => {
+  for (const name of ["SequencerDown", "EpochStale", "NoVotingPower", "VoteDelayNotMet", "EpochFlipInProgress"]) {
+    assert.equal(decodeErrorResult({ abi: immutableAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
+  }
+  const data = concatHex([
+    toFunctionSelector("NotBetter(uint256,uint256)"),
+    encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [5n, 4n]),
+  ]);
+  assert.deepEqual(decodeErrorResult({ abi: immutableAbi, data }).args, [5n, 4n]);
 });

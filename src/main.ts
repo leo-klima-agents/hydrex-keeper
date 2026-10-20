@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { getAddress } from "viem";
-import { connect, hostOf, now } from "./chain.ts";
+import { connect, hostOf, now, type V2 } from "./chain.ts";
 import { claims } from "./claim.ts";
 import { kmsAccount } from "./kms.ts";
 import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
-import { pass, type Run } from "./pass.ts";
+import { pass, passV2, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
 import { DAY, due, HORIZON, lastFlip } from "./schedule.ts";
@@ -26,12 +26,14 @@ async function main(): Promise<number> {
   if (immediately && claimNow) throw new Error("--now and --claim exclude each other");
   const module = getAddress(required("MODULE"));
   const keyVersion = dryRun ? process.env.KMS_KEY_VERSION : required("KMS_KEY_VERSION");
+  const v2 = immutableConduit(dryRun);
   const tokens = parseWhitelist(readFileSync(new URL("../tokens.json", import.meta.url), "utf8"));
 
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
-  const chain = await connect(module, rpcUrls);
+  const chain = await connect(module, rpcUrls, v2);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
+  const proposer = v2?.keyVersion ? kmsAccount(v2.keyVersion, v2.proposer) : undefined;
   const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
   const source = combined([
     defillama(),
@@ -39,9 +41,19 @@ async function main(): Promise<number> {
     ...(coingeckoKey ? [coingecko(coingeckoKey)] : []),
   ]);
   const { keeper, conduit, voter } = chain;
-  log.info("keeper", { module, keeper, conduit, voter, rpcs: rpcUrls.map(hostOf), prices: source.name, dryRun });
+  const v2Fields = v2 ? { v2: v2.conduit, proposer: v2.proposer } : {};
+  log.info("keeper", {
+    module,
+    keeper,
+    conduit,
+    voter,
+    ...v2Fields,
+    rpcs: rpcUrls.map(hostOf),
+    prices: source.name,
+    dryRun,
+  });
 
-  const run: Run = { chain, tokens, prices: priceFeed(source), account, dryRun };
+  const run: Run = { chain, tokens, prices: priceFeed(source), account, proposer, dryRun };
   const epoch = await readEpoch(chain);
   const scheduled = due(epoch.flip, now());
   // A claim sent by hand could take the nonce of what the schedule sends at the same time. A dry run sends nothing.
@@ -78,20 +90,41 @@ async function main(): Promise<number> {
   if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
+  // Each conduit's vote is retried on its own, so that a failure of one does not send the other's again.
+  const failed = !(await attempts("pass", () => pass(run, until), until));
+  const v2Failed = chain.v2 !== undefined && !(await attempts("v2 pass", () => passV2(run, until), until));
+  return failed || v2Failed ? 1 : 0;
+}
+
+/** Runs `pass` up to ATTEMPTS times, while time is left before `until` (ms); returns whether it succeeded. */
+async function attempts(name: string, pass: () => Promise<void>, until: number): Promise<boolean> {
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
     try {
-      await pass(run, until);
-      log.info("pass done", { ms: Date.now() - started });
-      return 0;
+      await pass();
+      log.info(`${name} done`, { ms: Date.now() - started });
+      return true;
     } catch (error) {
       const ms = Date.now() - started;
       const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
-      log.error(`pass failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
-      if (!retry) return 1;
+      log.error(`${name} failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
+      if (!retry) return false;
       await sleep(RETRY_DELAY_MS);
     }
   }
+}
+
+/**
+ * The immutable conduit the job also votes for, the address that signs its votes, and its key: CONDUIT, PROPOSER and
+ * PROPOSER_KMS_KEY_VERSION, all or none. A dry run may leave out the key.
+ */
+function immutableConduit(dryRun: boolean): (V2 & { keyVersion: string | undefined }) | undefined {
+  const { CONDUIT: conduit, PROPOSER: proposer, PROPOSER_KMS_KEY_VERSION: keyVersion } = process.env;
+  if (!conduit && !proposer && !keyVersion) return undefined;
+  if (!conduit || !proposer || (!keyVersion && !dryRun)) {
+    throw new Error("CONDUIT, PROPOSER and PROPOSER_KMS_KEY_VERSION go together");
+  }
+  return { conduit: getAddress(conduit), proposer: getAddress(proposer), keyVersion };
 }
 
 function required(name: string): string {
