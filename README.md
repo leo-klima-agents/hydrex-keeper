@@ -90,7 +90,7 @@ less than 0.001 ETH, which is kept for the votes, or if another transaction of t
   version 1.
 - **`CONDUIT`:** [`0x692c323B425A9DfeebE302F56168a7798D93EAC5`][immutable], `ImmutableVeTokenConduit`, version 2.
 - **`PROPOSER`:** the Cloud KMS HSM key `hydrex-proposer-v1`, version 1, whose address is in hydrex-keeper-key's
-  `record/proposer/keeper.json`.
+  `record/proposer.json`.
 
 [module]: https://basescan.org/address/0x750973E0CB728C3112561Bc8E9b235afA9B17E81
 [keeper]: https://basescan.org/address/0x625CF6663d9D090535FBd57680bFFE6fA0262434
@@ -119,10 +119,10 @@ to re-run.
    `--dry-run`, `--claim` is refused while the schedule may be voting or claiming. The logs are in Cloud Run, one JSON
    object per line.
 
-To also vote for the immutable conduit, in hydrex-keeper-key: create a second key, `hydrex-proposer-v1`, in the same key
-ring, with `KEY=hydrex-proposer-v1` in a second config and `HYDREX_CONFIG` and `HYDREX_RECORD_DIR=record/proposer` set
-for its `sh/setup.sh`, `sh/address.sh` and `sh/grant.sh`, granting the same `KEEPER_SA`. Then set `CONDUIT`, `PROPOSER`
-and `PROPOSER_KMS_KEY_VERSION` in `config.env`, send ETH on Base to `PROPOSER` (0.01 ETH lasts months), and redeploy.
+To also vote for the immutable conduit: in hydrex-keeper-key, set `PROPOSER_KEY=hydrex-proposer-v1`, run its
+`sh/setup.sh`, then `sh/address.sh proposer` once the key is enabled, and commit `record/proposer.json`. Then set
+`CONDUIT`, and `PROPOSER` and `PROPOSER_KMS_KEY_VERSION` from that record, in `config.env`, send ETH on Base to
+`PROPOSER` (0.01 ETH lasts months), and redeploy.
 
 ## Checks
 
