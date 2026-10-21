@@ -9,7 +9,7 @@ import {
 import { Blocks, sleep, watch } from "./blocks.ts";
 import { lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
-import { errorMessage, log, warnOnce } from "./log.ts";
+import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
 import type { Prices } from "./prices.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
@@ -103,8 +103,9 @@ export async function race<P extends { readAt: number }>(
         .then(
           (p) => keep(lane, p),
           (error: unknown) => {
-            const message = errorMessage(error);
-            if (message !== failure) log.warning("plan failed", { lane: lane.name, error: (failure = message) });
+            const kind = errorKind(error);
+            if (kind !== failure) log.warning("plan failed", { lane: lane.name, error: errorMessage(error) });
+            failure = kind;
           },
         )
         .finally(() => inFlight--);

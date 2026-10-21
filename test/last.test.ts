@@ -59,7 +59,7 @@ function planner(behave: (n: number) => "ok" | "hang" | "fail" = () => "ok") {
     const behaviour = behave(id);
     if (behaviour === "hang") await new Promise(() => {});
     await sleep(150);
-    if (behaviour === "fail") throw new Error("RPC timeout");
+    if (behaviour === "fail") throw new Error(`NotBetter(${id}, ${id + 1})`);
     return { readAt, time: 0, vote: null, note: `plan ${id}`, summary: {} };
   };
 }
@@ -198,6 +198,14 @@ test("lanes plan apart: one that only fails holds back no plan of the other", as
     assert.ok(s.at - (s.other!.readAt - flip) < 300, "the other lane's plan is fresh");
   }
   assert.ok(sent.every(inTime));
+});
+
+test("a lane whose plans keep failing alike is warned about once, whatever numbers its errors carry", async (t) => {
+  const write = t.mock.method(process.stdout, "write", () => true);
+  await run(t, { behave: () => "fail" });
+  const warned = write.mock.calls.filter((call) => String(call.arguments[0]).includes('"plan failed"'));
+  write.mock.restore();
+  assert.equal(warned.length, 1);
 });
 
 const prepared = (signed?: Hex) => ({ tx: {} as Tx, from: zeroAddress, ...(signed ? { signed } : {}) });

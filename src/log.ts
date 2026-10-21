@@ -30,13 +30,16 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/** A handler for errors that logs `message` once for each distinct error, and gives undefined. */
+/** `errorMessage` without its numbers: an error that recurs with other scores, amounts or blocks is of the same kind. */
+export const errorKind = (error: unknown) => errorMessage(error).replace(/\d+/g, "#");
+
+/** A handler for errors that logs `message` once for each kind of error, and gives undefined. */
 export function warnOnce(message: string, fields: Fields = {}): (error: unknown) => undefined {
   const seen = new Set<string>();
   return (error) => {
-    const reason = errorMessage(error);
-    if (!seen.has(reason)) log.warning(message, { ...fields, error: reason });
-    seen.add(reason);
+    const kind = errorKind(error);
+    if (!seen.has(kind)) log.warning(message, { ...fields, error: errorMessage(error) });
+    seen.add(kind);
     return undefined;
   };
 }
