@@ -42,7 +42,11 @@ type Behaviour = {
   sendFails?: boolean;
   balance?: bigint;
   revertsAfterRival?: boolean;
+  /** The conduit's `lastVoted` as of the receipt's block. */
+  lastVoted?: bigint;
 };
+
+const MINED_AT = 1_790_812_801n; // the timestamp of block 42, the receipt's
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
@@ -76,7 +80,8 @@ function fakeChain(b: Behaviour = {}) {
     }),
     getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
-    getBlock: async (args?: object) => {
+    getBlock: async (args?: { blockNumber?: bigint }) => {
+      if (args?.blockNumber === 42n) return { number: 42n, timestamp: MINED_AT };
       assert.equal(args, undefined, "the latest block");
       return { number: 41n, timestamp: 1_790_812_797n };
     },
@@ -99,7 +104,9 @@ function fakeChain(b: Behaviour = {}) {
     multicall: async ({ contracts, blockNumber }: { contracts: { functionName: string }[]; blockNumber?: bigint }) => {
       assert.equal(blockNumber, 42n, "verification reads the receipt's block");
       if (b.verifyFails) throw new Error("header not found");
-      return contracts.map((c) => (c.functionName === "poolVote" ? (b.recorded ?? POOL) : 1n));
+      const answer = (functionName: string) =>
+        functionName === "poolVote" ? (b.recorded ?? POOL) : functionName === "lastVoted" ? (b.lastVoted ?? 1n) : 1n;
+      return contracts.map((c) => answer(c.functionName));
     },
   } as unknown as Client;
   const broadcast = async (signed: Hex) => {
@@ -379,6 +386,25 @@ test("the immutable conduit's votes are prepared through a client of their own, 
     [1, 2],
     "the Klima conduit's, through the chain's",
   );
+});
+
+test("an immutable conduit's vote that another vote beat to its block is decided again, not reported as sent", async () => {
+  const beatenTo = (lastVoted?: bigint) => {
+    const { chain } = fakeChain({ receipt: "reverted", ...(lastVoted ? { lastVoted } : {}) });
+    chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+    return chain;
+  };
+  const beaten = beatenTo(MINED_AT);
+  await assert.rejects(
+    castVote(beaten, proposer, vote, false, far, v2Sender(beaten)),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its block/.test(e.message),
+  );
+  const next = await prepareVote(beaten, proposer, vote, false, undefined, v2Sender(beaten));
+  assert.equal(next.tx.nonce, 8, "past the one the reverted vote took");
+  const lost = beatenTo();
+  await assert.rejects(castVote(lost, proposer, vote, false, far, v2Sender(lost)), VoteSent, "reverted for itself");
+  const klima = fakeChain({ receipt: "reverted", lastVoted: MINED_AT }).chain;
+  await assert.rejects(castVote(klima, signer, vote, false, far), VoteSent, "only the keeper votes for the Klima one");
 });
 
 test("with a rival vote, the vote is also simulated after it, and refused if it would revert there", async () => {

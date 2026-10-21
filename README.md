@@ -50,7 +50,8 @@ votes, which go straight to the conduit.
   other. Voting for both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit voting on the same
   pools would.
 - **Votes of others.** A vote of someone else for the conduit, in the block being built, takes that block: the job then
-  does not send one, and the Klima conduit's vote answers it.
+  does not send one, and the Klima conduit's vote answers it. A day before the flip, when one takes the block of the
+  job's vote, the job decides again against it.
 - **Each on its own.** Neither conduit's failure stops the other's votes. The immutable conduit keeps voting if the
   Klima conduit has no voting power or refuses the keeper's votes, for example after losing its executor role, and the
   Klima conduit keeps voting and claiming if `CONDUIT` is unusable. Either fails the execution. Each conduit's claims go

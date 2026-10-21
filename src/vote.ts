@@ -299,8 +299,30 @@ export async function castVote(
   if (receipt.transactionHash !== hash) {
     throw new Error(`vote ${hash} was replaced by ${receipt.transactionHash}; sending again`);
   }
-  if (receipt.status !== "success") throw new VoteSent(`vote ${hash} reverted`);
+  markMined(chain, prepared.tx.nonce, sender.from);
+  if (receipt.status !== "success") {
+    // Anyone may vote for an open conduit, and the Voter takes one vote of it per block: when another vote took the
+    // block, the pass decides again, against that vote.
+    const taken = sender.open && (await tookBlock(chain, conduit, receipt.blockNumber).catch(() => false));
+    if (taken) throw new Error(`vote ${hash} reverted: another vote for ${conduit} was first in its block; again`);
+    throw new VoteSent(`vote ${hash} reverted`);
+  }
   await verifyVote(chain, vote, hash, receipt.blockNumber, sender.conduit);
+}
+
+/** When the Voter last recorded a vote of `conduit`, as of block `blockNumber`. */
+export async function lastVotedAt(chain: Chain, conduit: Address, blockNumber: bigint): Promise<bigint> {
+  const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [conduit])], { blockNumber });
+  return lastVoted!;
+}
+
+/** Whether a vote of `conduit` is recorded in block `blockNumber`. */
+async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): Promise<boolean> {
+  const [{ timestamp }, lastVoted] = await Promise.all([
+    chain.client.getBlock({ blockNumber }),
+    lastVotedAt(chain, conduit, blockNumber),
+  ]);
+  return lastVoted === timestamp;
 }
 
 /** Checks that the Voter recorded `vote` for `conduit` as of block `blockNumber`. */

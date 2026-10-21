@@ -17,6 +17,7 @@ import { select, summarize, type Vote } from "./select.ts";
 import {
   broadcastTx,
   klimaSender,
+  lastVotedAt,
   markMined,
   nonceTaken,
   prepareVote,
@@ -512,12 +513,6 @@ export async function lastBlockBefore(client: Client, time: bigint): Promise<big
     else return number;
   }
   throw new Error(`no block found just before ${time}`);
-}
-
-/** When the Voter last recorded a vote of `conduit`, as of block `blockNumber`. */
-async function lastVotedAt(chain: Chain, conduit: Address, blockNumber: bigint): Promise<bigint> {
-  const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [conduit])], { blockNumber });
-  return lastVoted!;
 }
 
 /**
