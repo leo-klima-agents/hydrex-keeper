@@ -349,7 +349,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       if (decision.vote) {
         const [values, current] = await Promise.all([
           valuesNow(time),
-          readScore(chain, chain.client, "pending").catch(scoreUnread),
+          readScore(chain, chain.v2Client ?? chain.client, "pending").catch(scoreUnread),
         ]);
         if (values && current !== undefined) {
           const onchain = { values: values.value, current };

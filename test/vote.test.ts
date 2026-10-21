@@ -358,6 +358,29 @@ test("anyone may vote for the immutable conduit, so a later vote of it does not 
   assert.equal(after.tx.nonce, 4, "its receipt still counts");
 });
 
+test("the immutable conduit's votes are prepared through a client of their own, which knows what was sent", async () => {
+  const { chain, simulatedCalls } = fakeChain({ nonce: 3 });
+  const own = fakeChain({ nonce: 3 });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  chain.v2Client = own.chain.client;
+  const target = { time: 1_790_812_797n, lastVoted: 100n };
+  const first = await prepareVote(chain, proposer, vote, false, target, v2Sender(chain));
+  assert.deepEqual([simulatedCalls.length, own.simulatedCalls.length], [0, 1], "simulated through its own client");
+  await broadcastTx(chain, { ...first, signed: first.signed! }, far);
+  const next = await prepareVote(chain, proposer, vote, false, { ...target, time: 1_790_812_799n }, v2Sender(chain));
+  assert.deepEqual(
+    [next.tx.nonce, next.tx.maxFeePerGas],
+    [3, 1_250n],
+    "the vote it sent is replaced, not queued behind",
+  );
+  await prepareVote(chain, signer, vote, false, target);
+  assert.deepEqual(
+    [simulatedCalls.length, own.simulatedCalls.length],
+    [1, 2],
+    "the Klima conduit's, through the chain's",
+  );
+});
+
 test("with a rival vote, the vote is also simulated after it, and refused if it would revert there", async () => {
   const target = { time: 1_790_812_797n, lastVoted: 0n };
   const ok = fakeChain();

@@ -131,6 +131,11 @@ export type Chain = {
   client: Client;
   /** For heavy reads, which take seconds: they go to one URL at a time instead of being hedged. */
   bulk: Client;
+  /**
+   * Like `client`, with batches and hedging of its own, for the immutable conduit's votes: the calls one client sends
+   * at once share a JSON-RPC batch, which answers when its slowest call does.
+   */
+  v2Client?: Client | undefined;
   broadcast: ReturnType<typeof broadcaster>;
   module: Address;
   conduit: Address;
@@ -155,7 +160,8 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
     { address: conduit, abi: conduitAbi, functionName: "veToken" },
   ])) as [Address, Address];
   const bulk = makeClient(bulkTransport(rpcUrls));
-  return { client, bulk, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
+  const v2Client = makeClient(hedged(rpcUrls));
+  return { client, bulk, v2Client, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

@@ -41,9 +41,18 @@ export type Prepared = { tx: Tx; from: Address; signed?: Hex | undefined; lastVo
 
 /**
  * Who signs a conduit's transactions and where they go; `conduit` is the voter the Voter records. Anyone may vote for
- * an `open` conduit, so a vote of it on chain need not be the sender's.
+ * an `open` conduit, so a vote of it on chain need not be the sender's. Its transactions are prepared through `client`,
+ * if any, else the chain's.
  */
-export type Sender = { name: string; from: Address; to: Address; abi: Abi; conduit: Address; open: boolean };
+export type Sender = {
+  name: string;
+  from: Address;
+  to: Address;
+  abi: Abi;
+  conduit: Address;
+  open: boolean;
+  client?: Client | undefined;
+};
 
 /** The Klima conduit's: the keeper calls the module, which calls the conduit. Only the keeper votes for it. */
 export const klimaSender = ({ keeper, module, conduit }: Chain): Sender => ({
@@ -55,10 +64,11 @@ export const klimaSender = ({ keeper, module, conduit }: Chain): Sender => ({
   open: false,
 });
 
-/** The immutable conduit's: the proposer calls it directly, as anyone may. */
-export function v2Sender({ v2 }: Chain): Sender {
+/** The immutable conduit's: the proposer calls it directly, as anyone may, through a client of its own. */
+export function v2Sender({ v2, v2Client }: Chain): Sender {
   if (!v2) throw new Error("no immutable conduit configured");
-  return { name: "proposer", from: v2.proposer, to: v2.conduit, abi: immutableAbi, conduit: v2.conduit, open: true };
+  const { proposer, conduit } = v2;
+  return { name: "proposer", from: proposer, to: conduit, abi: immutableAbi, conduit, open: true, client: v2Client };
 }
 
 /** Another sender's vote that may land before ours in the same block. */
@@ -122,16 +132,16 @@ type CallOptions = {
 
 /**
  * Builds and simulates the sender's transaction for `call`, after the calls in `before`, which a dry run built but did
- * not send. Throws if it would revert. Costs are in wei, L1 fee included. `queued` is whether another transaction of
- * the sender is pending at its nonce.
+ * not send, through the sender's client. Throws if it would revert. Costs are in wei, L1 fee included. `queued` is
+ * whether another transaction of the sender is pending at its nonce. What was sent is known by the chain's client.
  */
 export async function prepareCall(
   chain: Chain,
   { functionName, args }: ModuleCall,
   { target, before = [], at, sender = klimaSender(chain), rival }: CallOptions = {},
 ) {
-  const { client } = chain;
   const { from, to, abi } = sender;
+  const client = sender.client ?? chain.client;
   const data = encodeFunctionData({ abi, functionName, args } as never);
   const callOf = (s: Sender) => (c: ModuleCall) => ({ account: s.from, to: s.to, abi: s.abi, ...c }) as const;
   // Votes are simulated just after the latest block, which may already be the one a last-block vote is for, but
@@ -173,7 +183,7 @@ export async function prepareCall(
   // process sent, or at twice the fees over one of unknown fees. Once its receipt was seen, or the Voter shows its votes
   // in force (see `landed` in last.ts), or, for a conduit only the sender votes for, once the Voter shows a later vote
   // than the one the sent vote was decided on, that transaction is in a block, whatever the node says.
-  const lastSent = sentBy(client).get(lower(from));
+  const lastSent = sentBy(chain.client).get(lower(from));
   const later = !sender.open && target && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted;
   const mined = lastSent?.mined === true || later;
   const nonce = Math.max(latest, mined ? lastSent.nonce + 1 : 0);
