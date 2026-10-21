@@ -170,9 +170,9 @@ export async function prepareCall(
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
   const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
   // The confirmed nonce, so that a pending vote is replaced, not queued behind: at a quarter more than the one this
-  // process sent, or at twice the fees over one of unknown fees. Once its receipt was seen or, for a conduit only the
-  // sender votes for, once the Voter shows a later vote than the one the sent vote was decided on, that transaction is
-  // in a block, whatever the node says.
+  // process sent, or at twice the fees over one of unknown fees. Once its receipt was seen, or the Voter shows its votes
+  // in force (see `landed` in last.ts), or, for a conduit only the sender votes for, once the Voter shows a later vote
+  // than the one the sent vote was decided on, that transaction is in a block, whatever the node says.
   const lastSent = sentBy(client).get(lower(from));
   const later = !sender.open && target && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted;
   const mined = lastSent?.mined === true || later;

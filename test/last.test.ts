@@ -5,6 +5,7 @@ import { Blocks, sleep, watch } from "../src/blocks.ts";
 import type { Chain as Connection, Client } from "../src/chain.ts";
 import {
   keep,
+  landed,
   lastBlockBefore,
   outcome,
   pick,
@@ -303,6 +304,45 @@ test("the Klima conduit answers only an immutable conduit's vote ready to send i
   assert.equal(v2Answered(v2Plan(9, {}), 9, false), undefined, "keeping its vote, or not prepared");
   assert.equal(v2Answered(v2Plan(9, { prepared: prepared() }), 9, false), undefined, "not signed: not sent");
   assert.ok(v2Answered(v2Plan(9, { prepared: prepared() }), 9, true), "a dry run plans as if it were");
+});
+
+test("an immutable conduit's vote is known to be in once the Voter shows its votes on every pool", () => {
+  const [a, b] = [addr(7), addr(8)];
+  const vote = { pools: [a], weights: [1n] };
+  const sent = (nonce: number, votes: [Address, bigint][]) => ({
+    hash: "0x01" as Hex,
+    vote,
+    nonce,
+    sender: v2Sender({ v2: { conduit: addr(2), proposer: addr(9), priced: [] } } as unknown as Connection),
+    votes: new Map(votes),
+  });
+  const state = (v2Votes: [bigint, bigint], votedThisEpoch = true) => ({
+    epoch: {
+      start: 0n,
+      flip: 0n,
+      power: 1n,
+      lastVoted: 0n,
+      votedThisEpoch,
+      v2: { power: 1n, lastVoted: 0n, votedThisEpoch },
+    },
+    pools: [a, b].map((pool, i) => ({ pool, rewards: [], otherVotes: 0n, ownVotes: 0n, v2Votes: v2Votes[i]! })),
+  });
+  const votes = [
+    sent(7, [[a, 10n]]),
+    sent(8, [
+      [a, 6n],
+      [b, 4n],
+    ]),
+  ];
+  assert.deepEqual(landed(state([6n, 4n]), votes), [8]);
+  assert.deepEqual(landed(state([10n, 0n]), votes), [7], "a pool it leaves out has no votes");
+  assert.deepEqual(landed(state([5n, 5n]), votes), [], "someone else's vote");
+  assert.deepEqual(landed(state([6n, 4n], false), votes), [], "votes of an earlier epoch");
+  const klima = {
+    ...sent(9, []),
+    sender: klimaSender({ keeper: addr(5), module: addr(6), conduit: addr(1) } as Connection),
+  };
+  assert.deepEqual(landed(state([0n, 0n]), [{ ...klima, votes: undefined }]), [], "not the immutable conduit's");
 });
 
 // Base's blocks are two seconds apart, on odd seconds: block n at 1 + 2n, so the last before an even flip is at flip - 1.

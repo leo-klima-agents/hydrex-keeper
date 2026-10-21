@@ -41,7 +41,8 @@ const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
 const BLOCK_SECONDS = 2n; // on Base
 
-type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender };
+/** A vote sent, and for the immutable conduit, its votes on each pool once it lands, by lowercase pool. */
+export type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender; votes?: Map<Address, bigint> | undefined };
 
 /** What to send for one conduit in the block with timestamp `time` (ms), from a read at `readAt` (ms). */
 export type Plan = {
@@ -158,6 +159,18 @@ function decide({ epoch, pools }: State, usd: number[], v2Votes?: Map<Address, b
 export function v2Answered(v2: Plan | undefined, time: number, dryRun: boolean): Map<Address, bigint> | undefined {
   const ready = v2?.prepared && v2.time === time && (v2.prepared.signed !== undefined || dryRun);
   return ready ? v2.votes : undefined;
+}
+
+/**
+ * The nonces of the immutable conduit's sent votes that `state` shows in force. Anyone may vote for that conduit, so
+ * its `lastVoted` does not tell whose vote landed, as the Klima conduit's does; but a vote in force with the same votes
+ * on every pool as a sent one is that one, and its nonce is taken whatever a node behind says.
+ */
+export function landed(state: State, sent: Iterable<Sent>): number[] {
+  if (!state.epoch.v2?.votedThisEpoch) return [];
+  return [...sent].flatMap(({ votes, nonce }) =>
+    votes && state.pools.every((p) => p.v2Votes === (votes.get(lower(p.pool)) ?? 0n)) ? [nonce] : [],
+  );
 }
 
 /** The Klima conduit's vote prepared to send, which the immutable conduit's must clear after. */
@@ -295,6 +308,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return { ...base, prepared, rival: rival?.vote };
   };
 
+  // Signatures of one transaction differ, so copies of it are found by its unsigned hash.
+  const sent = new Map<Hex, Sent>();
+
   // The votes in the block being built, read once for the lanes that plan at about the same time. A plan is as fresh
   // as the read it uses, and for the block being built when that read started.
   let votes: { readAt: number; time: number; state: Promise<State> } | undefined;
@@ -327,6 +343,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       const { readAt, time, state: reading } = votesNow();
       const state = await reading;
       assertFresh(state.epoch);
+      for (const nonce of landed(state, sent.values())) markMined(chain, nonce, v2Sender(chain).from);
       const key = keyOf(state);
       let decision = decidedV2(key, () => decideV2(state, usd, undefined));
       if (decision.vote) {
@@ -406,8 +423,6 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     }),
   );
 
-  // Signatures of one transaction differ, so copies of it are found by its unsigned hash.
-  const sent = new Map<Hex, Sent>();
   const sending: Promise<void>[] = [];
   const sendOne = (plan: Plan | undefined, sender: Sender, at: Record<string, unknown>) => {
     const { conduit } = sender;
@@ -423,7 +438,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     if (dryRun) return log.info("dry run: signed, not sent", fields);
     const id = keccak256(serializeTransaction(tx));
     if (sent.has(id)) return log.info("already sent", { conduit, ...at });
-    sent.set(id, { hash: keccak256(signed), vote: plan.vote!, nonce: tx.nonce, sender });
+    sent.set(id, { hash: keccak256(signed), vote: plan.vote!, nonce: tx.nonce, sender, votes: plan.votes });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
       broadcastTx(chain, { ...prepared, signed }, flipMs).then(
