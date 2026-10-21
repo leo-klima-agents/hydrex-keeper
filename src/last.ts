@@ -33,6 +33,8 @@ const TICK_MS = 50;
 const PLAN_EVERY_MS = 100;
 const MAX_PLANS = 3; // in flight, per lane
 const RETRY_DELAY_MS = 5_000;
+const SHARED_READ_MS = 50; // the lanes share a read of the votes started this recently
+const REREAD_MS = 500; // after a read of the immutable conduit's values fails
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 const BLOCK_SECONDS = 2n; // on Base
 
@@ -206,25 +208,37 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return { ...base, prepared, rival: rival?.vote };
   };
 
-  // The immutable conduit's values of pools barely move within a block, and cost far more gas than votes, so they are
-  // read once per block; a read that fails is tried again by the next plan. Its score of the vote in force moves with
-  // every vote, so it is read with each plan.
-  let values: { time: number; read: Promise<Map<Address, number>> } | undefined;
-  let unreadSince = "";
-  const unread = (error: unknown) => {
-    const message = errorMessage(error);
-    if (message !== unreadSince) log.warning("v2's own values unread", { error: (unreadSince = message) });
-    return undefined;
-  };
-  const valuesAt = (time: number) => {
-    if (values?.time !== time) {
-      const read = readValues(chain, chain.client, valued, "pending");
-      values = { time, read };
-      read.catch(() => {
-        if (values?.read === read) values = undefined;
-      });
+  // The votes in the block being built, read once for the lanes that plan at about the same time.
+  let votes: { at: number; read: Promise<State> } | undefined;
+  const votesNow = () => {
+    if (!votes || Date.now() - votes.at >= SHARED_READ_MS) {
+      votes = { at: Date.now(), read: readVotes(chain, rewards, "pending") };
     }
-    return values.read.catch(unread);
+    return votes.read;
+  };
+
+  // The immutable conduit's own values and score are read only for a vote it would send. Its values of pools barely
+  // move within a block, and cost far more gas than votes, so they are read once per block, and again shortly after a
+  // read that fails. Its score of the vote in force moves with every vote, so it is read with each such plan.
+  const warnOnce = (what: string) => {
+    const seen = new Set<string>();
+    return (error: unknown) => {
+      const message = errorMessage(error);
+      if (!seen.has(message)) log.warning(`v2's ${what} unread`, { error: message });
+      seen.add(message);
+      return undefined;
+    };
+  };
+  const [valuesUnread, scoreUnread] = [warnOnce("values"), warnOnce("score")];
+  let values: { time: number; read: Promise<Map<Address, number>>; failedAt?: number } | undefined;
+  const valuesAt = (time: number) => {
+    const failed = values?.failedAt !== undefined && Date.now() - values.failedAt >= REREAD_MS;
+    if (values?.time !== time || failed) {
+      const entry: NonNullable<typeof values> = { time, read: readValues(chain, chain.client, valued, "pending") };
+      entry.read.catch(() => (entry.failedAt = Date.now()));
+      values = entry;
+    }
+    return values.read.catch(valuesUnread);
   };
 
   const v2Lane: Lane<Plan> = {
@@ -232,14 +246,18 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     plan: async (best) => {
       const readAt = Date.now();
       const time = blocks.building(readAt) ?? readAt;
-      const [state, poolValues, current] = await Promise.all([
-        readVotes(chain, rewards, "pending"),
-        valuesAt(time),
-        readScore(chain, chain.client, "pending").catch(unread),
-      ]);
+      const state = await votesNow();
       assertFresh(state.epoch);
-      const onchain = poolValues && current !== undefined ? { values: poolValues, current } : undefined;
-      const { vote, note, summary, votes } = decideV2(state, valueOnce(state), onchain);
+      const usd = valueOnce(state);
+      let decision = decideV2(state, usd, undefined);
+      if (decision.vote) {
+        const [poolValues, current] = await Promise.all([
+          valuesAt(time),
+          readScore(chain, chain.client, "pending").catch(scoreUnread),
+        ]);
+        if (poolValues && current !== undefined) decision = decideV2(state, usd, { values: poolValues, current });
+      }
+      const { vote, note, summary, votes } = decision;
       const byPool = new Map(state.pools.map((p, i) => [lower(p.pool), votes[i]!]));
       const base = { readAt, time, vote, note, summary, votes: byPool };
       const klimaVote = rivalOf(klimaLane.best, time);
@@ -253,7 +271,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     plan: async (best) => {
       const readAt = Date.now();
       const time = blocks.building(readAt) ?? readAt;
-      const state = await readVotes(chain, rewards, "pending");
+      const state = await votesNow();
       assertFresh(state.epoch);
       const answered = conduits.v2 ? v2Answered(v2Lane.best, time, dryRun) : undefined;
       const { vote, reason, summary } = decide(state, valueOnce(state), answered);
