@@ -92,6 +92,8 @@ type World = {
   /** earned() reads zero for this token after the first read. */
   hide?: Address;
   ownersFail?: boolean;
+  /** How many reads of the delegates fail first, as on a node that times out. */
+  delegatesFail?: number;
   balance?: bigint;
   proposerBalance?: bigint;
   gas?: (swaps: number, pairs: number) => bigint;
@@ -191,6 +193,7 @@ function fakeChain(w: World = world()) {
   const called = new Map<string, number>();
   let polls = 0;
   let reads = 0;
+  let delegatesFail = w.delegatesFail ?? 0;
   const inFlight = new Map<Hex, Sent>();
   let head = 40n;
   /** What is owed from each block on: each claim mined adds one. */
@@ -366,6 +369,7 @@ function fakeChain(w: World = world()) {
       allowFailure: boolean;
       blockNumber?: bigint;
     }) => {
+      if (contracts.some((c) => c.functionName === "delegates") && delegatesFail-- > 0) throw new Error("timeout");
       if (contracts.some((c) => c.functionName === "earned")) reads++;
       for (const { functionName } of contracts) called.set(functionName, (called.get(functionName) ?? 0) + 1);
       const owed = owedAt(blockNumber);
@@ -433,6 +437,7 @@ function fakeChain(w: World = world()) {
   const chain: Chain = {
     client,
     bulk: client,
+    v2Client: client,
     broadcast,
     module: MODULE,
     conduit: CONDUIT,
@@ -557,6 +562,16 @@ test("the immutable conduit's delegators are claimed for too, by the proposer, K
   assert.deepEqual([...earnedFor].sort(), ["2", "4", "7", "8"]);
   assert.equal(called.get("delegates"), 8, "one scan of the veNFTs for both conduits");
   assert.equal(called.get("gauges"), 2, "one read of the bribe contracts for both");
+  assert.equal(called.get("firstBribeTimestamp"), 4, "one of each contract's first bribe, for both");
+  assert.equal(called.get("decimals"), 4 + ODD.length, "one of the decimals, for both");
+});
+
+test("a read both conduits share that fails is read again, once for both", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Number(START) * 1000 + 10_000 });
+  const { chain, sent, called } = fakeChain(world({ v2: true, delegatesFail: 1 }));
+  assert.equal(await drive(t, claims(runOf(chain), START, until(), fakeSwapper().swapper)), 0);
+  assert.deepEqual([through(sent).length, through(sent, true).length], [1, 1], "both conduits claim");
+  assert.equal(called.get("delegates"), 8, "one scan once read again");
 });
 
 test("each conduit's claims go on when the other's stop", async () => {

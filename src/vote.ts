@@ -1,6 +1,8 @@
 import {
   encodeFunctionData,
+  isAddressEqual,
   parseGwei,
+  toFunctionSelector,
   WaitForTransactionReceiptTimeoutError,
   type Abi,
   type Address,
@@ -9,7 +11,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { immutableAbi, moduleAbi } from "./abi.ts";
-import { lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
+import { lastBlockBefore, lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
@@ -19,6 +21,7 @@ const CONGESTED = 0.9; // in a block this full, the builder picks by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
 const MAX_GAS = 16_777_216n; // per transaction on Base, since its Azul upgrade
+const VOTE = toFunctionSelector("vote(address[],uint256[])"); // the module's and the immutable conduit's
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
@@ -41,8 +44,7 @@ export type Prepared = { tx: Tx; from: Address; signed?: Hex | undefined; lastVo
 
 /**
  * Who signs a conduit's transactions and where they go; `conduit` is the voter the Voter records. Anyone may vote for
- * an `open` conduit, so a vote of it on chain need not be the sender's. Its transactions are prepared through `client`,
- * if any, else the chain's.
+ * an `open` conduit, so a vote of it on chain need not be the sender's. Its transactions are prepared through `client`.
  */
 export type Sender = {
   name: string;
@@ -51,17 +53,18 @@ export type Sender = {
   abi: Abi;
   conduit: Address;
   open: boolean;
-  client?: Client | undefined;
+  client: Client;
 };
 
 /** The Klima conduit's: the keeper calls the module, which calls the conduit. Only the keeper votes for it. */
-export const klimaSender = ({ keeper, module, conduit }: Chain): Sender => ({
+export const klimaSender = ({ client, keeper, module, conduit }: Chain): Sender => ({
   name: "keeper",
   from: keeper,
   to: module,
   abi: moduleAbi,
   conduit,
   open: false,
+  client,
 });
 
 /** The immutable conduit's: the proposer calls it directly, as anyone may, through a client of its own. */
@@ -140,8 +143,7 @@ export async function prepareCall(
   { functionName, args }: ModuleCall,
   { target, before = [], at, sender = klimaSender(chain), rival }: CallOptions = {},
 ) {
-  const { from, to, abi } = sender;
-  const client = sender.client ?? chain.client;
+  const { from, to, abi, client } = sender;
   const data = encodeFunctionData({ abi, functionName, args } as never);
   const callOf = (s: Sender) => (c: ModuleCall) => ({ account: s.from, to: s.to, abi: s.abi, ...c }) as const;
   // Votes are simulated just after the latest block, which may already be the one a last-block vote is for, but
@@ -327,6 +329,22 @@ async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): P
     lastVotedAt(chain, conduit, blockNumber),
   ]);
   return lastVoted === timestamp;
+}
+
+/**
+ * Whether the vote of the sender's conduit that the Voter recorded at `lastVoted` (s) is the sender's: the Voter takes
+ * one vote of a conduit per block, so it is if a vote the sender sent succeeded in the block at that time.
+ */
+export async function votedAt({ client }: Chain, { from, to }: Sender, lastVoted: bigint): Promise<boolean> {
+  const blockNumber = await lastBlockBefore(client, lastVoted + 1n);
+  const { transactions } = await client.getBlock({ blockNumber, includeTransactions: true });
+  const votes = transactions.filter(
+    (tx) => isAddressEqual(tx.from, from) && tx.to && isAddressEqual(tx.to, to) && tx.input.startsWith(VOTE),
+  );
+  for (const { hash } of votes) {
+    if ((await client.getTransactionReceipt({ hash })).status === "success") return true;
+  }
+  return false;
 }
 
 /** Checks that the Voter recorded `vote` for `conduit` as of block `blockNumber`. */

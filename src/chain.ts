@@ -22,6 +22,7 @@ export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and re
 export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
+const BLOCK_SECONDS = 2n; // on Base
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
@@ -135,7 +136,7 @@ export type Chain = {
    * Like `client`, with batches and hedging of its own, for the immutable conduit's votes: the calls one client sends
    * at once share a JSON-RPC batch, which answers when its slowest call does.
    */
-  v2Client?: Client | undefined;
+  v2Client: Client;
   broadcast: ReturnType<typeof broadcaster>;
   module: Address;
   conduit: Address;
@@ -152,12 +153,12 @@ export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));
   const [conduit, keeper] = (await readMany<Address>(client, [
-    { address: module, abi: moduleAbi, functionName: "CONDUIT" },
-    { address: module, abi: moduleAbi, functionName: "KEEPER" },
+    call(module, moduleAbi, "CONDUIT"),
+    call(module, moduleAbi, "KEEPER"),
   ])) as [Address, Address];
   const [voter, ve] = (await readMany<Address>(client, [
-    { address: conduit, abi: conduitAbi, functionName: "voter" },
-    { address: conduit, abi: conduitAbi, functionName: "veToken" },
+    call(conduit, conduitAbi, "voter"),
+    call(conduit, conduitAbi, "veToken"),
   ])) as [Address, Address];
   const bulk = makeClient(bulkTransport(rpcUrls));
   const v2Client = makeClient(hedged(rpcUrls));
@@ -166,9 +167,17 @@ export async function connect(module: Address, rpcUrls: string[]): Promise<Chain
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };
 
-export function voterCall({ voter }: Chain, functionName: string, args: readonly unknown[] = []): Call {
-  return { address: voter, abi: voterAbi, functionName, args };
+export function call(
+  address: Address,
+  abi: readonly unknown[],
+  functionName: string,
+  args: readonly unknown[] = [],
+): Call {
+  return { address, abi, functionName, args };
 }
+
+export const voterCall = ({ voter }: Chain, functionName: string, args?: readonly unknown[]) =>
+  call(voter, voterAbi, functionName, args);
 
 type ReadOptions = {
   blockNumber?: bigint;
@@ -208,6 +217,23 @@ const reverted = (error: unknown, { address }: Call) =>
   error.contractAddress !== undefined &&
   isAddressEqual(error.contractAddress, address) &&
   error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
+
+/** The number of the last block before `time` (s): estimated from the latest block, then checked. */
+export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
+  const head = await client.getBlock();
+  if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
+  let number = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
+  for (let step = 0; step < 20; step++) {
+    const [block, next] = await Promise.all([
+      client.getBlock({ blockNumber: number }),
+      client.getBlock({ blockNumber: number + 1n }),
+    ]);
+    if (block.timestamp >= time) number--;
+    else if (next.timestamp < time) number++;
+    else return number;
+  }
+  throw new Error(`no block found just before ${time}`);
+}
 
 async function multicall(
   client: Client,

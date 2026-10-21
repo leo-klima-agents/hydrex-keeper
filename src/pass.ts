@@ -5,7 +5,7 @@ import { log, warnOnce } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
 import { proportional, toVote, type Vote } from "./select.ts";
-import { castVote, klimaSender, v2Sender } from "./vote.ts";
+import { castVote, klimaSender, v2Sender, VoteSent } from "./vote.ts";
 import type { Whitelist } from "./whitelist.ts";
 
 export type Run = {
@@ -66,16 +66,26 @@ export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Prom
   };
 }
 
-/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. Returns it once cast. */
-export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<Vote | undefined> {
+/**
+ * The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. `sent` gets it once cast, or
+ * once it failed after it was sent: either way, it may still be pending.
+ */
+export async function pass(
+  run: Run,
+  { pools, priced }: DayBefore,
+  until: number,
+  sent: (vote: Vote) => void,
+): Promise<void> {
   const fractions = proportional(valueRewards(run, pools, priced, true));
-  if (!fractions) {
-    log.info("no pool pays anything; keeping the current vote");
-    return undefined;
-  }
+  if (!fractions) return log.info("no pool pays anything; keeping the current vote");
   const vote = toVote(pools, fractions);
-  await castVote(run.chain, run.account, vote, run.dryRun, until);
-  return vote;
+  try {
+    await castVote(run.chain, run.account, vote, run.dryRun, until);
+  } catch (error) {
+    if (error instanceof VoteSent) sent(vote);
+    throw error;
+  }
+  sent(vote);
 }
 
 /**

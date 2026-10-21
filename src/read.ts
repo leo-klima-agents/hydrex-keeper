@@ -1,6 +1,6 @@
 import { erc20Abi, type Address } from "viem";
 import { bribeAbi, veAbi } from "./abi.ts";
-import { lower, now, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
+import { call, lower, now, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
 
 /** A conduit's voting power at the start of the epoch, and when it last voted. */
 export type Votes = { power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
@@ -20,11 +20,10 @@ export type State = {
 
 const calendarEpoch = () => (now() / WEEK) * WEEK;
 
-export function bribeCall(address: Address, functionName: string, args: readonly unknown[] = []): Call {
-  return { address, abi: bribeAbi, functionName, args };
-}
+export const bribeCall = (address: Address, functionName: string, args?: readonly unknown[]) =>
+  call(address, bribeAbi, functionName, args);
 
-const decimalsCall = (address: Address): Call => ({ address, abi: erc20Abi, functionName: "decimals" });
+const decimalsCall = (address: Address) => call(address, erc20Abi, "decimals");
 
 export async function readDecimals(client: Client, tokens: Address[]): Promise<Map<string, number>> {
   const decimals = await readMany<number>(client, tokens.map(decimalsCall));
@@ -35,7 +34,7 @@ function epochCalls(chain: Chain, calendar: bigint): Call[] {
   const { ve, conduit, v2 } = chain;
   const votesOf = (voter: Address): Call[] => [
     voterCall(chain, "lastVoted", [voter]),
-    { address: ve, abi: veAbi, functionName: "getPastVotes", args: [voter, calendar] },
+    call(ve, veAbi, "getPastVotes", [voter, calendar]),
   ];
   return [voterCall(chain, "_epochTimestamp"), ...votesOf(conduit), ...(v2 ? votesOf(v2.conduit) : [])];
 }

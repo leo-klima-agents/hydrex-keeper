@@ -7,7 +7,7 @@ import {
   type LocalAccount,
 } from "viem";
 import { Blocks, sleep, watch } from "./blocks.ts";
-import { lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
+import { lastBlockBefore, lower, readMany, voterCall, WEEK, type Chain } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
@@ -41,7 +41,6 @@ const FIRST_READ_WAIT_MS = 3_000; // the longest a plan waits for the immutable 
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
-const BLOCK_SECONDS = 2n; // on Base
 
 /** A vote sent, and for the immutable conduit, its votes on each pool once it lands, by lowercase pool. */
 export type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender; votes?: Map<Address, bigint> | undefined };
@@ -364,7 +363,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       if (decision.vote) {
         const [values, current] = await Promise.all([
           valuesNow(time),
-          readScore(chain, chain.v2Client ?? chain.client, "pending").catch(scoreUnread),
+          readScore(chain, chain.v2Client, "pending").catch(scoreUnread),
         ]);
         if (values && current !== undefined) {
           const onchain = { values: values.value, current };
@@ -496,23 +495,6 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
   const voters = [...(conduits.v2 ? [chain.v2!.conduit] : []), ...(conduits.klima ? [chain.conduit] : [])];
   return failures + (await outcome(run, flip, [...sent.values()], voters));
-}
-
-/** The number of the last block before `time` (s): estimated from the latest block, then checked. */
-export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
-  const head = await client.getBlock();
-  if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
-  let number = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
-  for (let step = 0; step < 20; step++) {
-    const [block, next] = await Promise.all([
-      client.getBlock({ blockNumber: number }),
-      client.getBlock({ blockNumber: number + 1n }),
-    ]);
-    if (block.timestamp >= time) number--;
-    else if (next.timestamp < time) number++;
-    else return number;
-  }
-  throw new Error(`no block found just before ${time}`);
 }
 
 /**

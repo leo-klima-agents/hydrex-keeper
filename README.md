@@ -26,9 +26,10 @@ and priced in USD. A vote leaves out pools that would get less than 0.1% of the 
 pool adds gas, and a Base transaction may use at most 16.8M. When blocks are nearly full, the tip rises, up to 0.1 gwei.
 
 A failed execution exits non-zero, which emails `ALERT_EMAIL`, and Cloud Run retries it up to three times; a retry does
-what is still due, and does not vote a day before the flip again for a conduit whose vote is in. After the flip, the
-last pass checks where its votes landed and that the Voter shows a vote of the conduit in the epoch that ended, then
-claims.
+what is still due, and does not vote a day before the flip again for a conduit whose vote is in: for the immutable
+conduit, only if the proposer sent the vote in force. A retry that starts once nothing is due succeeds at once: the
+attempt that was due already failed for what is wrong. After the flip, the last pass checks where its votes landed and
+that the Voter shows a vote of the conduit in the epoch that ended, then claims.
 
 ## How it votes for the immutable conduit
 
@@ -39,7 +40,8 @@ votes, which go straight to the conduit.
 - **The conduit's check.** Anyone may propose the conduit's vote, and it takes one only if its own score beats the vote
   in force by $1. That score counts only WETH, cbBTC, USDC and EURC at their Chainlink prices, and some trading fees.
   The job values a vote at its own prices, then checks that score as the vote is sent, rounded to basis points, aiming
-  for $1.10: when its best vote falls short, it sends the best vote at its prices that clears it.
+  for $1.10: when its best vote falls short, it sends the best vote at its prices that clears it, if that one pays at
+  least $1 more than the vote in force, a day before the flip too.
 - **Both conduits.** A day before the flip, the immutable conduit votes once the Klima conduit's vote is in, so that its
   check counts the votes the Klima conduit's moves, and its vote is checked after the Klima conduit's too, in case that
   one is still pending. In the last blocks, each conduit plans apart, with RPC requests of its own. The Klima conduit's
@@ -137,8 +139,8 @@ to re-run.
    any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs it with KMS, but
    sends nothing; `sh/run.sh --now` sends it. `sh/run.sh --dry-run --claim` does the same for the claims. Without
-   `--dry-run`, `--claim` is refused while the schedule may be voting or claiming. The logs are in Cloud Run, one JSON
-   object per line.
+   `--dry-run`, `--now` and `--claim` are refused while the schedule may be voting or claiming. The logs are in Cloud
+   Run, one JSON object per line.
 
 A deployment that votes for the Klima conduit alone adds the immutable conduit by setting `CONDUIT`, `PROPOSER` and
 `PROPOSER_KMS_KEY_VERSION` in `config.env` and in the repository variables of the `check` workflow, funding `PROPOSER`,

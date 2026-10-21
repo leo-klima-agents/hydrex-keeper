@@ -1,6 +1,6 @@
 import { isAddressEqual, type Address } from "viem";
 import { immutableAbi } from "./abi.ts";
-import { lower, readEach, readMany, type Call, type Chain, type Client, type V2 } from "./chain.ts";
+import { call, lower, readEach, readMany, type Chain, type Client, type V2 } from "./chain.ts";
 import type { PoolRewards, State } from "./read.ts";
 import {
   asVoted,
@@ -33,12 +33,8 @@ export type Onchain = { values: Map<Address, number>; current: number };
 /** What the immutable conduit does: a vote, or none and why; and its votes on each pool once it is decided. */
 export type V2Decision = { vote: Vote | null; note: string; votes: bigint[]; summary: Record<string, unknown> };
 
-const v2Call = (conduit: Address, functionName: string, args: readonly unknown[] = []): Call => ({
-  address: conduit,
-  abi: immutableAbi,
-  functionName,
-  args,
-});
+const v2Call = (conduit: Address, functionName: string, args?: readonly unknown[]) =>
+  call(conduit, immutableAbi, functionName, args);
 
 const usd = (wad: bigint) => Number(wad) / 1e18;
 
@@ -110,7 +106,8 @@ export function votesOf(candidates: { pool: Address }[], vote: Vote, power: bigi
  * The immutable conduit's vote at our prices, against everyone else's votes, the Klima conduit's included: in
  * proportion to rewards a day before the flip, else the water-filling one if it gains over MIN_GAIN_USD. When it does
  * not score MIN_GAIN plus MARGIN over the vote in force at the conduit's own values, once rounded as it is sent, the
- * best vote that does. Without `onchain`, the simulation is left to check.
+ * best vote that does, if that one gains over MIN_GAIN_USD on the vote in force. Without `onchain`, the simulation is
+ * left to check.
  */
 export function decideV2(
   state: State,
@@ -137,21 +134,22 @@ export function decideV2(
     x = best.fractions;
   }
   if (!x) return keep("no pool pays anything; keeping v2's vote");
-  const values = onchain && candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
-  const bar = onchain && onchain.current + MIN_GAIN + MARGIN;
-  if (values && bar !== undefined && score(candidates, values, asVoted(x), power) < bar) {
-    // Unless proportionally, `x` is already our water-filling, which falls short.
-    x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
-    if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
-    if (!proportionally && gain(candidates, x, power) <= MIN_GAIN_USD) {
-      return keep("no vote that clears v2's check gains enough; keeping its vote", { bar });
+  let checked: { bar: number; score: number } | undefined;
+  if (onchain) {
+    const values = candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
+    const bar = onchain.current + MIN_GAIN + MARGIN;
+    if (score(candidates, values, asVoted(x), power) < bar) {
+      // Unless proportionally, `x` is already our water-filling, which falls short. Whichever replaces it is no longer
+      // in proportion, so it must gain as much as a vote of the last blocks would.
+      x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
+      if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
+      if (gain(candidates, x, power) <= MIN_GAIN_USD) {
+        return keep("no vote that clears v2's check gains enough; keeping its vote", { bar });
+      }
     }
+    checked = { bar, score: score(candidates, values, asVoted(x), power) };
   }
-  const summary = {
-    ...summarize(candidates, x, power),
-    bar,
-    ...(values ? { score: score(candidates, values, asVoted(x), power) } : {}),
-  };
+  const summary = { ...summarize(candidates, x, power), ...checked };
   const vote = toVote(candidates, x);
   return { vote, note: "", votes: votesOf(candidates, vote, power), summary };
 }

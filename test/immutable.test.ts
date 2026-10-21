@@ -94,6 +94,16 @@ test("the last blocks re-vote only for a gain over a dollar; a day before, the v
   assert.deepEqual(dayBefore.vote, { pools: [B], weights: [10_000n] });
 });
 
+test("a day before, a vote that clears the conduit's check only by losing at our prices keeps the vote in force", () => {
+  // The vote in force, all on B, is worth $50 at our prices. The conduit values A alone, and needs 40% on A.
+  const decision = decideV2(state({ v2OnB: 1000n * E }), [10, 100], onchain(20, 100, 0), true);
+  assert.equal(decision.vote, null);
+  assert.match(decision.note, /no vote that clears v2's check gains enough/);
+  const lastBlocks = decideV2(state({ v2OnB: 1000n * E }), [10, 100], onchain(20, 100, 0));
+  assert.equal(lastBlocks.vote, null, "nor in the last blocks");
+  assert.ok(decideV2(state(), [10, 100], onchain(20, 100, 0), true).vote, "it gains on no vote in force");
+});
+
 test("without voting power, the immutable conduit does not vote", () => {
   const decision = decideV2(state({ v2Power: 0n }), [100, 100], onchain(0, 100, 100));
   assert.equal(decision.vote, null);

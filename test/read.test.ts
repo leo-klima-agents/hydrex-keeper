@@ -31,6 +31,7 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
   return {
     client,
     bulk: client,
+    v2Client: client,
     broadcast,
     module: addr(99),
     conduit: CONDUIT,

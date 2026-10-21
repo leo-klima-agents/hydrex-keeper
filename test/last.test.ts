@@ -2,19 +2,8 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { TransactionReceiptNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { Blocks, sleep, watch } from "../src/blocks.ts";
-import type { Chain as Connection, Client } from "../src/chain.ts";
-import {
-  keep,
-  landed,
-  lastBlockBefore,
-  outcome,
-  pick,
-  race,
-  refreshed,
-  v2Answered,
-  type Lane,
-  type Plan,
-} from "../src/last.ts";
+import { lastBlockBefore, type Chain as Connection, type Client } from "../src/chain.ts";
+import { keep, landed, outcome, pick, race, refreshed, v2Answered, type Lane, type Plan } from "../src/last.ts";
 import type { Run } from "../src/pass.ts";
 import { klimaSender, v2Sender, type Tx } from "../src/vote.ts";
 
