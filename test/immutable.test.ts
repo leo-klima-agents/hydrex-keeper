@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
 import type { Chain, Client } from "../src/chain.ts";
-import { connectV2, decideV2, pricedPools, v2Candidates, votesOf, type Onchain } from "../src/immutable.ts";
+import { connectV2, decideV2, pricedPools, readValues, v2Candidates, votesOf, type Onchain } from "../src/immutable.ts";
 import type { State } from "../src/read.ts";
 import { score } from "../src/select.ts";
 
@@ -144,6 +144,25 @@ function conduitClient(voter: Address, ve: Address): Client {
       contracts.map((c) => (allowFailure ? { status: "success", result: answer(c) } : answer(c))),
   } as unknown as Client;
 }
+
+test("the conduit's values of pools are read a few heavy calls at a time", async () => {
+  let inFlight = 0;
+  let most = 0;
+  const client = {
+    multicall: async ({ contracts }: { contracts: { args: readonly unknown[] }[] }) => {
+      most = Math.max(most, ++inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight--;
+      return contracts.map(({ args }) => BigInt(args[0] as Address) * E);
+    },
+  } as unknown as Client;
+  const pools = Array.from({ length: 167 }, (_, i) => addr(100 + i));
+  const chain = { v2: { conduit: B, proposer: C, priced: [] } } as unknown as Chain;
+  const values = await readValues(chain, client, pools);
+  assert.equal(values.size, 167);
+  assert.equal(values.get(addr(266)), 266, "in USD");
+  assert.equal(most, 3, "7 calls of 25 pools, 3 at once");
+});
 
 test("the immutable conduit is checked against the Klima conduit's Voter and VotingEscrow", async () => {
   const [VOTER, VE] = [addr(1), addr(2)];

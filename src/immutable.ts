@@ -25,6 +25,7 @@ const MIN_GAIN = 1; // USD: the conduit's MIN_GAIN
 const MARGIN = 0.1; // USD aimed for above MIN_GAIN, for votes that move before ours lands
 const MAX_PRICED_TOKENS = 4; // the conduit's
 const VALUE_CHUNK = 25; // poolValue calls per eth_call: each can use 200k gas
+const VALUE_CONCURRENCY = 3; // such eth_calls at once: they are read again every block, from the RPCs votes need too
 
 /** The conduit's own values of pools, in USD, and its score of the vote in force. */
 export type Onchain = { values: Map<Address, number>; current: number };
@@ -74,7 +75,11 @@ export async function readValues(
   blockTag?: "pending",
 ): Promise<Map<Address, number>> {
   const calls = pools.map((pool) => v2Call(v2!.conduit, "poolValue", [pool]));
-  const values = await readMany<bigint>(client, calls, { blockTag, chunk: VALUE_CHUNK });
+  const values = await readMany<bigint>(client, calls, {
+    blockTag,
+    chunk: VALUE_CHUNK,
+    concurrency: VALUE_CONCURRENCY,
+  });
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
 
