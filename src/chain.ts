@@ -14,7 +14,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { publicActionsL2 } from "viem/op-stack";
-import { conduitAbi, immutableAbi, moduleAbi, voterAbi } from "./abi.ts";
+import { conduitAbi, moduleAbi, voterAbi } from "./abi.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
@@ -137,13 +137,14 @@ export type Chain = {
   keeper: Address;
   voter: Address;
   ve: Address;
-  /** The immutable conduit the job also votes for, and the address that signs its votes. */
+  /** The immutable conduit the job also votes for, if any; see connectV2. */
   v2?: V2 | undefined;
 };
 
-export type V2 = { conduit: Address; proposer: Address };
+/** The immutable conduit, the address that signs its votes, and the tokens it prices with Chainlink. */
+export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
 
-export async function connect(module: Address, rpcUrls: string[], v2?: V2): Promise<Chain> {
+export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));
   const [conduit, keeper] = (await readMany<Address>(client, [
     { address: module, abi: moduleAbi, functionName: "CONDUIT" },
@@ -153,17 +154,8 @@ export async function connect(module: Address, rpcUrls: string[], v2?: V2): Prom
     { address: conduit, abi: conduitAbi, functionName: "voter" },
     { address: conduit, abi: conduitAbi, functionName: "veToken" },
   ])) as [Address, Address];
-  if (v2) {
-    const [v2Voter, v2Ve] = (await readMany<Address>(client, [
-      { address: v2.conduit, abi: immutableAbi, functionName: "voter" },
-      { address: v2.conduit, abi: immutableAbi, functionName: "veToken" },
-    ])) as [Address, Address];
-    if (!isAddressEqual(v2Voter, voter) || !isAddressEqual(v2Ve, ve)) {
-      throw new Error(`${v2.conduit} uses Voter ${v2Voter} and VotingEscrow ${v2Ve}, not ${voter} and ${ve}`);
-    }
-  }
   const bulk = makeClient(bulkTransport(rpcUrls));
-  return { client, bulk, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve, v2 };
+  return { client, bulk, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

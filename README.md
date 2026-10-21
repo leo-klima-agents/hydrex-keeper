@@ -25,27 +25,32 @@ and priced in USD. A vote leaves out pools that would get less than 0.1% of the 
 pool adds gas, and a Base transaction may use at most 16.8M. When blocks are nearly full, the tip rises, up to 0.1 gwei.
 
 A failed execution exits non-zero, which emails `ALERT_EMAIL`, and Cloud Run retries it up to three times; a retry does
-what is still due. After the flip, the last pass checks where its votes landed and that the Voter shows a vote of the
-conduit this epoch, then claims.
+what is still due, and does not vote a day before the flip again for a conduit whose vote is in. After the flip, the
+last pass checks where its votes landed and that the Voter shows a vote of the conduit in the epoch that ended, then
+claims.
 
 ## How it votes for the immutable conduit
 
 When `CONDUIT` is set, the job also votes for the immutable conduit, version 2 of hydrex-conduit, at the same times,
 with the same prices and in the same way, at most 20 pools to a vote, as that conduit allows. The proposer key signs its
-votes, which go straight to the conduit; the Klima conduit's votes do not depend on them.
+votes, which go straight to the conduit.
 
 - **The conduit's check.** Anyone may propose the conduit's vote, and it takes one only if its own score beats the vote
   in force by $1. That score counts only WETH, cbBTC, USDC and EURC at their Chainlink prices, and some trading fees.
-  The job values a vote at its own prices, then checks that score, aiming for $1.10: when its best vote falls short, it
-  sends the best vote at its prices that clears it.
-- **Both conduits.** In each of the last two blocks, the immutable conduit's vote is planned and sent first, and the
-  Klima conduit's vote answers it as it would any other vote. Neither conduit gives up rewards for the other. Voting for
-  both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit voting on the same pools would.
+  The job values a vote at its own prices, then checks that score as the vote is sent, rounded to basis points, aiming
+  for $1.10: when its best vote falls short, it sends the best vote at its prices that clears it.
+- **Both conduits.** In the last blocks, each conduit plans apart, and sends the latest vote it has ready. The Klima
+  conduit's vote answers the immutable conduit's vote ready for the same block, as it would any other vote, and that one
+  is sent only if it clears its check whether or not the Klima conduit's lands first. Neither conduit gives up rewards
+  for the other. Voting for both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit voting on
+  the same pools would.
 - **Votes of others.** A vote of someone else for the conduit, in the block being built, takes that block: the job then
   does not send one, and the Klima conduit's vote answers it.
+- **Each on its own.** Neither conduit's failure stops the other's votes. The immutable conduit keeps voting if the
+  Klima conduit has no voting power or refuses the keeper's votes, for example after losing its executor role, and the
+  Klima conduit keeps voting and claiming if `CONDUIT` is unusable. Either fails the execution.
 
-A failure of the immutable conduit's votes fails the execution, but stops neither the Klima conduit's votes nor the
-claims. The job does not claim for the immutable conduit's delegators.
+The job does not claim for the immutable conduit's delegators.
 
 ## How it claims
 
@@ -159,7 +164,10 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
 - **Immutable conduit:** without voting power this epoch, it gets no vote, and the job logs a warning. While Base's
   sequencer is down, and for an hour after, it takes no vote, so its votes fail the execution. When its own values
   cannot be read, the simulation of each vote is the only check. The proposer's balance works as the keeper's, and logs
-  `fund the proposer`.
+  `fund the proposer`. A `CONDUIT` that is not such a conduit, on the Klima conduit's Voter, is left out and fails the
+  execution.
+- **Klima conduit:** without voting power this epoch, it gets no vote, and the job fails the execution; the immutable
+  conduit still votes.
 
 ## Development
 

@@ -1,7 +1,7 @@
 import { formatUnits, type Address, type LocalAccount } from "viem";
 import type { Chain } from "./chain.ts";
-import { decideV2, pricedPools, readOnchain, readPricedTokens } from "./immutable.ts";
-import { log } from "./log.ts";
+import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
+import { errorMessage, log } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
 import { proportional, toVote } from "./select.ts";
@@ -40,24 +40,52 @@ export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: b
   });
 }
 
-/** The vote a day before the flip, in proportion to each pool's rewards. */
-export async function pass(run: Run, until: number): Promise<void> {
-  const pools = await readRewards(run.chain, tokensOf(run));
-  const fractions = proportional(valueRewards(run, pools, await run.prices(tokensOf(run), until), true));
+/** What both conduits' votes a day before the flip are made from. */
+export type DayBefore = { pools: PoolRewards[]; priced: Prices };
+
+/** Reads the rewards and their prices once for both conduits; after a failure, the next call reads them again. */
+export function dayBeforeReads(run: Run, until: number): () => Promise<DayBefore> {
+  let reads: Promise<DayBefore> | undefined;
+  const read = async () => {
+    const [pools, priced] = await Promise.all([
+      readRewards(run.chain, tokensOf(run)),
+      run.prices(tokensOf(run), until),
+    ]);
+    return { pools, priced };
+  };
+  return () =>
+    (reads ??= read().catch((error: unknown) => {
+      reads = undefined;
+      throw error;
+    }));
+}
+
+/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. */
+export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<void> {
+  const fractions = proportional(valueRewards(run, pools, priced, true));
   if (!fractions) return log.info("no pool pays anything; keeping the current vote");
   await castVote(run.chain, run.account, toVote(pools, fractions), run.dryRun, until);
 }
 
-/** The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check. */
-export async function passV2(run: Run, until: number): Promise<void> {
+/**
+ * The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check.
+ * When the conduit's own values cannot be read, the simulation checks it.
+ */
+export async function passV2(run: Run, { pools, priced }: DayBefore, until: number): Promise<void> {
   const { chain } = run;
-  const pools = await readRewards(chain, tokensOf(run));
-  const state = await readVotes(chain, pools);
-  if (!state.epoch.v2?.power) return log.warning("v2 has no voting power this epoch: not voting for it");
-  const onchain = await readOnchain(chain, pricedPools(pools, await readPricedTokens(chain)));
-  const usd = valueRewards(run, state.pools, await run.prices(tokensOf(run), until), false);
-  const { vote, note, summary } = decideV2(state, usd, onchain, true);
-  if (!vote) return log.info(note, { conduit: chain.v2!.conduit, ...summary });
-  log.info("v2 vote", { conduit: chain.v2!.conduit, ...summary });
+  const { conduit, priced: tokens } = chain.v2!;
+  const unread = (error: unknown) => {
+    log.warning("v2's own values unread; its simulation checks the vote", { conduit, error: errorMessage(error) });
+    return undefined;
+  };
+  const [state, values, current] = await Promise.all([
+    readVotes(chain, pools),
+    readValues(chain, chain.bulk, pricedPools(pools, tokens)).catch(unread),
+    readScore(chain, chain.bulk).catch(unread),
+  ]);
+  const onchain = values && current !== undefined ? { values, current } : undefined;
+  const { vote, note, summary } = decideV2(state, valueRewards(run, state.pools, priced, false), onchain, true);
+  if (!vote) return log.info(note, { conduit, ...summary });
+  log.info("v2 vote", { conduit, ...summary });
   await castVote(chain, run.proposer, vote, run.dryRun, until, v2Sender(chain));
 }

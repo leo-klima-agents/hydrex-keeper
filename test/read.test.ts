@@ -149,7 +149,7 @@ test("readVotes reads the epoch and the votes on each pool, in one multicall for
 });
 
 test("with the immutable conduit, readVotes also reads its votes and power, in one multicall for up to 331 pools", async () => {
-  const chain = { ...fakeChain(table), v2: { conduit: V2, proposer: addr(23) } };
+  const chain = { ...fakeChain(table), v2: { conduit: V2, proposer: addr(23), priced: [] } };
   const rewards = await readRewards(chain, [TOK_1]);
   multicalls = 0;
   const v2 = { power: 7n, lastVoted: 1000n, votedThisEpoch: true };

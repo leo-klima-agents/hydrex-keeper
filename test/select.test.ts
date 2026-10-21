@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
 import {
+  asVoted,
   expected,
   gain,
   proportional,
   score,
   select,
+  summarize,
   toVote,
   waterFill,
   waterFillAbove,
@@ -146,4 +148,21 @@ test("the gain of an allocation is over the vote in force, at our prices", () =>
   const candidates = [candidate(A, 1000, 100n, 25n), candidate(B, 1000, 100n, 25n)];
   assert.ok(Math.abs(gain(candidates, [0.5, 0.5], 50n)) < 1e-9);
   assert.ok(gain(candidates, [1, 0], 50n) < 0);
+});
+
+test("a vote's shares are its fractions rounded to basis points, as the Voter splits its power", () => {
+  assert.deepEqual(asVoted([0.33333, 0.66667]), [0.3333, 0.6667]);
+  assert.deepEqual(asVoted([0.00004, 0.99996]), [0, 1], "under half a basis point is no vote");
+  assert.deepEqual(asVoted([0, 0]), [0, 0]);
+});
+
+test("a summary gives the shares in percent, the expected reward and the vote in force", () => {
+  const candidates = [candidate(A, 100, 100n, 7n), candidate(B, 0, 100n)];
+  assert.deepEqual(summarize(candidates, [1, 0], 100n), {
+    plan: [{ pool: A, share: 100 }],
+    expectedUsd: 50,
+    currentVote: [{ pool: A, votes: 7n }],
+    power: 100n,
+  });
+  assert.deepEqual(summarize(candidates, null, 100n).plan, []);
 });

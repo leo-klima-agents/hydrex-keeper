@@ -3,10 +3,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { getAddress } from "viem";
 import { connect, hostOf, now, type V2 } from "./chain.ts";
 import { claims } from "./claim.ts";
+import { connectV2 } from "./immutable.ts";
 import { kmsAccount } from "./kms.ts";
 import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
-import { pass, passV2, type Run } from "./pass.ts";
+import { dayBeforeReads, pass, passV2, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
 import { DAY, due, HORIZON, lastFlip } from "./schedule.ts";
@@ -26,14 +27,23 @@ async function main(): Promise<number> {
   if (immediately && claimNow) throw new Error("--now and --claim exclude each other");
   const module = getAddress(required("MODULE"));
   const keyVersion = dryRun ? process.env.KMS_KEY_VERSION : required("KMS_KEY_VERSION");
-  const v2 = immutableConduit(dryRun);
+  const config = immutableConduit(dryRun);
   const tokens = parseWhitelist(readFileSync(new URL("../tokens.json", import.meta.url), "utf8"));
 
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
-  const chain = await connect(module, rpcUrls, v2);
+  const chain = await connect(module, rpcUrls);
+  // An unusable immutable conduit fails the execution, once the Klima conduit has voted or claimed without it.
+  let failed = false;
+  if (config) {
+    chain.v2 = await connectV2(chain, config).catch((error: unknown) => {
+      failed = true;
+      log.error("immutable conduit unusable: not voting for it", { v2: config.conduit, error: errorMessage(error) });
+      return undefined;
+    });
+  }
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
-  const proposer = v2?.keyVersion ? kmsAccount(v2.keyVersion, v2.proposer) : undefined;
+  const proposer = chain.v2 && config?.keyVersion ? kmsAccount(config.keyVersion, chain.v2.proposer) : undefined;
   const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
   const source = combined([
     defillama(),
@@ -41,7 +51,7 @@ async function main(): Promise<number> {
     ...(coingeckoKey ? [coingecko(coingeckoKey)] : []),
   ]);
   const { keeper, conduit, voter } = chain;
-  const v2Fields = v2 ? { v2: v2.conduit, proposer: v2.proposer } : {};
+  const v2Fields = chain.v2 ? { v2: chain.v2.conduit, proposer: chain.v2.proposer } : {};
   log.info("keeper", {
     module,
     keeper,
@@ -65,7 +75,7 @@ async function main(): Promise<number> {
   if (what === "claims") {
     const flip = lastFlip(epoch.flip, now());
     const until = claimNow ? Date.now() + Number(HORIZON) * 1000 : Number(flip + HORIZON) * 1000;
-    return (await claims(run, flip, until)) ? 1 : 0;
+    return (await claims(run, flip, until)) || failed ? 1 : 0;
   }
   if (!what && epoch.flip <= now() && now() - epoch.flip < 2n * HORIZON) {
     // Retries of claims that waited all hour for the minter end here: those claims already failed.
@@ -75,25 +85,45 @@ async function main(): Promise<number> {
     return 0;
   }
   assertFresh(epoch);
-  if (epoch.power === 0n) throw new Error("conduit has no voting power this epoch");
   const { flip } = epoch;
+  // Each conduit votes if it has voting power this epoch, whatever becomes of the other.
+  const klima = epoch.power > 0n;
+  if (!klima) {
+    failed = true;
+    log.error("the Klima conduit has no voting power this epoch: not voting for it");
+  }
+  const v2 = chain.v2 !== undefined && (epoch.v2?.power ?? 0n) > 0n;
+  if (chain.v2 && !v2) log.warning("the immutable conduit has no voting power this epoch: not voting for it");
   if (what === "last blocks") {
-    const failures = await lastBlocks(run, flip);
-    return failures + (await claims(run, flip, Number(flip + HORIZON) * 1000)) > 0 ? 1 : 0;
+    const failures = await lastBlocks(run, flip, { klima, v2 });
+    return failed || failures + (await claims(run, flip, Number(flip + HORIZON) * 1000)) > 0 ? 1 : 0;
   }
   if (!what) {
     log.warning("nothing due: the job votes a day before the flip and in its last blocks, and claims after it", {
       flip,
     });
-    return 0;
+    return failed ? 1 : 0;
   }
   if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
-  // Each conduit's vote is retried on its own, so that a failure of one does not send the other's again.
-  const failed = !(await attempts("pass", () => pass(run, until), until));
-  const v2Failed = chain.v2 !== undefined && !(await attempts("v2 pass", () => passV2(run, until), until));
-  return failed || v2Failed ? 1 : 0;
+  // A retry of a failed execution does not vote again for a conduit whose vote of a day before is in.
+  const again = (lastVoted: bigint | undefined, conduit: string) => {
+    const voted = !immediately && lastVoted !== undefined && lastVoted >= flip - DAY - HORIZON;
+    if (voted) log.info("already voted a day before the flip", { conduit, lastVoted });
+    return !voted;
+  };
+  const reads = dayBeforeReads(run, until);
+  // The two conduits vote at once and are retried apart, so that neither holds the other back.
+  const [klimaDone, v2Done] = await Promise.all([
+    !klima ||
+      !again(epoch.lastVoted, chain.conduit) ||
+      attempts("pass", async () => pass(run, await reads(), until), until),
+    !v2 ||
+      !again(epoch.v2?.lastVoted, chain.v2!.conduit) ||
+      attempts("v2 pass", async () => passV2(run, await reads(), until), until),
+  ]);
+  return failed || !klimaDone || !v2Done ? 1 : 0;
 }
 
 /** Runs `pass` up to ATTEMPTS times, while time is left before `until` (ms); returns whether it succeeded. */
@@ -118,7 +148,7 @@ async function attempts(name: string, pass: () => Promise<void>, until: number):
  * The immutable conduit the job also votes for, the address that signs its votes, and its key: CONDUIT, PROPOSER and
  * PROPOSER_KMS_KEY_VERSION, all or none. A dry run may leave out the key.
  */
-function immutableConduit(dryRun: boolean): (V2 & { keyVersion: string | undefined }) | undefined {
+function immutableConduit(dryRun: boolean): (Omit<V2, "priced"> & { keyVersion: string | undefined }) | undefined {
   const { CONDUIT: conduit, PROPOSER: proposer, PROPOSER_KMS_KEY_VERSION: keyVersion } = process.env;
   if (!conduit && !proposer && !keyVersion) return undefined;
   if (!conduit || !proposer || (!keyVersion && !dryRun)) {

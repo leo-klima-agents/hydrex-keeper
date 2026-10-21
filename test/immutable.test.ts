@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
-import { decideV2, pricedPools, v2Candidates, votesOf, type Onchain } from "../src/immutable.ts";
+import type { Chain, Client } from "../src/chain.ts";
+import { connectV2, decideV2, pricedPools, v2Candidates, votesOf, type Onchain } from "../src/immutable.ts";
 import type { State } from "../src/read.ts";
 import { score } from "../src/select.ts";
 
@@ -97,4 +98,57 @@ test("without voting power, the immutable conduit does not vote", () => {
   const decision = decideV2(state({ v2Power: 0n }), [100, 100], onchain(0, 100, 100));
   assert.equal(decision.vote, null);
   assert.match(decision.note, /no voting power/);
+});
+
+test("the vote clears the conduit's check as the Voter splits it, rounded to basis points", () => {
+  // Seeded cases where our best vote falls short of the bar, so the check decides the vote.
+  let seed = 7;
+  const rand = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
+  const power = 176_730n * E;
+  let checked = 0;
+  for (let c = 0; c < 30; c++) {
+    const pools = Array.from({ length: 60 }, (_, i) => ({
+      pool: addr(100 + i),
+      rewards: [],
+      otherVotes: BigInt(Math.floor(1_000 + rand() * 2_000_000)) * E,
+      ownVotes: 0n,
+      v2Votes: 0n,
+    }));
+    const s: State = {
+      ...state(),
+      pools,
+      epoch: { ...state().epoch, v2: { power, lastVoted: 0n, votedThisEpoch: false } },
+    };
+    const usd = pools.map(() => rand() * 5_000);
+    const values = pools.map(() => (rand() < 0.3 ? 0 : rand() * 30_000));
+    const candidates = v2Candidates(s, usd);
+    const share = (votes: bigint[]) => votes.map((v) => Number(v) / Number(power));
+    const ours = decideV2(s, usd, undefined);
+    const current = score(candidates, values, share(ours.votes), power) + rand() * 50;
+    const byPool = new Map(pools.map((p, i) => [p.pool.toLowerCase() as Address, values[i]!]));
+    const decision = decideV2(s, usd, { current, values: byPool });
+    if (!decision.vote) continue;
+    checked++;
+    const sent = votesOf(candidates, decision.vote, power);
+    assert.ok(score(candidates, values, share(sent), power) >= current + 1.1 - 1e-6, `case ${c}`);
+  }
+  assert.ok(checked >= 25, `${checked} cases voted`);
+});
+
+/** A client answering connectV2's reads for a conduit on `voter` and `ve`. */
+function conduitClient(voter: Address, ve: Address): Client {
+  const answer = ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) =>
+    functionName === "voter" ? voter : functionName === "veToken" ? ve : [addr(30 + Number(args![0])), addr(40), 0n];
+  return {
+    multicall: async ({ contracts, allowFailure }: { contracts: { functionName: string }[]; allowFailure: boolean }) =>
+      contracts.map((c) => (allowFailure ? { status: "success", result: answer(c) } : answer(c))),
+  } as unknown as Client;
+}
+
+test("the immutable conduit is checked against the Klima conduit's Voter and VotingEscrow", async () => {
+  const [VOTER, VE] = [addr(1), addr(2)];
+  const chainOn = (client: Client) => ({ client, bulk: client, voter: VOTER, ve: VE }) as unknown as Chain;
+  const v2 = await connectV2(chainOn(conduitClient(VOTER, VE)), { conduit: B, proposer: C });
+  assert.deepEqual(v2, { conduit: B, proposer: C, priced: [addr(30), addr(31), addr(32), addr(33)] });
+  await assert.rejects(connectV2(chainOn(conduitClient(addr(9), VE)), { conduit: B, proposer: C }), /uses Voter/);
 });

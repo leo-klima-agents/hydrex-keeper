@@ -7,7 +7,7 @@ export type Vote = { pools: Address[]; weights: bigint[] };
 const BPS = 10_000;
 export const MIN_GAIN_USD = 1; // re-vote only when the expected reward improves by this much
 const MIN_SHARE = 0.001; // pools that would get less are left out to save gas
-export const MAX_POOLS = 40; // more could take a vote past the gas a Base transaction may use
+const MAX_POOLS = 40; // more could take a vote past the gas a Base transaction may use
 
 /** Expected USD of putting fractions `x` (of `power`) on the candidates: Σ B·x/(V + x). */
 export function expected(candidates: Candidate[], x: number[], power: bigint): number {
@@ -79,11 +79,27 @@ export function toVote(pools: { pool: Address }[], fractions: number[]): Vote {
   return { pools: funded.map((i) => pools[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
 }
 
+/** The shares a vote of `fractions` gives once rounded to basis points, as the Voter splits its power by weight. */
+export function asVoted(fractions: number[]): number[] {
+  const weights = fractions.map((f) => Math.round(f * BPS));
+  const total = weights.reduce((a, b) => a + b, 0);
+  return weights.map((w) => (total > 0 ? w / total : 0));
+}
+
 /** What voting `fractions`, rounded as a vote is, would add to the expected reward of the vote in force. */
 export function gain(candidates: Candidate[], fractions: number[], power: bigint): number {
-  const rounded = fractions.map((f) => Math.round(f * BPS) / BPS);
   const current = candidates.map((c) => Number(c.ownVotes) / Number(power));
-  return expected(candidates, rounded, power) - expected(candidates, current, power);
+  return expected(candidates, asVoted(fractions), power) - expected(candidates, current, power);
+}
+
+/** For the logs: the shares of `fractions` in percent, their expected reward, and the vote in force. */
+export function summarize(candidates: Candidate[], fractions: number[] | null, power: bigint) {
+  const plan = (fractions ?? [])
+    .map((f, i) => ({ pool: candidates[i]!.pool, share: Math.round(f * 10_000) / 100 }))
+    .filter((p) => p.share > 0);
+  const expectedUsd = fractions ? expected(candidates, fractions, power) : 0;
+  const currentVote = candidates.filter((c) => c.ownVotes > 0n).map((c) => ({ pool: c.pool, votes: c.ownVotes }));
+  return { plan, expectedUsd, currentVote, power };
 }
 
 /** The water-filling allocation and its vote; the vote is null when nothing pays or the gain is under MIN_GAIN_USD. */
@@ -108,9 +124,10 @@ export function score(candidates: Candidate[], values: number[], fractions: numb
 }
 
 /**
- * The best allocation at our prices that scores at least `bar` at the conduit's own `values`. Both have the form
- * Σ B·x/(V + x) with the same V, so it is the water-filling of our rewards plus μ times the conduit's values, for the
- * smallest μ that clears the bar, found by bisection. Null when not even the conduit's own best clears it.
+ * The best allocation at our prices that scores at least `bar` at the conduit's own `values`, once rounded as a vote is.
+ * Both have the form Σ B·x/(V + x) with the same V, so it is the water-filling of our rewards plus μ times the
+ * conduit's values, for the smallest μ that clears the bar, found by bisection. Null when not even the conduit's own
+ * best clears it.
  */
 export function waterFillAbove(
   candidates: Candidate[],
@@ -125,7 +142,8 @@ export function waterFillAbove(
       power,
       maxPools,
     );
-  const clears = (x: number[] | null): x is number[] => x !== null && score(candidates, values, x, power) >= bar;
+  const clears = (x: number[] | null): x is number[] =>
+    x !== null && score(candidates, values, asVoted(x), power) >= bar;
   const ours = blend(0);
   if (clears(ours)) return ours;
   const scale = Math.max(...values, 0);
@@ -134,7 +152,7 @@ export function waterFillAbove(
   let hi = (1e6 * Math.max(...candidates.map((c) => c.rewardsUsd), 1)) / scale;
   if (!clears(blend(hi))) return null;
   let lo = 0;
-  for (let k = 0; k < 40; k++) {
+  for (let k = 0; k < 30; k++) {
     const mid = (lo + hi) / 2;
     if (clears(blend(mid))) hi = mid;
     else lo = mid;
