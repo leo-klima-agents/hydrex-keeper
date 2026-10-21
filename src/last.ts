@@ -11,6 +11,7 @@ import { lower, readMany, voterCall, WEEK, type Chain, type Client } from "./cha
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
+import type { Prices } from "./prices.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
 import { select, summarize, type Vote } from "./select.ts";
 import {
@@ -271,6 +272,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   void watch(chain.client, blocks, () => !watching);
   let failures = 0;
   let rewards: PoolRewards[] = [];
+  let priced: Prices = new Map();
   let usd: number[] = []; // each pool's rewards in USD, as `rewards`; votes do not change them
   let valued: Address[] = []; // the pools the immutable conduit can value
 
@@ -372,8 +374,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       const { number, timestamp } = await chain.client.getBlock();
       blocks.observe({ number, timestamp, txs: 0 }, Date.now());
       rewards = await readRewards(chain, tokensOf(run));
+      priced = await run.prices(tokensOf(run), flipMs - PRICES_BY_MS);
       // Prices that value no reward fail here, and are fetched again.
-      usd = valueRewards(run, rewards, await run.prices(tokensOf(run), flipMs - PRICES_BY_MS), true);
+      usd = valueRewards(run, rewards, priced, false);
       valued = chain.v2 ? pricedPools(rewards, chain.v2.priced) : [];
       break;
     } catch (error) {
@@ -386,6 +389,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       await sleep(RETRY_DELAY_MS);
     }
   }
+  // Each pool, with its votes as the first plans read them. A read that fails fails those plans, which log it.
+  const { state: first } = votesNow();
+  void first.then(({ pools }) => valueRewards(run, pools, priced, true)).catch(() => undefined);
   // Each lane's first plan, tried until one comes back, while the race starts: it is sent if no later one is.
   void Promise.all(
     lanes.map(async (lane) => {

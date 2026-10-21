@@ -18,7 +18,7 @@ export type Run = {
   dryRun: boolean;
 };
 
-type Pool = PoolRewards & { otherVotes?: bigint; ownVotes?: bigint };
+type Pool = PoolRewards & { otherVotes?: bigint; ownVotes?: bigint; v2Votes?: bigint };
 
 export const tokensOf = ({ tokens }: Run) => tokens.map((t) => t.token);
 
@@ -28,14 +28,14 @@ export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: b
   const unpriced = run.tokens.filter((t) => !priced.has(t.token.toLowerCase() as Address));
   if (verbose && unpriced.length) log.warning("unpriced tokens count as zero", { tokens: unpriced.map((t) => t.name) });
   const names = new Map(run.tokens.map((t) => [t.token, t.name]));
-  return pools.map(({ pool, rewards, otherVotes, ownVotes }) => {
+  return pools.map(({ pool, rewards, otherVotes, ownVotes, v2Votes }) => {
     const valued = rewards.map((r) => {
       const price = priced.get(r.token.toLowerCase() as Address);
       const amount = Number(formatUnits(r.amount, r.decimals));
       return { token: names.get(r.token) ?? r.token, amount, usd: price === undefined ? null : amount * price };
     });
     const usd = valued.reduce((sum, r) => sum + (r.usd ?? 0), 0);
-    if (verbose) log.info("pool", { pool, usd, otherVotes, ownVotes, rewards: valued });
+    if (verbose) log.info("pool", { pool, usd, otherVotes, ownVotes, v2Votes, rewards: valued });
     return usd;
   });
 }
