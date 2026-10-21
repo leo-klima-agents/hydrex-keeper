@@ -17,7 +17,7 @@ import { BadSwap, kyberswap, SwapRefused, type Swap, type Swapper } from "./kybe
 import { errorMessage, log } from "./log.ts";
 import { tokensOf, type Run } from "./pass.ts";
 import type { Prices } from "./prices.ts";
-import { bribeCall, readBribes, readDecimals, readEpoch, readRewardTokens, type Reader } from "./read.ts";
+import { bribeCall, readBribes, readDecimals, readEpoch, readRewardTokens, type Bribe, type Reader } from "./read.ts";
 import {
   broadcastTx,
   klimaSender,
@@ -72,6 +72,12 @@ export type ClaimPlan = { tokens: Address[]; fees: Address[]; bribes: Address[];
 
 /** A conduit the job claims through: who sends and signs its claims, and the owners it does not claim for. */
 type Conduit = { sender: Sender; signer: LocalAccount | undefined; excluded: ReadonlyMap<string, string> };
+
+/**
+ * The heaviest reads of the claims, which do not depend on the conduit, read once for both: the delegate of every
+ * veNFT when the epoch that ended began, by id less one, and every fee and bribe contract.
+ */
+type Shared = { delegatees: () => Promise<Address[]>; bribes: () => Promise<Bribe[]> };
 
 /** How the Klima conduit pays out a claim: it swaps the rewards to kVCM, and retires carbon with a share of the kVCM. */
 type Klima = {
@@ -150,6 +156,12 @@ const conduitCall = ({ conduit }: Chain, functionName: string, args: readonly un
 });
 
 const worth = (p: Pair) => p.usd + (p.later ?? 0);
+
+/** `read`'s promise, made at the first call and shared by the later ones. */
+function once<T>(read: () => Promise<T>): () => Promise<T> {
+  let reading: Promise<T> | undefined;
+  return () => (reading ??= read());
+}
 
 export const worthClaiming = (usd: number, gasUsd: number) => usd >= MIN_CLAIM_USD && gasUsd <= usd * MAX_GAS_SHARE;
 
@@ -234,9 +246,13 @@ export async function claims(run: Run, flip: bigint, until: number, swapper: Swa
     { sender: klimaSender(chain), signer: account, excluded: EXCLUDED_OWNERS },
     ...(chain.v2 ? [{ sender: v2Sender(chain), signer: proposer, excluded: new Map() }] : []),
   ];
+  const shared: Shared = {
+    delegatees: once(() => readDelegatees(chain, start - WEEK)),
+    bribes: once(() => readContracts(chain)),
+  };
   const failures = await Promise.all(
     conduits.map((conduit) =>
-      claimRewards(run, conduit, start, until, swapper).catch((error: unknown) => {
+      claimRewards(run, conduit, shared, start, until, swapper).catch((error: unknown) => {
         log.error("claims failed", { conduit: conduit.sender.conduit, error: errorMessage(error) });
         return 1;
       }),
@@ -261,6 +277,7 @@ async function started(chain: Chain, flip: bigint, until: number): Promise<bigin
 async function claimRewards(
   run: Run,
   conduit: Conduit,
+  shared: Shared,
   start: bigint,
   until: number,
   swapper: Swapper,
@@ -271,7 +288,7 @@ async function claimRewards(
   const epochs = Array.from({ length: LOOKBACK }, (_, k) => ended - BigInt(k) * WEEK);
   const [klima, delegators] = await Promise.all([
     isAddressEqual(address, chain.conduit) ? readKlima(chain) : undefined,
-    readDelegators(chain, address, ended),
+    shared.delegatees().then((delegatees) => readDelegators(chain, address, ended, delegatees)),
   ]);
   const nfts = delegators.flatMap(({ id, owner, approved }): Nft[] => {
     const excluded = owner && conduit.excluded.get(lower(owner));
@@ -286,7 +303,7 @@ async function claimRewards(
     ...new Map([...tokensOf(run), ...(klima ? [klima.kvcm] : []), WETH].map((t) => [lower(t), t])).values(),
   ];
   const [paying, decimals, priced, gasPrice] = await Promise.all([
-    readPayingPairs(chain, address, tokensOf(run), epochs),
+    shared.bribes().then((bribes) => readPayingPairs(chain, address, bribes, tokensOf(run), epochs)),
     readDecimals(chain.bulk, tokens),
     run.prices(tokens, until),
     chain.client.getGasPrice(),
@@ -658,16 +675,21 @@ async function readKlima(chain: Chain): Promise<Klima> {
   return { kvcm, payouts, retireBps, aggregator, creditToken, creditTokenId, carbonClass };
 }
 
-async function readDelegators(chain: Chain, conduit: Address, at: bigint) {
-  const { bulk } = chain;
-  const [minted] = await readMany<bigint>(bulk, [veCall(chain, "totalNftsMinted")]);
+/** The delegate of every veNFT at `at` (s), by id less one. */
+async function readDelegatees(chain: Chain, at: bigint): Promise<Address[]> {
+  const [minted] = await readMany<bigint>(chain.bulk, [veCall(chain, "totalNftsMinted")]);
   const ids = Array.from({ length: Number(minted) }, (_, i) => BigInt(i + 1));
-  const delegatees = await readMany<Address>(
-    bulk,
+  return readMany<Address>(
+    chain.bulk,
     ids.map((id) => veCall(chain, "delegates", [id, at])),
     { concurrency: CONCURRENCY },
   );
-  const mine = ids.filter((_, i) => isAddressEqual(delegatees[i]!, conduit));
+}
+
+/** The veNFTs whose delegate at `at` (s) was `conduit`, as `delegatees` gives them, with their owners. */
+async function readDelegators(chain: Chain, conduit: Address, at: bigint, delegatees: Address[]) {
+  const { bulk } = chain;
+  const mine = delegatees.flatMap((delegatee, i) => (isAddressEqual(delegatee, conduit) ? [BigInt(i + 1)] : []));
   const [details, [power]] = await Promise.all([
     readEach<Address | boolean | bigint>(
       bulk,
@@ -688,16 +710,26 @@ async function readDelegators(chain: Chain, conduit: Address, at: bigint) {
   }));
 }
 
-/** The contracts and tokens that may owe the delegators rewards, including those of pools whose gauge was killed. */
-async function readPayingPairs(chain: Chain, conduit: Address, tokens: Address[], epochs: bigint[]): Promise<Paying[]> {
-  const { bulk } = chain;
-  const read: Reader = <T>(calls: Call[]) => readMany<T>(bulk, calls, { concurrency: CONCURRENCY });
+/** Every fee and bribe contract once, including those of pools whose gauge was killed. */
+async function readContracts(chain: Chain): Promise<Bribe[]> {
+  const read: Reader = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
   const seen = new Set<string>();
-  const bribes = (await readBribes(chain, read)).filter(({ bribe }) => {
+  return (await readBribes(chain, read)).filter(({ bribe }) => {
     if (bribe === zeroAddress || seen.has(lower(bribe))) return false;
     seen.add(lower(bribe));
     return true;
   });
+}
+
+/** The contracts of `bribes` and the tokens that may owe the conduit's delegators rewards. */
+async function readPayingPairs(
+  chain: Chain,
+  conduit: Address,
+  bribes: Bribe[],
+  tokens: Address[],
+  epochs: bigint[],
+): Promise<Paying[]> {
+  const read: Reader = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
   const balances = await read<bigint>(
     bribes.flatMap(({ bribe }) => epochs.map((epoch) => bribeCall(bribe, "balanceOfOwnerAt", [conduit, epoch]))),
   );

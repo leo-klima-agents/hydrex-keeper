@@ -187,6 +187,8 @@ function fakeChain(w: World = world()) {
   const listed = new Map(w.pools.flatMap(([fees, other]) => [fees, other]));
   const sent: Hex[] = [];
   const earnedFor = new Set<string>();
+  /** Calls read, by function. */
+  const called = new Map<string, number>();
   let polls = 0;
   let reads = 0;
   const inFlight = new Map<Hex, Sent>();
@@ -365,6 +367,7 @@ function fakeChain(w: World = world()) {
       blockNumber?: bigint;
     }) => {
       if (contracts.some((c) => c.functionName === "earned")) reads++;
+      for (const { functionName } of contracts) called.set(functionName, (called.get(functionName) ?? 0) + 1);
       const owed = owedAt(blockNumber);
       const answer = (c: Call) => answerAt(c, owed);
       if (!allowFailure) return contracts.map(answer);
@@ -438,7 +441,7 @@ function fakeChain(w: World = world()) {
     ve: VE,
     ...(w.v2 ? { v2: { conduit: V2, proposer: proposer.address, priced: [USDC] } } : {}),
   };
-  return { chain, sent, earnedFor };
+  return { chain, sent, earnedFor, called };
 }
 
 const fromOf = (signed: Hex) => (isV2(parseTransaction(signed).to) ? proposer.address : signer.address);
@@ -535,7 +538,7 @@ test("the Klima Foundation's veNFTs are excluded", () => {
 });
 
 test("the immutable conduit's delegators are claimed for too, by the proposer, Klima Foundation included", async () => {
-  const { chain, sent, earnedFor } = fakeChain(world({ v2: true }));
+  const { chain, sent, earnedFor, called } = fakeChain(world({ v2: true }));
   const { swapper, asked } = fakeSwapper();
   assert.equal(await claims(runOf(chain), START, until(), swapper), 0);
   const [claim, ...more] = through(sent, true);
@@ -552,6 +555,8 @@ test("the immutable conduit's delegators are claimed for too, by the proposer, K
   );
   assert.deepEqual(asked, [USDC, HYDX], "only the Klima conduit's claim swaps");
   assert.deepEqual([...earnedFor].sort(), ["2", "4", "7", "8"]);
+  assert.equal(called.get("delegates"), 8, "one scan of the veNFTs for both conduits");
+  assert.equal(called.get("gauges"), 2, "one read of the bribe contracts for both");
 });
 
 test("each conduit's claims go on when the other's stop", async () => {
