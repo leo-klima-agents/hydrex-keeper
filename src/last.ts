@@ -36,6 +36,7 @@ const RECENT = 30; // plans kept per lane: more than come back for one block
 const RETRY_DELAY_MS = 5_000;
 const SHARED_READ_MS = 50; // the lanes share a read of the votes started this recently
 const REREAD_MS = 500; // after a read of the immutable conduit's values fails
+const FIRST_READ_WAIT_MS = 3_000; // the longest a plan waits for the immutable conduit's first values
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
@@ -219,11 +220,13 @@ export function pick(
 
 /**
  * The last value `read` gave, read again in the background once for each block, at its first call with that block's
- * `time`, and REREAD_MS after a read that fails; one read at a time. Only calls before any value wait for one.
+ * `time`, and REREAD_MS after a read that fails; one read at a time. Only calls before any value wait for one, and for
+ * `wait` ms at most: a read that hangs then holds back no plan.
  */
 export function refreshed<T>(
   read: () => Promise<T>,
   unread: (error: unknown) => void,
+  wait = FIRST_READ_WAIT_MS,
 ): (time: number) => Promise<{ value: T; version: number } | undefined> {
   let last: { value: T; version: number } | undefined;
   let reading: { time: number; done: Promise<void>; settled: boolean; failedAt?: number } | undefined;
@@ -247,7 +250,11 @@ export function refreshed<T>(
       );
       reading = entry;
     }
-    if (!last) await reading!.done;
+    if (!last) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([reading!.done, new Promise<void>((resolve) => (timer = setTimeout(resolve, wait)))]);
+      clearTimeout(timer);
+    }
     return last;
   };
 }
@@ -330,8 +337,8 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
 
   // The immutable conduit's own values and score are read only for a vote it would send. Its values of pools barely
   // move, and reading them takes long, so plans use the last ones read, read again in the background once per block,
-  // through the client for heavy reads. Its score of the vote in force moves with every vote, so it is read with each
-  // such plan.
+  // through the client for heavy reads; until the first comes, plans go without, and the simulation checks their votes.
+  // Its score of the vote in force moves with every vote, so it is read with each such plan.
   const valuesNow = refreshed(
     () => readValues(chain, chain.bulk, valued, "pending"),
     warnOnce("v2's values unread; its simulation checks the vote"),

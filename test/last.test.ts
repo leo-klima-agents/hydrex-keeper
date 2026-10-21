@@ -308,6 +308,25 @@ test("the immutable conduit's values: the last read, read again in the backgroun
   assert.equal(reads, 4, "read again shortly after");
 });
 
+test("plans wait for the immutable conduit's first values only so long, and go without while they are read", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  let answer: (value: number) => void = () => {};
+  const values = refreshed(
+    () => new Promise<number>((resolve) => (answer = resolve)),
+    () => {},
+    3_000,
+  );
+  const first = values(1);
+  t.mock.timers.tick(3_000);
+  assert.equal(await first, undefined, "a read that hangs holds back no plan");
+  const second = values(1);
+  t.mock.timers.tick(3_000);
+  assert.equal(await second, undefined, "nor any later one before it answers");
+  answer(7);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await values(1), { value: 7, version: 1 }, "the values once read");
+});
+
 test("the Klima conduit answers only an immutable conduit's vote ready to send in the same block", () => {
   const signed = prepared("0x01");
   assert.deepEqual(v2Answered(v2Plan(9, { prepared: signed }), 9, false), new Map([[zeroAddress, 5n]]));
