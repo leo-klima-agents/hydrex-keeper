@@ -95,12 +95,13 @@ less than 0.001 ETH, which is kept for the votes, or if another transaction of t
 - **`KEEPER`:** [`0x625CF6663d9D090535FBd57680bFFE6fA0262434`][keeper], the Cloud KMS HSM key `hydrex-keeper-v1`,
   version 1.
 - **`CONDUIT`:** [`0x692c323B425A9DfeebE302F56168a7798D93EAC5`][immutable], `ImmutableVeTokenConduit`, version 2.
-- **`PROPOSER`:** the Cloud KMS HSM key `hydrex-proposer-v1`, version 1, whose address is in hydrex-keeper-key's
-  `record/proposer.json`.
+- **`PROPOSER`:** [`0x52c139f60452B93e1211F116BD43B28d7AfC2bCa`][proposer], the Cloud KMS HSM key `hydrex-proposer-v1`,
+  version 1.
 
 [module]: https://basescan.org/address/0x750973E0CB728C3112561Bc8E9b235afA9B17E81
 [keeper]: https://basescan.org/address/0x625CF6663d9D090535FBd57680bFFE6fA0262434
 [immutable]: https://basescan.org/address/0x692c323B425A9DfeebE302F56168a7798D93EAC5
+[proposer]: https://basescan.org/address/0x52c139f60452B93e1211F116BD43B28d7AfC2bCa
 
 ## Setup
 
@@ -109,15 +110,17 @@ Needs `gcloud`, `jq` and `curl`. `sh/setup.sh` and `sh/deploy.sh` need `roles/ow
 to re-run.
 
 1. **Configure.** `cp config.env.example config.env`, then fill in `KEEPER_PROJECT` (a project for the job only),
-   `KMS_KEY_VERSION` (`version` in hydrex-keeper-key's `record/keeper.json`) and `ALERT_EMAIL`. `config.env` holds
-   public material only; the secrets live in Secret Manager.
+   `KMS_KEY_VERSION` and `PROPOSER_KMS_KEY_VERSION` (`version` in hydrex-keeper-key's `record/keeper.json` and
+   `record/proposer.json`) and `ALERT_EMAIL`. `config.env` holds public material only; the secrets live in Secret
+   Manager. To vote for the Klima conduit alone, empty `CONDUIT`, `PROPOSER` and `PROPOSER_KMS_KEY_VERSION`.
 2. **Create the resources.** `sh/setup.sh` enables the APIs and creates the job's and the scheduler's service accounts,
    the secrets, and email alerts on a failed execution or start. It prints the job's service account.
-3. **Grant the key.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`.
+3. **Grant the keys.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`.
 4. **Add the secrets.** `sh/setup.sh` prints the command that adds each: Base RPC URLs, separated by commas, and an
    Alchemy API key. Public RPCs are tried after yours.
-5. **Fund the keeper.** Send ETH on Base to `KEEPER`. A vote costs about 0.00005 ETH and a claim up to 0.0001 ETH, and
-   claims always leave 0.001 ETH for the votes. 0.01 ETH lasts about three months.
+5. **Fund the keeper and the proposer.** Send ETH on Base to `KEEPER` and `PROPOSER`. The keeper's vote costs about
+   0.00005 ETH and a claim up to 0.0001 ETH, and claims always leave 0.001 ETH for the votes: 0.01 ETH lasts it about
+   three months. The proposer's votes take more gas, and 0.01 ETH lasts it months.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build and deploys the job and its schedule. Run it again after
    any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs it with KMS, but
@@ -125,10 +128,10 @@ to re-run.
    `--dry-run`, `--claim` is refused while the schedule may be voting or claiming. The logs are in Cloud Run, one JSON
    object per line.
 
-To also vote for the immutable conduit: in hydrex-keeper-key, set `PROPOSER_KEY=hydrex-proposer-v1`, run its
-`sh/setup.sh`, then `sh/address.sh proposer` once the key is enabled, and commit `record/proposer.json`. Then set
-`CONDUIT`, and `PROPOSER` and `PROPOSER_KMS_KEY_VERSION` from that record, in `config.env`, send ETH on Base to
-`PROPOSER` (0.01 ETH lasts months), and redeploy.
+A deployment that votes for the Klima conduit alone adds the immutable conduit by setting `CONDUIT`, `PROPOSER` and
+`PROPOSER_KMS_KEY_VERSION` in `config.env` and in the repository variables of the `check` workflow, funding `PROPOSER`,
+and running `sh/deploy.sh`. hydrex-keeper-key's `sh/check.sh` confirms that the job's service account may sign with the
+proposer key.
 
 ## Checks
 
