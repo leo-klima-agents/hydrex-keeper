@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: CONDUIT, PROPOSER and PROPOSER_KMS_KEY_VERSION go together

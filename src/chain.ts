@@ -137,7 +137,12 @@ export type Chain = {
   keeper: Address;
   voter: Address;
   ve: Address;
+  /** The immutable conduit the job also votes for, if any; see connectV2. */
+  v2?: V2 | undefined;
 };
+
+/** The immutable conduit, the address that signs its votes, and the tokens it prices with Chainlink. */
+export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
 
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));

@@ -4,9 +4,10 @@ The Cloud Run job that casts the weekly Hydrex vote of the Klima "Carbon Impact"
 of the conduit's delegators after each epoch flip. It signs with the HSM-held key of
 [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key) and calls `vote` and `claimSwapAndDistribute` on the
 Safe module of [hydrex-conduit-executor](https://github.com/ldeso/hydrex-conduit-executor), which forwards them to the
-conduit. This repository holds the job in `src/`, whose only dependency is `viem`, the tokens whose rewards it counts
-and claims in `tokens.json`, and the scripts in `sh/` that create, deploy and check its Google Cloud project, with the
-IAM policies they write in `policy/`.
+conduit. It can also vote for the immutable conduit of [hydrex-conduit](https://github.com/ldeso/hydrex-conduit), which
+anyone may propose a vote to, with a second key. This repository holds the job in `src/`, whose only dependency is
+`viem`, the tokens whose rewards it counts and claims in `tokens.json`, and the scripts in `sh/` that create, deploy and
+check its Google Cloud project, with the IAM policies they write in `policy/`.
 
 ## How it votes
 
@@ -24,8 +25,33 @@ and priced in USD. A vote leaves out pools that would get less than 0.1% of the 
 pool adds gas, and a Base transaction may use at most 16.8M. When blocks are nearly full, the tip rises, up to 0.1 gwei.
 
 A failed execution exits non-zero, which emails `ALERT_EMAIL`, and Cloud Run retries it up to three times; a retry does
-what is still due. After the flip, the last pass checks where its votes landed and that the Voter shows a vote of the
-conduit this epoch, then claims.
+what is still due, and does not vote a day before the flip again for a conduit whose vote is in. After the flip, the
+last pass checks where its votes landed and that the Voter shows a vote of the conduit in the epoch that ended, then
+claims.
+
+## How it votes for the immutable conduit
+
+When `CONDUIT` is set, the job also votes for the immutable conduit, version 2 of hydrex-conduit, at the same times,
+with the same prices and in the same way, at most 20 pools to a vote, as that conduit allows. The proposer key signs its
+votes, which go straight to the conduit.
+
+- **The conduit's check.** Anyone may propose the conduit's vote, and it takes one only if its own score beats the vote
+  in force by $1. That score counts only WETH, cbBTC, USDC and EURC at their Chainlink prices, and some trading fees.
+  The job values a vote at its own prices, then checks that score as the vote is sent, rounded to basis points, aiming
+  for $1.10: when its best vote falls short, it sends the best vote at its prices that clears it.
+- **Both conduits.** In the last blocks, each conduit plans apart. The Klima conduit's vote answers the immutable
+  conduit's vote ready for the same block, as it would any other vote, and that one is checked after the Klima conduit's
+  too, so that it clears its check whichever lands first. At each deadline, the job sends the freshest pair of plans
+  checked together, so either conduit may send a plan a few hundred ms older than its latest; with no such pair, only
+  the Klima conduit votes in that block. Neither conduit gives up rewards for the other. Voting for both costs the Klima
+  conduit about 1–2% of its rewards, as any well-run conduit voting on the same pools would.
+- **Votes of others.** A vote of someone else for the conduit, in the block being built, takes that block: the job then
+  does not send one, and the Klima conduit's vote answers it.
+- **Each on its own.** Neither conduit's failure stops the other's votes. The immutable conduit keeps voting if the
+  Klima conduit has no voting power or refuses the keeper's votes, for example after losing its executor role, and the
+  Klima conduit keeps voting and claiming if `CONDUIT` is unusable. Either fails the execution.
+
+The job does not claim for the immutable conduit's delegators.
 
 ## How it claims
 
@@ -58,6 +84,9 @@ less than 0.001 ETH, which is kept for the votes, or if another transaction of t
 - **The rest is checked on chain.** The module checks the caller; the conduit and the Voter check gauges, voting power
   and the epoch. For a claim, the conduit also checks that the veNFT lets it claim, and that each swap goes through a
   router it approves and buys a token it pays out.
+- **The proposer key has no privileges.** Anyone may propose the immutable conduit's vote, so its key can do nothing
+  more than any account; it only holds the ETH that pays for those votes. It is a second HSM key, and the job's service
+  account is its only signer too.
 
 ## Deployment
 
@@ -65,9 +94,14 @@ less than 0.001 ETH, which is kept for the votes, or if another transaction of t
 - **`MODULE`:** [`0x750973E0CB728C3112561Bc8E9b235afA9B17E81`][module], `KlimaVeTokenConduitExecutor`.
 - **`KEEPER`:** [`0x625CF6663d9D090535FBd57680bFFE6fA0262434`][keeper], the Cloud KMS HSM key `hydrex-keeper-v1`,
   version 1.
+- **`CONDUIT`:** [`0x692c323B425A9DfeebE302F56168a7798D93EAC5`][immutable], `ImmutableVeTokenConduit`, version 2.
+- **`PROPOSER`:** [`0x52c139f60452B93e1211F116BD43B28d7AfC2bCa`][proposer], the Cloud KMS HSM key `hydrex-proposer-v1`,
+  version 1.
 
 [module]: https://basescan.org/address/0x750973E0CB728C3112561Bc8E9b235afA9B17E81
 [keeper]: https://basescan.org/address/0x625CF6663d9D090535FBd57680bFFE6fA0262434
+[immutable]: https://basescan.org/address/0x692c323B425A9DfeebE302F56168a7798D93EAC5
+[proposer]: https://basescan.org/address/0x52c139f60452B93e1211F116BD43B28d7AfC2bCa
 
 ## Setup
 
@@ -76,15 +110,17 @@ Needs `gcloud`, `jq` and `curl`. `sh/setup.sh` and `sh/deploy.sh` need `roles/ow
 to re-run.
 
 1. **Configure.** `cp config.env.example config.env`, then fill in `KEEPER_PROJECT` (a project for the job only),
-   `KMS_KEY_VERSION` (`version` in hydrex-keeper-key's `record/keeper.json`) and `ALERT_EMAIL`. `config.env` holds
-   public material only; the secrets live in Secret Manager.
+   `KMS_KEY_VERSION` and `PROPOSER_KMS_KEY_VERSION` (`version` in hydrex-keeper-key's `record/keeper.json` and
+   `record/proposer.json`) and `ALERT_EMAIL`. `config.env` holds public material only; the secrets live in Secret
+   Manager. To vote for the Klima conduit alone, empty `CONDUIT`, `PROPOSER` and `PROPOSER_KMS_KEY_VERSION`.
 2. **Create the resources.** `sh/setup.sh` enables the APIs and creates the job's and the scheduler's service accounts,
    the secrets, and email alerts on a failed execution or start. It prints the job's service account.
-3. **Grant the key.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`.
+3. **Grant the keys.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`.
 4. **Add the secrets.** `sh/setup.sh` prints the command that adds each: Base RPC URLs, separated by commas, and an
    Alchemy API key. Public RPCs are tried after yours.
-5. **Fund the keeper.** Send ETH on Base to `KEEPER`. A vote costs about 0.00005 ETH and a claim up to 0.0001 ETH, and
-   claims always leave 0.001 ETH for the votes. 0.01 ETH lasts about three months.
+5. **Fund the keeper and the proposer.** Send ETH on Base to `KEEPER` and `PROPOSER`. The keeper's vote costs about
+   0.00005 ETH and a claim up to 0.0001 ETH, and claims always leave 0.001 ETH for the votes: 0.01 ETH lasts it about
+   three months. The proposer's votes take more gas, and 0.01 ETH lasts it months.
 6. **Deploy.** `sh/deploy.sh` builds the image with Cloud Build and deploys the job and its schedule. Run it again after
    any change to `src/` or `tokens.json`.
 7. **Try it.** `sh/run.sh --dry-run --now` runs the vote of a day before the flip at once and signs it with KMS, but
@@ -92,11 +128,16 @@ to re-run.
    `--dry-run`, `--claim` is refused while the schedule may be voting or claiming. The logs are in Cloud Run, one JSON
    object per line.
 
+A deployment that votes for the Klima conduit alone adds the immutable conduit by setting `CONDUIT`, `PROPOSER` and
+`PROPOSER_KMS_KEY_VERSION` in `config.env` and in the repository variables of the `check` workflow, funding `PROPOSER`,
+and running `sh/deploy.sh`. hydrex-keeper-key's `sh/check.sh` confirms that the job's service account may sign with the
+proposer key.
+
 ## Checks
 
 `sh/check.sh` compares the live project with `config.env` and `policy/`, read-only: the job, its schedule, the secrets,
 the service accounts, IAM and the alerts. It also fails if the keeper holds less than 0.002 ETH, to warn before the
-claims stop at 0.001 ETH.
+claims stop at 0.001 ETH, and if the proposer does, before it cannot pay for a vote in busy blocks.
 
 The `check` workflow runs it every Friday, after the vote, and on demand. It signs in through Workload Identity
 Federation as a service account with the roles above, named by the `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT` repository
@@ -124,16 +165,23 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter
   until an hour after the flip.
+- **Immutable conduit:** without voting power this epoch, it gets no vote, and the job logs a warning. While Base's
+  sequencer is down, and for an hour after, it takes no vote, so its votes fail the execution. When its own values
+  cannot be read, the simulation of each vote is the only check. The proposer's balance works as the keeper's, and logs
+  `fund the proposer`. A `CONDUIT` that is not such a conduit, on the Klima conduit's Voter, that cannot be read in
+  three tries, or that comes without `PROPOSER` and its key, is left out and fails the execution.
+- **Klima conduit:** without voting power this epoch, it gets no vote, and the job fails the execution; the immutable
+  conduit still votes.
 
 ## Development
 
 Needs Node 26. Run `npm ci`, then `npm run typecheck`, `npm test` and `npm run format` before committing.
 `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URLS=… npm run dry-run` runs the vote of a day before the
-flip against Base without KMS, and sends nothing; `npm run dry-run-claim` does the same with the claims.
-`test/sh/golden.sh` runs the scripts under `dash` (or `$TEST_SH`) against a fake `gcloud` and `curl` and compares the
-calls and output with `test/sh/golden/`; `--update` rewrites them. CI runs the type check, the tests, Prettier, the
-golden tests, `shellcheck` and `reuse lint`, and builds the image. Dependabot updates the pinned Actions, npm packages
-and base images.
+flip against Base without KMS, and sends nothing; `npm run dry-run-claim` does the same with the claims. With `CONDUIT`
+and `PROPOSER` set too, the dry run also plans the immutable conduit's vote. `test/sh/golden.sh` runs the scripts under
+`dash` (or `$TEST_SH`) against a fake `gcloud` and `curl` and compares the calls and output with `test/sh/golden/`;
+`--update` rewrites them. CI runs the type check, the tests, Prettier, the golden tests, `shellcheck` and `reuse lint`,
+and builds the image. Dependabot updates the pinned Actions, npm packages and base images.
 
 ## Limitations
 
@@ -145,6 +193,9 @@ and base images.
 - Rewards that never add up to $5 are never claimed. Swaps lose more as they grow: about 4.5% for $1,000 of USDC. Each
   swap also raises kVCM's price for the claims after it, so the veNFTs with the least to claim, which are claimed last,
   get slightly less kVCM.
+- Anyone may vote for the immutable conduit, and the Voter takes one of its votes per block. Someone who votes for it in
+  every block near the flip keeps the job's vote out, though each of their votes must score $1 more on the conduit's
+  check than the one before. The job does not yet bid against them.
 
 ## License
 
