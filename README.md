@@ -26,10 +26,11 @@ and priced in USD. A vote leaves out pools that would get less than 0.1% of the 
 pool adds gas, and a Base transaction may use at most 16.8M. When blocks are nearly full, the tip rises, up to 0.1 gwei.
 
 A failed execution exits non-zero, which emails `ALERT_EMAIL`, and Cloud Run retries it up to three times; a retry does
-what is still due, and does not vote a day before the flip again for a conduit whose vote is in: for the immutable
-conduit, only if the proposer sent the vote in force. A retry that starts once nothing is due succeeds at once: the
-attempt that was due already failed for what is wrong. After the flip, the last pass checks where its votes landed and
-that the Voter shows a vote of the conduit in the epoch that ended, then claims.
+what is still due, and does not vote a day before the flip again for a conduit whose vote is in when its turn comes: for
+the immutable conduit, only if the proposer sent the vote in force. A retry that starts once nothing is due succeeds at
+once, since the attempt that was due already failed for what is wrong; a first attempt fails, so that a schedule that
+misses its window alerts. After the flip, the last pass checks where its votes landed and that the Voter shows a vote of
+the conduit in the epoch that ended, then claims.
 
 ## How it votes for the immutable conduit
 
@@ -171,10 +172,10 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
 - **Keeper balance:** a vote needs twice its maximum cost in the keeper, so that it leaves enough to vote in the last
   blocks; a vote in the last blocks needs it once; a claim needs it plus 0.001 ETH. Short of that, the job refuses to
   vote or claim and logs `fund the keeper`.
-- **Claims:** a claim that fails, or claims still left when the hour ends, fail the execution; the retry or the next
-  week's claims take what is left. A conduit's claims stop if its key cannot pay, if another of that key's transactions
-  is pending, or if a claim's outcome is unknown. A token KyberSwap cannot swap is left out, and a wrong answer from
-  KyberSwap fails the execution.
+- **Claims:** a conduit's reads before its claims are tried three times. A claim that fails, or claims still left when
+  the hour ends, fail the execution; the next week's claims, or `sh/run.sh --claim`, take what is left. A conduit's
+  claims stop if its key cannot pay, if another of that key's transactions is pending, or if a claim's outcome is
+  unknown. A token KyberSwap cannot swap is left out, and a wrong answer from KyberSwap fails the execution.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter

@@ -7,12 +7,12 @@ import { connectV2 } from "./immutable.ts";
 import { kmsAccount } from "./kms.ts";
 import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
-import { pass, passV2, perAttempt, readDayBefore, type Run } from "./pass.ts";
+import { pass, passV2, perAttempt, readDayBefore, votedDayBefore, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
-import { DAY, due, HORIZON, lastFlip } from "./schedule.ts";
+import { DAY, HORIZON, lastFlip, task } from "./schedule.ts";
 import type { Vote } from "./select.ts";
-import { klimaSender, v2Sender, votedAt, VoteSent, type Sender } from "./vote.ts";
+import { klimaSender, v2Sender, VoteSent, type Sender } from "./vote.ts";
 import { parseWhitelist } from "./whitelist.ts";
 
 // Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
@@ -74,40 +74,22 @@ async function main(): Promise<number> {
 
   const run: Run = { chain, tokens, prices: priceFeed(source), account, proposer, dryRun };
   const epoch = await readEpoch(chain);
-  const scheduled = due(epoch.flip, now());
-  // A vote or a claim sent by hand could take the nonce of what the schedule sends at the same time. A dry run sends
-  // nothing.
-  const sends = { claims: "claims", "day before": "vote of a day before the flip", "last blocks": "last-block votes" };
-  const byHand = claimNow ? "--claim" : immediately ? "--now" : undefined;
-  if (byHand && scheduled && !dryRun) {
-    throw new Error(`${byHand} would race the scheduled ${sends[scheduled]}: run it later`);
+  const retry = Number(process.env.CLOUD_RUN_TASK_ATTEMPT ?? 0) > 0;
+  const todo = task(epoch.flip, now(), { now: immediately, claim: claimNow, dryRun, retry });
+  if (todo.what === undefined) {
+    // Whatever else is wrong, an unusable CONDUIT or a minter that has not started the epoch included; see `task`.
+    const message = "nothing due: the job votes a day before the flip and in its last blocks, and claims after it";
+    (todo.exit ? log.error : log.warning)(message, { flip: epoch.flip, retry });
+    return todo.exit;
   }
-  const what = claimNow ? "claims" : immediately ? "day before" : scheduled;
+  const { what, recheck } = todo;
   if (what === "claims") {
     const flip = lastFlip(epoch.flip, now());
     const until = claimNow ? Date.now() + Number(HORIZON) * 1000 : Number(flip + HORIZON) * 1000;
     return (await claims(run, flip, until)) || failed ? 1 : 0;
   }
-  if (!what && epoch.flip <= now() && now() - epoch.flip < 2n * HORIZON) {
-    // Retries of claims that waited all hour for the minter end here, and succeed on purpose, whatever else is wrong, an
-    // unusable CONDUIT included: the attempt that waited already failed, and alerted, for all of it. Failing again would
-    // only start another retry that ends here too.
-    log.warning("nothing due: the hour of the claims is over, and the minter has not started the epoch", {
-      flip: epoch.flip,
-    });
-    return 0;
-  }
   assertFresh(epoch);
   const { flip } = epoch;
-  if (!what) {
-    // Only a retry that starts after what it was for, or a run by hand, ends here. It succeeds whatever else is wrong, an
-    // unusable CONDUIT included: the attempt that was due already failed, and alerted, for it, and failing again would
-    // only start another retry that ends here too.
-    log.warning("nothing due: the job votes a day before the flip and in its last blocks, and claims after it", {
-      flip,
-    });
-    return 0;
-  }
   // Each conduit votes if it has voting power this epoch, whatever becomes of the other.
   const klima = epoch.power > 0n;
   if (!klima) {
@@ -124,28 +106,21 @@ async function main(): Promise<number> {
   if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
-  // A retry of a failed execution does not vote again for a conduit whose vote of a day before is in: for the immutable
-  // conduit, which anyone may vote for, only if the proposer sent the vote in force. The first execution votes whatever
-  // the conduits' last votes.
-  const retry = Number(process.env.CLOUD_RUN_TASK_ATTEMPT ?? 0) > 0;
-  const voted = async (sender: Sender, lastVoted: bigint | undefined) => {
-    const recent = retry && !immediately && lastVoted !== undefined && lastVoted >= flip - DAY - HORIZON;
-    if (!recent || (sender.open && !(await votedAt(chain, sender, lastVoted)))) return false;
-    log.info("already voted a day before the flip", { conduit: sender.conduit, lastVoted });
-    return true;
-  };
+  // A retry of the schedule's vote does not vote again for a conduit whose vote of a day before is in, as the Voter
+  // shows it when that conduit's turn comes. The first execution votes whatever the conduits' last votes.
+  const voted = async (sender: Sender) => recheck && (await votedDayBefore(chain, sender, flip));
   const reads = perAttempt(() => readDayBefore(run, until));
   // The immutable conduit votes once the Klima conduit's vote is in, or has failed, so that its check counts the votes
   // that one moves, and is checked after it too, as it may still be pending. The two are retried apart, and either
   // votes whatever becomes of the other.
   let klimaVote: Vote | undefined;
   const klimaPass = async (attempt: number) => {
-    if (await voted(klimaSender(chain), epoch.lastVoted)) return;
-    await pass(run, await reads(attempt), until, (vote) => (klimaVote = vote));
+    if (await voted(klimaSender(chain))) return;
+    klimaVote = await pass(run, await reads(attempt), until);
   };
   const klimaDone = !klima || (await attempts("pass", klimaPass, until));
   const v2Pass = async (attempt: number) => {
-    if (await voted(v2Sender(chain), epoch.v2?.lastVoted)) return;
+    if (await voted(v2Sender(chain))) return;
     await passV2(run, await reads(attempt), until, klimaVote);
   };
   const v2Done = !v2 || (await attempts("v2 pass", v2Pass, until));

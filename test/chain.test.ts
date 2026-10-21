@@ -5,7 +5,17 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { keccak256, type Hex } from "viem";
 import { base } from "viem/chains";
-import { broadcaster, CHUNK, HEDGE_DELAY_MS, hedged, hostOf, readMany, type Call, type Client } from "../src/chain.ts";
+import {
+  broadcaster,
+  CHUNK,
+  HEDGE_DELAY_MS,
+  hedged,
+  hostOf,
+  lastBlockBefore,
+  readMany,
+  type Call,
+  type Client,
+} from "../src/chain.ts";
 import { errorMessage } from "../src/log.ts";
 
 type Answer = { delay?: number; hang?: boolean; status?: number; error?: { code: number; message: string } };
@@ -192,4 +202,23 @@ test("readMany can send smaller chunks, a few at a time, and still keeps their o
     results,
     calls.map((_, i) => i),
   );
+});
+
+test("the last block before a time is found whatever the block time, near the head or an hour back", async () => {
+  const head = 40_000_000n;
+  for (const seconds of [1n, 2n, 5n]) {
+    const timeOf = (n: bigint) => 1_790_812_800n - seconds * (head - n);
+    const client = {
+      getBlock: async (args?: { blockNumber?: bigint }) => {
+        const number = args?.blockNumber ?? head;
+        assert.ok(number <= head, "no block past the latest");
+        return { number, timestamp: timeOf(number) };
+      },
+    } as unknown as Client;
+    for (const back of [0n, 1n, 9n, 3_600n, 3_601n]) {
+      const time = timeOf(head) - back;
+      const found = await lastBlockBefore(client, time);
+      assert.ok(timeOf(found) < time && timeOf(found + 1n) >= time, `${seconds} s blocks, ${back} s back: ${found}`);
+    }
+  }
 });

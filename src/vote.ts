@@ -1,8 +1,7 @@
 import {
+  decodeFunctionData,
   encodeFunctionData,
-  isAddressEqual,
   parseGwei,
-  toFunctionSelector,
   WaitForTransactionReceiptTimeoutError,
   type Abi,
   type Address,
@@ -21,7 +20,6 @@ const CONGESTED = 0.9; // in a block this full, the builder picks by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
 const MAX_GAS = 16_777_216n; // per transaction on Base, since its Azul upgrade
-const VOTE = toFunctionSelector("vote(address[],uint256[])"); // the module's and the immutable conduit's
 
 /** Failed after the transaction was sent: retrying would send another one. */
 export class VoteSent extends Error {}
@@ -332,19 +330,40 @@ async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): P
 }
 
 /**
- * Whether the vote of the sender's conduit that the Voter recorded at `lastVoted` (s) is the sender's: the Voter takes
- * one vote of a conduit per block, so it is if a vote the sender sent succeeded in the block at that time.
+ * Whether the vote of the immutable conduit that the Voter recorded at `lastVoted` (s) is the sender's: the conduit
+ * accepted a vote the sender proposed in the block at that time, and the Voter takes one vote of a conduit per block.
  */
-export async function votedAt({ client }: Chain, { from, to }: Sender, lastVoted: bigint): Promise<boolean> {
-  const blockNumber = await lastBlockBefore(client, lastVoted + 1n);
-  const { transactions } = await client.getBlock({ blockNumber, includeTransactions: true });
-  const votes = transactions.filter(
-    (tx) => isAddressEqual(tx.from, from) && tx.to && isAddressEqual(tx.to, to) && tx.input.startsWith(VOTE),
+export async function votedAt({ client }: Chain, { from, conduit }: Sender, lastVoted: bigint): Promise<boolean> {
+  const block = await lastBlockBefore(client, lastVoted + 1n);
+  const accepted = await client.getContractEvents({
+    address: conduit,
+    abi: immutableAbi,
+    eventName: "VoteAccepted",
+    args: { proposer: from },
+    fromBlock: block,
+    toBlock: block,
+  });
+  return accepted.length > 0;
+}
+
+/**
+ * The vote this process sent last for the sender, while it may still land: until its receipt is seen, while a
+ * transaction of the sender is pending at its nonce. Unknown counts as pending.
+ */
+export async function pendingVote(chain: Chain, { from, abi, client }: Sender): Promise<Vote | undefined> {
+  const last = sentBy(chain.client).get(lower(from));
+  if (!last || last.mined) return undefined;
+  const { functionName, args } = decodeFunctionData({ abi, data: last.data });
+  if (functionName !== "vote") return undefined;
+  const pending = await Promise.all([
+    client.getTransactionCount({ address: from, blockTag: "latest" }),
+    client.getTransactionCount({ address: from, blockTag: "pending" }),
+  ]).then(
+    ([latest, next]) => latest <= last.nonce && last.nonce < next,
+    () => true,
   );
-  for (const { hash } of votes) {
-    if ((await client.getTransactionReceipt({ hash })).status === "success") return true;
-  }
-  return false;
+  const [pools, weights] = args as readonly [readonly Address[], readonly bigint[]];
+  return pending ? { pools: [...pools], weights: [...weights] } : undefined;
 }
 
 /** Checks that the Voter recorded `vote` for `conduit` as of block `blockNumber`. */

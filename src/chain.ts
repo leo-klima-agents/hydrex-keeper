@@ -218,21 +218,40 @@ const reverted = (error: unknown, { address }: Call) =>
   isAddressEqual(error.contractAddress, address) &&
   error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
 
-/** The number of the last block before `time` (s): estimated from the latest block, then checked. */
+/**
+ * The number of the last block before `time` (s): estimated from the latest block, then checked with the block after
+ * it. If the estimate is off, as when the block time changes, steps that double from it bracket the block, and halving
+ * them finds it.
+ */
 export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
   const head = await client.getBlock();
   if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
-  let number = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
-  for (let step = 0; step < 20; step++) {
-    const [block, next] = await Promise.all([
-      client.getBlock({ blockNumber: number }),
-      client.getBlock({ blockNumber: number + 1n }),
-    ]);
-    if (block.timestamp >= time) number--;
-    else if (next.timestamp < time) number++;
-    else return number;
+  const before = async (blockNumber: bigint) => (await client.getBlock({ blockNumber })).timestamp < time;
+  const estimate = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
+  // `lo` is before `time`, and `hi` is not: the head is not.
+  let lo = estimate < 0n ? 0n : estimate < head.number ? estimate : head.number - 1n;
+  let hi = lo + 1n;
+  const [loBefore, hiBefore] = await Promise.all([before(lo), before(hi)]);
+  if (!loBefore) {
+    for (let step = 1n; ; step *= 2n) {
+      hi = lo;
+      lo = hi > step ? hi - step : 0n;
+      if (await before(lo)) break;
+      if (lo === 0n) throw new Error(`no block before ${time}`);
+    }
+  } else if (hiBefore) {
+    for (let step = 1n; ; step *= 2n) {
+      lo = hi;
+      hi = lo + step < head.number ? lo + step : head.number;
+      if (!(await before(hi))) break;
+    }
   }
-  throw new Error(`no block found just before ${time}`);
+  while (hi - lo > 1n) {
+    const mid = (lo + hi) / 2n;
+    if (await before(mid)) lo = mid;
+    else hi = mid;
+  }
+  return lo;
 }
 
 async function multicall(

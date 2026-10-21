@@ -1,11 +1,12 @@
 import { formatUnits, type Address, type LocalAccount } from "viem";
-import type { Chain } from "./chain.ts";
+import { readMany, voterCall, type Chain } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { log, warnOnce } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
+import { DAY, HORIZON } from "./schedule.ts";
 import { proportional, toVote, type Vote } from "./select.ts";
-import { castVote, klimaSender, v2Sender, VoteSent } from "./vote.ts";
+import { castVote, klimaSender, pendingVote, v2Sender, votedAt, type Sender } from "./vote.ts";
 import type { Whitelist } from "./whitelist.ts";
 
 export type Run = {
@@ -67,31 +68,35 @@ export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Prom
 }
 
 /**
- * The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. `sent` gets it once cast, or
- * once it failed after it was sent: either way, it may still be pending.
+ * Whether the sender's conduit has its vote of a day before `flip` in, as the Voter shows it now: a vote since an hour
+ * before that time, and for an open conduit, which anyone may vote for, one the sender sent.
  */
-export async function pass(
-  run: Run,
-  { pools, priced }: DayBefore,
-  until: number,
-  sent: (vote: Vote) => void,
-): Promise<void> {
+export async function votedDayBefore(chain: Chain, sender: Sender, flip: bigint): Promise<boolean> {
+  const { conduit } = sender;
+  const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [conduit])]);
+  if (lastVoted! < flip - DAY - HORIZON) return false;
+  if (sender.open && !(await votedAt(chain, sender, lastVoted!))) return false;
+  log.info("already voted a day before the flip", { conduit, lastVoted });
+  return true;
+}
+
+/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. Returns it once cast. */
+export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<Vote | undefined> {
   const fractions = proportional(valueRewards(run, pools, priced, true));
-  if (!fractions) return log.info("no pool pays anything; keeping the current vote");
-  const vote = toVote(pools, fractions);
-  try {
-    await castVote(run.chain, run.account, vote, run.dryRun, until);
-  } catch (error) {
-    if (error instanceof VoteSent) sent(vote);
-    throw error;
+  if (!fractions) {
+    log.info("no pool pays anything; keeping the current vote");
+    return undefined;
   }
-  sent(vote);
+  const vote = toVote(pools, fractions);
+  await castVote(run.chain, run.account, vote, run.dryRun, until);
+  return vote;
 }
 
 /**
  * The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check,
- * after `klima`, the Klima conduit's vote of the same pass, too: that one may still be pending. When the conduit's own
- * values cannot be read, the simulation checks it.
+ * after the Klima conduit's vote too while that one may still land: the vote the keeper sent last, while it is pending,
+ * or in a dry run `klima`, the vote of the same pass it did not send. When the conduit's own values cannot be read, the
+ * simulation checks it.
  */
 export async function passV2(run: Run, { pools, priced }: DayBefore, until: number, klima?: Vote): Promise<void> {
   const { chain } = run;
@@ -107,6 +112,8 @@ export async function passV2(run: Run, { pools, priced }: DayBefore, until: numb
   const { vote, note, summary } = decideV2(state, valueRewards(run, state.pools, priced, false), onchain, true);
   if (!vote) return log.info(note, { conduit, ...summary });
   log.info("v2 vote", { conduit, ...summary });
-  const rival = klima && { sender: klimaSender(chain), vote: klima };
+  const keeper = klimaSender(chain);
+  const landing = run.dryRun ? klima : await pendingVote(chain, keeper);
+  const rival = landing && { sender: keeper, vote: landing };
   await castVote(chain, run.proposer, vote, run.dryRun, until, v2Sender(chain), rival);
 }

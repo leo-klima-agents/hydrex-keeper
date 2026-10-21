@@ -91,8 +91,8 @@ type World = {
   stale?: boolean;
   /** earned() reads zero for this token after the first read. */
   hide?: Address;
-  ownersFail?: boolean;
-  /** How many reads of the delegates fail first, as on a node that times out. */
+  /** How many reads of the owners fail first, as on a node error, and of the delegates, as on a timeout. */
+  ownersFail?: number;
   delegatesFail?: number;
   balance?: bigint;
   proposerBalance?: bigint;
@@ -193,7 +193,7 @@ function fakeChain(w: World = world()) {
   const called = new Map<string, number>();
   let polls = 0;
   let reads = 0;
-  let delegatesFail = w.delegatesFail ?? 0;
+  let [ownersFail, delegatesFail] = [w.ownersFail ?? 0, w.delegatesFail ?? 0];
   const inFlight = new Map<Hex, Sent>();
   let head = 40n;
   /** What is owed from each block on: each claim mined adds one. */
@@ -375,7 +375,7 @@ function fakeChain(w: World = world()) {
       const owed = owedAt(blockNumber);
       const answer = (c: Call) => answerAt(c, owed);
       if (!allowFailure) return contracts.map(answer);
-      if (w.ownersFail && contracts.some((c) => c.functionName === "ownerOf")) {
+      if (contracts.some((c) => c.functionName === "ownerOf") && ownersFail-- > 0) {
         // A node error (-32603) looks like a revert of the multicall contract.
         const error = failed({ address: MULTICALL3, functionName: "aggregate3" }, reverts("aggregate3"));
         return contracts.map(() => ({ status: "failure", error }));
@@ -562,7 +562,7 @@ test("the immutable conduit's delegators are claimed for too, by the proposer, K
   assert.deepEqual([...earnedFor].sort(), ["2", "4", "7", "8"]);
   assert.equal(called.get("delegates"), 8, "one scan of the veNFTs for both conduits");
   assert.equal(called.get("gauges"), 2, "one read of the bribe contracts for both");
-  assert.equal(called.get("firstBribeTimestamp"), 4, "one of each contract's first bribe, for both");
+  assert.equal(called.get("firstBribeTimestamp"), 6, "of the three contracts that pay each conduit: I2 pays none");
   assert.equal(called.get("decimals"), 4 + ODD.length, "one of the decimals, for both");
 });
 
@@ -759,10 +759,15 @@ test("a claim must leave the keeper enough for the next votes", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a node that fails to read the owners fails the claims: its veNFTs are not taken for burned", async () => {
-  const { chain, sent } = fakeChain(world({ ownersFail: true }));
-  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 1);
-  assert.equal(sent.length, 0);
+test("a conduit's reads that fail are read again; a node that keeps failing to read the owners fails the claims", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Number(START) * 1000 + 10_000 });
+  const once = fakeChain(world({ ownersFail: 1 }));
+  assert.equal(await drive(t, claims(runOf(once.chain), START, until(), fakeSwapper().swapper)), 0);
+  assert.equal(once.sent.length, 1, "claimed at the second try");
+  const { chain, sent, called } = fakeChain(world({ ownersFail: Infinity }));
+  assert.equal(await drive(t, claims(runOf(chain), START, until(), fakeSwapper().swapper)), 1);
+  assert.equal(sent.length, 0, "its veNFTs are not taken for burned");
+  assert.equal(called.get("ownerOf"), 3 * 5, "three tries for its five delegators");
 });
 
 async function drive<T>(t: TestContext, promise: Promise<T>): Promise<T> {

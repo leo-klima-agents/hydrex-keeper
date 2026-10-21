@@ -14,14 +14,13 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { immutableAbi, moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { pass, type Run } from "../src/pass.ts";
-import type { Vote } from "../src/select.ts";
 import {
   broadcastTx,
   castVote,
   klimaSender,
   markMined,
   nonceTaken,
+  pendingVote,
   prepareVote,
   v2Sender,
   votedAt,
@@ -444,62 +443,44 @@ test("with a rival vote, the vote is also simulated after it, and refused if it 
   );
 });
 
-test("the Klima conduit's vote a day before counts as pending once sent, even when its outcome is unknown", async () => {
-  const token = addr(8);
-  const run = (chain: Chain) => ({ chain, tokens: [{ token, name: "TKN" }], account: signer, dryRun: false }) as Run;
-  const dayBefore = {
-    pools: [{ pool: POOL, rewards: [{ token, amount: 10n ** 18n, decimals: 18 }] }],
-    priced: new Map([[token, 1]]),
+test("another conduit's vote is checked after the keeper's while that one may still land, and only then", async () => {
+  const pendingAfter = async (b: Behaviour) => {
+    const { chain } = fakeChain(b);
+    await castVote(chain, signer, vote, false, far).catch(() => undefined);
+    return pendingVote(chain, klimaSender(chain));
   };
-  const sent: Vote[] = [];
-  const lost = fakeChain({ receipt: "lost" });
-  await assert.rejects(
-    pass(run(lost.chain), dayBefore, far, (vote) => sent.push(vote)),
-    VoteSent,
-  );
-  assert.deepEqual(sent, [{ pools: [POOL], weights: [10_000n] }]);
-  const refused = fakeChain({ reverts: true });
-  await assert.rejects(
-    pass(run(refused.chain), dayBefore, far, (vote) => sent.push(vote)),
-    /VoteDelayNotMet/,
-  );
-  assert.equal(sent.length, 1, "a vote that was never sent is not");
+  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "lost" }), vote, "its outcome unknown");
+  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "timeout" }), vote, "not in a block yet");
+  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, sendFails: true }), vote, "a node has it after all");
+  assert.equal(await pendingAfter({ nonce: 3, sendFails: true }), undefined, "no node has it");
+  assert.equal(await pendingAfter({ nonce: 3, pending: 4, receipt: "reverted" }), undefined, "it reverted");
+  assert.equal(await pendingAfter({ nonce: 3, pending: 4 }), undefined, "it is in force");
+  assert.equal(await pendingAfter({ nonce: 3, pending: 4, reverts: true }), undefined, "it was never sent");
 });
 
-test("the immutable conduit's vote in force is the proposer's only if a vote it sent succeeded in that block", async () => {
+test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer", async () => {
   const VOTED = 1_790_812_000n; // the timestamp of block 100
-  const voteData = encodeFunctionData({ abi: immutableAbi, functionName: "vote", args: [[POOL], [1n]] });
-  const claimData = encodeFunctionData({ abi: immutableAbi, functionName: "claim", args: [1n, [], [], []] });
-  type Sent = { from: Address; to: Address; input: Hex; status: "success" | "reverted" };
-  const votedBy = async (txs: Sent[]) => {
+  type Filter = {
+    address: Address;
+    eventName: string;
+    args: { proposer: Address };
+    fromBlock: bigint;
+    toBlock: bigint;
+  };
+  const acceptedFrom = async (proposers: Address[]) => {
     const client = {
-      getBlock: async (args?: { blockNumber?: bigint; includeTransactions?: boolean }) => {
+      getBlock: async (args?: { blockNumber?: bigint }) => {
         const number = args?.blockNumber ?? 130n;
-        const transactions = number === 100n ? txs.map((tx, i) => ({ ...tx, hash: `0x${i}` })) : [];
-        return { number, timestamp: VOTED + (number - 100n) * 2n, transactions };
+        return { number, timestamp: VOTED + (number - 100n) * 2n };
       },
-      getTransactionReceipt: async ({ hash }: { hash: Hex }) => ({ status: txs[Number(hash)]!.status }),
+      getContractEvents: async ({ address, eventName, args, fromBlock, toBlock }: Filter) => {
+        assert.deepEqual([address, eventName, fromBlock, toBlock], [V2, "VoteAccepted", 100n, 100n]);
+        return proposers.filter((p) => p === args.proposer).map(() => ({}));
+      },
     } as unknown as Client;
     const chain = { client, v2Client: client, v2: { conduit: V2, proposer: proposer.address, priced: [] } };
     return votedAt(chain as unknown as Chain, v2Sender(chain as unknown as Chain), VOTED);
   };
-  const ours = { from: proposer.address, to: V2, input: voteData, status: "success" } as const;
-  assert.equal(await votedBy([{ ...ours, from: OTHER }, ours]), true);
-  assert.equal(await votedBy([{ ...ours, from: OTHER }]), false, "another's vote");
-  assert.equal(
-    await votedBy([
-      { ...ours, status: "reverted" },
-      { ...ours, from: OTHER },
-    ]),
-    false,
-    "another was first",
-  );
-  assert.equal(
-    await votedBy([
-      { ...ours, input: claimData },
-      { ...ours, from: OTHER },
-    ]),
-    false,
-    "a claim is no vote",
-  );
+  assert.equal(await acceptedFrom([proposer.address]), true);
+  assert.equal(await acceptedFrom([OTHER]), false, "another's vote");
 });
