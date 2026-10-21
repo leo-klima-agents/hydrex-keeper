@@ -177,7 +177,8 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
   sequencer is down, and for an hour after, it takes no vote, so its votes fail the execution. When its own values
   cannot be read, the simulation of each vote is the only check. The proposer's balance works as the keeper's, and logs
   `fund the proposer`. A `CONDUIT` that is not such a conduit, on the Klima conduit's Voter, that cannot be read in
-  three tries, or that comes without `PROPOSER` and its key, is left out and fails the execution.
+  three tries, that comes without `PROPOSER` and its key, or whose `PROPOSER` is the keeper, is left out and fails the
+  execution.
 - **Klima conduit:** without voting power this epoch, it gets no vote, and the job fails the execution; the immutable
   conduit still votes.
 

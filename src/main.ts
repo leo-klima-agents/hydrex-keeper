@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { getAddress } from "viem";
+import { getAddress, isAddressEqual } from "viem";
 import { connect, hostOf, now, type Chain, type V2 } from "./chain.ts";
 import { claims } from "./claim.ts";
 import { connectV2 } from "./immutable.ts";
@@ -46,7 +46,10 @@ async function main(): Promise<number> {
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
   const chain = await connect(module, rpcUrls);
-  if (config) chain.v2 = await reachV2(chain, config).catch(unusable);
+  // Each key's nonces are tracked apart, and the two send votes and claims at once.
+  if (config && isAddressEqual(config.proposer, chain.keeper)) {
+    unusable(new Error(`PROPOSER is the keeper, ${chain.keeper}: each needs nonces of its own`));
+  } else if (config) chain.v2 = await reachV2(chain, config).catch(unusable);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   const proposer = chain.v2 && config?.keyVersion ? kmsAccount(config.keyVersion, chain.v2.proposer) : undefined;
   const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
