@@ -1,7 +1,7 @@
 import { formatUnits, type Address, type LocalAccount } from "viem";
 import type { Chain } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
-import { errorMessage, log } from "./log.ts";
+import { log, warnOnce } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
 import { proportional, toVote } from "./select.ts";
@@ -43,21 +43,27 @@ export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: b
 /** What both conduits' votes a day before the flip are made from. */
 export type DayBefore = { pools: PoolRewards[]; priced: Prices };
 
-/** Reads the rewards and their prices once for both conduits; after a failure, the next call reads them again. */
-export function dayBeforeReads(run: Run, until: number): () => Promise<DayBefore> {
-  let reads: Promise<DayBefore> | undefined;
-  const read = async () => {
-    const [pools, priced] = await Promise.all([
-      readRewards(run.chain, tokensOf(run)),
-      run.prices(tokensOf(run), until),
-    ]);
-    return { pools, priced };
+/** The rewards and their prices, which both conduits' votes a day before the flip are made from. */
+export async function readDayBefore(run: Run, until: number): Promise<DayBefore> {
+  const [pools, priced] = await Promise.all([readRewards(run.chain, tokensOf(run)), run.prices(tokensOf(run), until)]);
+  return { pools, priced };
+}
+
+/**
+ * `read` once for each round of attempts, which both conduits share, so that a retry reads again; a read that fails is
+ * read again by the next call.
+ */
+export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Promise<T> {
+  const reads = new Map<number, Promise<T>>();
+  return (attempt) => {
+    let reading = reads.get(attempt);
+    if (!reading) {
+      reading = read();
+      reads.set(attempt, reading);
+      reading.catch(() => reads.delete(attempt));
+    }
+    return reading;
   };
-  return () =>
-    (reads ??= read().catch((error: unknown) => {
-      reads = undefined;
-      throw error;
-    }));
 }
 
 /** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. */
@@ -74,14 +80,12 @@ export async function pass(run: Run, { pools, priced }: DayBefore, until: number
 export async function passV2(run: Run, { pools, priced }: DayBefore, until: number): Promise<void> {
   const { chain } = run;
   const { conduit, priced: tokens } = chain.v2!;
-  const unread = (error: unknown) => {
-    log.warning("v2's own values unread; its simulation checks the vote", { conduit, error: errorMessage(error) });
-    return undefined;
-  };
   const [state, values, current] = await Promise.all([
     readVotes(chain, pools),
-    readValues(chain, chain.bulk, pricedPools(pools, tokens)).catch(unread),
-    readScore(chain, chain.bulk).catch(unread),
+    readValues(chain, chain.bulk, pricedPools(pools, tokens)).catch(
+      warnOnce("v2's values unread; its simulation checks the vote", { conduit }),
+    ),
+    readScore(chain, chain.bulk).catch(warnOnce("v2's score unread; its simulation checks the vote", { conduit })),
   ]);
   const onchain = values && current !== undefined ? { values, current } : undefined;
   const { vote, note, summary } = decideV2(state, valueRewards(run, state.pools, priced, false), onchain, true);

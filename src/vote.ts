@@ -160,7 +160,8 @@ export async function prepareCall(
   if (simulated.status !== "success") throw simulated.error ?? new Error(`${what} would revert`);
   const second = afterRival?.[0]?.calls.at(-1);
   if (second && second.status !== "success") {
-    throw new Error(`${what} would revert after the ${rival!.sender.name}'s: ${errorMessage(second.error)}`);
+    const reason = second.error ? errorMessage(second.error) : "no reason given";
+    throw new Error(`${what} would revert after the ${rival!.sender.name}'s: ${reason}`);
   }
   const baseFee = history.baseFeePerGas.at(-1); // the next block's
   if (baseFee === undefined) throw new Error("no base fee");
@@ -265,13 +266,14 @@ export async function castVote(
 ): Promise<void> {
   const prepared = await prepareVote(chain, account, vote, dryRun, undefined, sender);
   const { signed } = prepared;
+  const { conduit } = sender;
   if (!signed) return;
   if (dryRun) {
-    log.info("dry run: signed, not sent");
+    log.info("dry run: signed, not sent", { conduit });
     return;
   }
   const hash = await broadcastTx(chain, { ...prepared, signed }, until);
-  log.info("vote sent", { hash });
+  log.info("vote sent", { conduit, hash });
   const timeout = Math.max(1, Math.min(RECEIPT_TIMEOUT_MS, until - Date.now()));
   let receipt;
   try {
@@ -280,7 +282,7 @@ export async function castVote(
     if (!(error instanceof WaitForTransactionReceiptTimeoutError)) {
       throw new VoteSent(`vote ${hash}: outcome unknown: ${errorMessage(error)}`);
     }
-    log.warning("receipt not seen in time; the next pass re-checks the Voter", { hash, timeout });
+    log.warning("receipt not seen in time; the next pass re-checks the Voter", { conduit, hash, timeout });
     return;
   }
   if (receipt.transactionHash !== hash) {

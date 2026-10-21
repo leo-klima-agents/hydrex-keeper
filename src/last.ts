@@ -9,8 +9,7 @@ import {
 import { Blocks, sleep, watch } from "./blocks.ts";
 import { lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
-import { errorMessage, log } from "./log.ts";
-import type { Prices } from "./prices.ts";
+import { errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
 import { select, summarize, type Vote } from "./select.ts";
@@ -32,10 +31,13 @@ const PRICES_BY_MS = 5_000; // before the flip
 const TICK_MS = 50;
 const PLAN_EVERY_MS = 100;
 const MAX_PLANS = 3; // in flight, per lane
+const RECENT = 30; // plans kept per lane: more than come back for one block
 const RETRY_DELAY_MS = 5_000;
 const SHARED_READ_MS = 50; // the lanes share a read of the votes started this recently
 const REREAD_MS = 500; // after a read of the immutable conduit's values fails
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
+const OUTCOME_TRIES = 3;
+const OUTCOME_RETRY_MS = 2_000;
 const BLOCK_SECONDS = 2n; // on Base
 
 type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender };
@@ -54,24 +56,31 @@ export type Plan = {
   summary: Record<string, unknown>;
 };
 
-/** One conduit's plans: `best` is the freshest that came back. */
-export type Lane<P> = { name: string; plan: (best: P | undefined) => Promise<P>; best?: P | undefined };
+/** One conduit's plans: `best` is the freshest that came back, and `recent` the last RECENT that did. */
+export type Lane<P> = {
+  name: string;
+  plan: (best: P | undefined) => Promise<P>;
+  best?: P | undefined;
+  recent?: P[];
+};
 
 type Race<P> = {
   blocks: Blocks;
   lanes: Lane<P>[];
-  send: (bests: (P | undefined)[], time: number) => void;
+  /** Sends the lanes' plans for the block with timestamp `time` (ms). */
+  send: (time: number) => void;
 };
 
-/** Makes `plan` the lane's best if it is fresher. */
+/** Keeps `plan` among the lane's recent ones, and makes it the lane's best if it is fresher. */
 export function keep<P extends { readAt: number }>(lane: Lane<P>, plan: P): void {
+  lane.recent = [...(lane.recent ?? []), plan].slice(-RECENT);
   if (!lane.best || plan.readAt > lane.best.readAt) lane.best = plan;
 }
 
 /**
- * Starts a plan of each lane every PLAN_EVERY_MS, and sends the freshest plan of each at the deadline of each of the
- * last two blocks before `flip` (ms). Deadlines come from the block timing alone, so a poll or a plan that hangs delays
- * nothing, and lanes plan apart, so a lane that fails or lags delays no other. Returns the number of sends.
+ * Starts a plan of each lane every PLAN_EVERY_MS, and sends the lanes' plans at the deadline of each of the last two
+ * blocks before `flip` (ms). Deadlines come from the block timing alone, so a poll or a plan that hangs delays nothing,
+ * and lanes plan apart, so a lane that fails or lags delays no other. Returns the number of sends.
  */
 export async function race<P extends { readAt: number }>(
   flip: number,
@@ -119,10 +128,7 @@ export async function race<P extends { readAt: number }>(
       continue;
     }
     after = time;
-    send(
-      lanes.map((lane) => lane.best),
-      time,
-    );
+    send(time);
     sends++;
   }
   done = true;
@@ -153,16 +159,101 @@ export function v2Answered(v2: Plan | undefined, time: number, dryRun: boolean):
   return ready ? v2.votes : undefined;
 }
 
-/** The Klima conduit's vote prepared for the block at `time` (ms), which the immutable conduit's must clear after. */
-function rivalOf(klima: Plan | undefined, time: number): Vote | undefined {
-  return klima?.prepared && klima.time === time && klima.vote ? klima.vote : undefined;
+/** The Klima conduit's vote prepared to send, which the immutable conduit's must clear after. */
+const rivalOf = (klima: Plan | undefined): Vote | undefined => (klima?.prepared && klima.vote) || undefined;
+
+/** The plans to send for each conduit: those that came back for the block, else the freshest. */
+function forBlock(lane: Lane<Plan> | undefined, time: number): (Plan | undefined)[] {
+  if (!lane?.best) return [undefined];
+  const plans = (lane.recent ?? []).filter((p) => p.time === time);
+  return plans.length ? plans : [lane.best];
 }
+
+/**
+ * What each conduit sends in the block at `time` (ms). The immutable conduit's vote goes only with a Klima conduit's
+ * vote it was checked after, so that it clears its check whichever lands first: of the plans for that block, the pair
+ * whose staler plan is the freshest, among those in which at most one conduit votes or the immutable conduit's vote was
+ * checked after the Klima conduit's. Without such a pair, the Klima conduit's freshest plan alone, and `unchecked`.
+ */
+export function pick(
+  time: number,
+  klima: Lane<Plan> | undefined,
+  v2: Lane<Plan> | undefined,
+): { klima?: Plan | undefined; v2?: Plan | undefined; unchecked?: true } {
+  const fresh = (p: Plan | undefined) => p?.readAt ?? Infinity;
+  const checked = (k: Plan | undefined, v: Plan | undefined) => !k?.prepared || !v?.prepared || same(v.rival, k.vote);
+  let best: { klima: Plan | undefined; v2: Plan | undefined; stale: number; freshest: number } | undefined;
+  const klimas = forBlock(klima, time);
+  for (const k of klimas) {
+    for (const v of forBlock(v2, time)) {
+      if (!checked(k, v)) continue;
+      const [stale, freshest] = [Math.min(fresh(k), fresh(v)), Math.max(fresh(k), fresh(v))];
+      if (!best || stale > best.stale || (stale === best.stale && freshest > best.freshest)) {
+        best = { klima: k, v2: v, stale, freshest };
+      }
+    }
+  }
+  if (best) return { klima: best.klima, v2: best.v2 };
+  return { klima: klimas.reduce((a, b) => (fresh(b) > fresh(a) ? b : a)), unchecked: true };
+}
+
+/**
+ * The last value `read` gave, read again in the background once for each block, at its first call with that block's
+ * `time`, and REREAD_MS after a read that fails; one read at a time. Only calls before any value wait for one.
+ */
+export function refreshed<T>(
+  read: () => Promise<T>,
+  unread: (error: unknown) => void,
+): (time: number) => Promise<{ value: T; version: number } | undefined> {
+  let last: { value: T; version: number } | undefined;
+  let reading: { time: number; done: Promise<void>; settled: boolean; failedAt?: number } | undefined;
+  return async (time) => {
+    const failedAt = reading?.failedAt;
+    const due =
+      !reading ||
+      (reading.settled && (failedAt !== undefined ? Date.now() - failedAt >= REREAD_MS : reading.time !== time));
+    if (due) {
+      const entry: NonNullable<typeof reading> = { time, done: Promise.resolve(), settled: false };
+      entry.done = read().then(
+        (value) => {
+          last = { value, version: (last?.version ?? 0) + 1 };
+          entry.settled = true;
+        },
+        (error: unknown) => {
+          entry.failedAt = Date.now();
+          entry.settled = true;
+          unread(error);
+        },
+      );
+      reading = entry;
+    }
+    if (!last) await reading!.done;
+    return last;
+  };
+}
+
+/** `decide` once for each key: plans that see the same votes decide alike. */
+function memo<T>(): (key: string, decide: () => T) => T {
+  let last: { key: string; value: T } | undefined;
+  return (key, decide) => (last?.key === key ? last : (last = { key, value: decide() })).value;
+}
+
+/** What a conduit's decision depends on in a read of the votes. */
+const keyOf = ({ epoch, pools }: State) =>
+  [
+    epoch.start,
+    epoch.power,
+    epoch.lastVoted,
+    epoch.v2?.power,
+    epoch.v2?.lastVoted,
+    ...pools.flatMap((p) => [p.otherVotes, p.ownVotes, p.v2Votes]),
+  ].join();
 
 /**
  * Votes in each of the last two blocks before the flip, as late as each allows, for each conduit in `conduits`. Each
  * plans in its own lane, so that neither's failure or delay holds the other back. The Klima conduit's vote answers the
- * immutable conduit's vote prepared for the same block, and that one is sent only if it clears its conduit's check
- * whether or not the Klima conduit's lands first. Returns the number of failures.
+ * immutable conduit's vote prepared for the same block, and that one is sent only together with a Klima conduit's vote
+ * it was checked after, so that it clears its check whichever lands first. Returns the number of failures.
  */
 export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: boolean; v2: boolean }): Promise<number> {
   const { chain, account, proposer, dryRun } = run;
@@ -180,14 +271,8 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   void watch(chain.client, blocks, () => !watching);
   let failures = 0;
   let rewards: PoolRewards[] = [];
-  let priced: Prices = new Map();
+  let usd: number[] = []; // each pool's rewards in USD, as `rewards`; votes do not change them
   let valued: Address[] = []; // the pools the immutable conduit can value
-  let verbose = true; // the first plan logs each pool
-  const valueOnce = (state: State) => {
-    const usd = valueRewards(run, state.pools, priced, verbose);
-    verbose = false;
-    return usd;
-  };
 
   /** Prepares a conduit's vote for the block at `base.time`, or reuses the one prepared for the same block and votes. */
   const prepare = async (
@@ -208,59 +293,54 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return { ...base, prepared, rival: rival?.vote };
   };
 
-  // The votes in the block being built, read once for the lanes that plan at about the same time.
-  let votes: { at: number; read: Promise<State> } | undefined;
+  // The votes in the block being built, read once for the lanes that plan at about the same time. A plan is as fresh
+  // as the read it uses, and for the block being built when that read started.
+  let votes: { readAt: number; time: number; state: Promise<State> } | undefined;
   const votesNow = () => {
-    if (!votes || Date.now() - votes.at >= SHARED_READ_MS) {
-      votes = { at: Date.now(), read: readVotes(chain, rewards, "pending") };
+    const now = Date.now();
+    if (!votes || now - votes.readAt >= SHARED_READ_MS) {
+      votes = { readAt: now, time: blocks.building(now) ?? now, state: readVotes(chain, rewards, "pending") };
     }
-    return votes.read;
+    return votes;
   };
 
   // The immutable conduit's own values and score are read only for a vote it would send. Its values of pools barely
-  // move within a block, and cost far more gas than votes, so they are read once per block, and again shortly after a
-  // read that fails. Its score of the vote in force moves with every vote, so it is read with each such plan.
-  const warnOnce = (what: string) => {
-    const seen = new Set<string>();
-    return (error: unknown) => {
-      const message = errorMessage(error);
-      if (!seen.has(message)) log.warning(`v2's ${what} unread`, { error: message });
-      seen.add(message);
-      return undefined;
-    };
-  };
-  const [valuesUnread, scoreUnread] = [warnOnce("values"), warnOnce("score")];
-  let values: { time: number; read: Promise<Map<Address, number>>; failedAt?: number } | undefined;
-  const valuesAt = (time: number) => {
-    const failed = values?.failedAt !== undefined && Date.now() - values.failedAt >= REREAD_MS;
-    if (values?.time !== time || failed) {
-      const entry: NonNullable<typeof values> = { time, read: readValues(chain, chain.client, valued, "pending") };
-      entry.read.catch(() => (entry.failedAt = Date.now()));
-      values = entry;
-    }
-    return values.read.catch(valuesUnread);
-  };
+  // move, and reading them takes long, so plans use the last ones read, read again in the background once per block,
+  // through the client for heavy reads. Its score of the vote in force moves with every vote, so it is read with each
+  // such plan.
+  const valuesNow = refreshed(
+    () => readValues(chain, chain.bulk, valued, "pending"),
+    warnOnce("v2's values unread; its simulation checks the vote"),
+  );
+  const scoreUnread = warnOnce("v2's score unread; its simulation checks the vote");
+  const [decidedV2, onchainV2, decidedKlima] = [
+    memo<ReturnType<typeof decideV2>>(),
+    memo<ReturnType<typeof decideV2>>(),
+    memo<ReturnType<typeof decide>>(),
+  ];
 
   const v2Lane: Lane<Plan> = {
     name: "v2",
     plan: async (best) => {
-      const readAt = Date.now();
-      const time = blocks.building(readAt) ?? readAt;
-      const state = await votesNow();
+      const { readAt, time, state: reading } = votesNow();
+      const state = await reading;
       assertFresh(state.epoch);
-      const usd = valueOnce(state);
-      let decision = decideV2(state, usd, undefined);
+      const key = keyOf(state);
+      let decision = decidedV2(key, () => decideV2(state, usd, undefined));
       if (decision.vote) {
-        const [poolValues, current] = await Promise.all([
-          valuesAt(time),
+        const [values, current] = await Promise.all([
+          valuesNow(time),
           readScore(chain, chain.client, "pending").catch(scoreUnread),
         ]);
-        if (poolValues && current !== undefined) decision = decideV2(state, usd, { values: poolValues, current });
+        if (values && current !== undefined) {
+          const onchain = { values: values.value, current };
+          decision = onchainV2(`${key}|${values.version}|${current}`, () => decideV2(state, usd, onchain));
+        }
       }
       const { vote, note, summary, votes } = decision;
       const byPool = new Map(state.pools.map((p, i) => [lower(p.pool), votes[i]!]));
       const base = { readAt, time, vote, note, summary, votes: byPool };
-      const klimaVote = rivalOf(klimaLane.best, time);
+      const klimaVote = rivalOf(klimaLane.best);
       const rival = klimaVote && { sender: klimaSender(chain), vote: klimaVote };
       return prepare(base, best, state.epoch.v2?.lastVoted ?? 0n, v2Sender(chain), proposer, rival);
     },
@@ -269,34 +349,31 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   const klimaLane: Lane<Plan> = {
     name: "klima",
     plan: async (best) => {
-      const readAt = Date.now();
-      const time = blocks.building(readAt) ?? readAt;
-      const state = await votesNow();
+      const { readAt, time, state: reading } = votesNow();
+      const state = await reading;
       assertFresh(state.epoch);
       const answered = conduits.v2 ? v2Answered(v2Lane.best, time, dryRun) : undefined;
-      const { vote, reason, summary } = decide(state, valueOnce(state), answered);
+      const key = `${keyOf(state)}|${answered ? [...answered].join() : "-"}`;
+      const { vote, reason, summary } = decidedKlima(key, () => decide(state, usd, answered));
       const base = { readAt, time, vote, note: reason, summary };
       return prepare(base, best, state.epoch.lastVoted, klimaSender(chain), account);
     },
   };
 
-  // The immutable conduit's first, so that, at equal tips, its vote reaches the builder first.
-  const lanes = [
-    ...(conduits.v2 ? [{ lane: v2Lane, sender: v2Sender(chain) }] : []),
-    ...(conduits.klima ? [{ lane: klimaLane, sender: klimaSender(chain) }] : []),
-  ];
+  const lanes = [...(conduits.v2 ? [v2Lane] : []), ...(conduits.klima ? [klimaLane] : [])];
   if (lanes.length === 0) {
     watching = false;
     return 0;
   }
 
-  // What every lane needs, read once: the block timing, the rewards and their prices.
+  // What every lane needs, read once: the block timing, the rewards and their value.
   for (;;) {
     try {
       const { number, timestamp } = await chain.client.getBlock();
       blocks.observe({ number, timestamp, txs: 0 }, Date.now());
       rewards = await readRewards(chain, tokensOf(run));
-      priced = await run.prices(tokensOf(run), flipMs - PRICES_BY_MS);
+      // Prices that value no reward fail here, and are fetched again.
+      usd = valueRewards(run, rewards, await run.prices(tokensOf(run), flipMs - PRICES_BY_MS), true);
       valued = chain.v2 ? pricedPools(rewards, chain.v2.priced) : [];
       break;
     } catch (error) {
@@ -311,7 +388,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   }
   // Each lane's first plan, tried until one comes back, while the race starts: it is sent if no later one is.
   void Promise.all(
-    lanes.map(async ({ lane }) => {
+    lanes.map(async (lane) => {
       while (!lane.best && Date.now() + RETRY_DELAY_MS < flipMs - PRICES_BY_MS) {
         try {
           keep(lane, await lane.plan(undefined));
@@ -356,12 +433,20 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       ),
     );
   };
-  const send = (bests: (Plan | undefined)[], time: number) => {
+  // The immutable conduit's first, so that, at equal tips, its vote reaches the builder first.
+  const send = (time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
-    lanes.forEach(({ sender }, i) => sendOne(bests[i], sender, at));
+    const picked = pick(time, conduits.klima ? klimaLane : undefined, conduits.v2 ? v2Lane : undefined);
+    if (picked.unchecked) {
+      log.warning("not voting for v2 in this block: no vote of it was checked after the Klima conduit's", {
+        conduit: chain.v2?.conduit,
+        ...at,
+      });
+    } else if (conduits.v2) sendOne(picked.v2, v2Sender(chain), at);
+    if (conduits.klima) sendOne(picked.klima, klimaSender(chain), at);
   };
 
-  const sends = await race(flipMs, { blocks, lanes: lanes.map(({ lane }) => lane), send });
+  const sends = await race(flipMs, { blocks, lanes, send });
   watching = false;
   if (sends === 0) {
     failures++;
@@ -369,13 +454,14 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   }
   await Promise.all(sending);
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
-  const voters = lanes.map(({ sender }) => sender.conduit);
+  const voters = [...(conduits.v2 ? [chain.v2!.conduit] : []), ...(conduits.klima ? [chain.conduit] : [])];
   return failures + (await outcome(run, flip, [...sent.values()], voters));
 }
 
 /** The number of the last block before `time` (s): estimated from the latest block, then checked. */
 export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
   const head = await client.getBlock();
+  if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
   let number = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
   for (let step = 0; step < 20; step++) {
     const [block, next] = await Promise.all([
@@ -443,28 +529,38 @@ export async function outcome(
       log.error("vote not confirmed", { conduit, error: errorMessage(error) });
     });
   }
-  try {
-    // As of the last block before the flip: anyone may vote for the immutable conduit in the next epoch already.
+  // As of the last block before the flip: anyone may vote for the immutable conduit in the next epoch already.
+  const lastVotedBefore = async () => {
     const before = await lastBlockBefore(chain.client, flip);
-    const lastVoted = await readMany<bigint>(
-      chain.client,
-      conduits.map((conduit) => voterCall(chain, "lastVoted", [conduit])),
-      { blockNumber: before },
-    );
-    conduits.forEach((conduit, i) => {
-      const fields = { conduit, lastVoted: lastVoted[i]! };
-      if (fields.lastVoted < flip - WEEK) {
-        if (dryRun) return log.warning("no vote this epoch", fields);
-        failures++;
-        return log.error("no vote this epoch", fields);
+    const calls = conduits.map((conduit) => voterCall(chain, "lastVoted", [conduit]));
+    return readMany<bigint>(chain.client, calls, { blockNumber: before });
+  };
+  let lastVoted: bigint[] | undefined;
+  for (let attempt = 1; !lastVoted; attempt++) {
+    try {
+      lastVoted = await lastVotedBefore();
+    } catch (error) {
+      const fields = { attempt, error: errorMessage(error) };
+      if (attempt === OUTCOME_TRIES) {
+        // Whether each conduit voted this epoch is unknown.
+        (dryRun ? log.warning : log.error)("lastVoted unread", fields);
+        return failures + (dryRun ? 0 : 1);
       }
-      log.info("voted this epoch", fields);
-      const ours = last.get(lower(conduit));
-      if (ours && fields.lastVoted > ours.timestamp) log.warning("another vote replaced the last one sent", fields);
-    });
-  } catch (error) {
-    log.warning("lastVoted unread", { error: errorMessage(error) });
+      log.warning("lastVoted unread, retrying", fields);
+      await sleep(OUTCOME_RETRY_MS);
+    }
   }
+  conduits.forEach((conduit, i) => {
+    const fields = { conduit, lastVoted: lastVoted[i]! };
+    if (fields.lastVoted < flip - WEEK) {
+      if (dryRun) return log.warning("no vote this epoch", fields);
+      failures++;
+      return log.error("no vote this epoch", fields);
+    }
+    log.info("voted this epoch", fields);
+    const ours = last.get(lower(conduit));
+    if (ours && fields.lastVoted > ours.timestamp) log.warning("another vote replaced the last one sent", fields);
+  });
   return failures;
 }
 

@@ -135,7 +135,8 @@ export function decideV2(
   const values = onchain && candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
   const bar = onchain && onchain.current + MIN_GAIN + MARGIN;
   if (values && bar !== undefined && score(candidates, values, asVoted(x), power) < bar) {
-    x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS);
+    // Unless proportionally, `x` is already our water-filling, which falls short.
+    x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
     if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
     if (!proportionally && gain(candidates, x, power) <= MIN_GAIN_USD) {
       return keep("no vote that clears v2's check gains enough; keeping its vote", { bar });

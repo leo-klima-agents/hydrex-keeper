@@ -72,16 +72,19 @@ function solve(candidates: Candidate[], power: bigint): number[] | null {
   return x.map((xi) => xi / total);
 }
 
+/** `fractions` in basis points, as a vote's weights. */
+const bps = (fractions: number[]) => fractions.map((f) => Math.round(f * BPS));
+
 /** `fractions` of the votes on `pools`, in basis points; the pools that get none are left out. */
 export function toVote(pools: { pool: Address }[], fractions: number[]): Vote {
-  const weights = fractions.map((f) => Math.round(f * BPS));
+  const weights = bps(fractions);
   const funded = pools.flatMap((_, i) => (weights[i]! > 0 ? [i] : []));
   return { pools: funded.map((i) => pools[i]!.pool), weights: funded.map((i) => BigInt(weights[i]!)) };
 }
 
 /** The shares a vote of `fractions` gives once rounded to basis points, as the Voter splits its power by weight. */
 export function asVoted(fractions: number[]): number[] {
-  const weights = fractions.map((f) => Math.round(f * BPS));
+  const weights = bps(fractions);
   const total = weights.reduce((a, b) => a + b, 0);
   return weights.map((w) => (total > 0 ? w / total : 0));
 }
@@ -127,7 +130,7 @@ export function score(candidates: Candidate[], values: number[], fractions: numb
  * The best allocation at our prices that scores at least `bar` at the conduit's own `values`, once rounded as a vote is.
  * Both have the form Σ B·x/(V + x) with the same V, so it is the water-filling of our rewards plus μ times the
  * conduit's values, for the smallest μ that clears the bar, found by bisection. Null when not even the conduit's own
- * best clears it.
+ * best clears it. `ours`, our water-filling with `maxPools`, if already known.
  */
 export function waterFillAbove(
   candidates: Candidate[],
@@ -135,6 +138,7 @@ export function waterFillAbove(
   values: number[],
   bar: number,
   maxPools = MAX_POOLS,
+  ours?: number[] | null,
 ): number[] | null {
   const blend = (mu: number) =>
     waterFill(
@@ -144,18 +148,20 @@ export function waterFillAbove(
     );
   const clears = (x: number[] | null): x is number[] =>
     x !== null && score(candidates, values, asVoted(x), power) >= bar;
-  const ours = blend(0);
-  if (clears(ours)) return ours;
+  const first = ours === undefined ? blend(0) : ours;
+  if (clears(first)) return first;
   const scale = Math.max(...values, 0);
   if (scale === 0) return null;
   // Here the conduit's values outweigh ours a million to one: its own best, give or take ties.
   let hi = (1e6 * Math.max(...candidates.map((c) => c.rewardsUsd), 1)) / scale;
-  if (!clears(blend(hi))) return null;
+  let best = blend(hi);
+  if (!clears(best)) return null;
   let lo = 0;
   for (let k = 0; k < 30; k++) {
     const mid = (lo + hi) / 2;
-    if (clears(blend(mid))) hi = mid;
+    const x = blend(mid);
+    if (clears(x)) [hi, best] = [mid, x];
     else lo = mid;
   }
-  return blend(hi);
+  return best;
 }

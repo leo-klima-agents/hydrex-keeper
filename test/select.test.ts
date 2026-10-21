@@ -142,6 +142,8 @@ test("above a bar, the allocation gives up as little at our prices as the condui
   assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 0), [1, 0], "no bar: our own best");
   assert.equal(waterFillAbove(candidates, 1000n, [0, 100], 60), null, "not even all on B scores 60");
   assert.equal(waterFillAbove(candidates, 1000n, [0, 0], 1), null, "the conduit values nothing");
+  const ours = waterFill(candidates, 1000n);
+  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 10, undefined, ours), x, "our water-filling, given");
 });
 
 test("the gain of an allocation is over the vote in force, at our prices", () => {

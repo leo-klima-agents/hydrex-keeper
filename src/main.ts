@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { getAddress } from "viem";
-import { connect, hostOf, now, type V2 } from "./chain.ts";
+import { connect, hostOf, now, type Chain, type V2 } from "./chain.ts";
 import { claims } from "./claim.ts";
 import { connectV2 } from "./immutable.ts";
 import { kmsAccount } from "./kms.ts";
 import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
-import { dayBeforeReads, pass, passV2, type Run } from "./pass.ts";
+import { pass, passV2, perAttempt, readDayBefore, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
 import { DAY, due, HORIZON, lastFlip } from "./schedule.ts";
@@ -27,21 +27,26 @@ async function main(): Promise<number> {
   if (immediately && claimNow) throw new Error("--now and --claim exclude each other");
   const module = getAddress(required("MODULE"));
   const keyVersion = dryRun ? process.env.KMS_KEY_VERSION : required("KMS_KEY_VERSION");
-  const config = immutableConduit(dryRun);
+  // The immutable conduit's failures fail the execution, once the Klima conduit has voted or claimed without it.
+  let failed = false;
+  const unusable = (error: unknown) => {
+    failed = true;
+    log.error("immutable conduit unusable: not voting for it", { v2: process.env.CONDUIT, error: errorMessage(error) });
+    return undefined;
+  };
+  const config = (() => {
+    try {
+      return immutableConduit(dryRun);
+    } catch (error) {
+      return unusable(error);
+    }
+  })();
   const tokens = parseWhitelist(readFileSync(new URL("../tokens.json", import.meta.url), "utf8"));
 
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
   const chain = await connect(module, rpcUrls);
-  // An unusable immutable conduit fails the execution, once the Klima conduit has voted or claimed without it.
-  let failed = false;
-  if (config) {
-    chain.v2 = await connectV2(chain, config).catch((error: unknown) => {
-      failed = true;
-      log.error("immutable conduit unusable: not voting for it", { v2: config.conduit, error: errorMessage(error) });
-      return undefined;
-    });
-  }
+  if (config) chain.v2 = await reachV2(chain, config).catch(unusable);
   const account = keyVersion ? kmsAccount(keyVersion, chain.keeper) : undefined;
   const proposer = chain.v2 && config?.keyVersion ? kmsAccount(config.keyVersion, chain.v2.proposer) : undefined;
   const { ALCHEMY_API_KEY: alchemyKey, COINGECKO_API_KEY: coingeckoKey } = process.env;
@@ -96,7 +101,8 @@ async function main(): Promise<number> {
   if (chain.v2 && !v2) log.warning("the immutable conduit has no voting power this epoch: not voting for it");
   if (what === "last blocks") {
     const failures = await lastBlocks(run, flip, { klima, v2 });
-    return failed || failures + (await claims(run, flip, Number(flip + HORIZON) * 1000)) > 0 ? 1 : 0;
+    const claimFailures = await claims(run, flip, Number(flip + HORIZON) * 1000);
+    return failed || failures + claimFailures > 0 ? 1 : 0;
   }
   if (!what) {
     log.warning("nothing due: the job votes a day before the flip and in its last blocks, and claims after it", {
@@ -107,31 +113,33 @@ async function main(): Promise<number> {
   if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
-  // A retry of a failed execution does not vote again for a conduit whose vote of a day before is in.
+  // A retry of a failed execution does not vote again for a conduit whose vote of a day before is in. Anyone may vote
+  // for the immutable conduit, so the first execution votes whatever the conduits' last votes.
+  const retry = Number(process.env.CLOUD_RUN_TASK_ATTEMPT ?? 0) > 0;
   const again = (lastVoted: bigint | undefined, conduit: string) => {
-    const voted = !immediately && lastVoted !== undefined && lastVoted >= flip - DAY - HORIZON;
+    const voted = retry && !immediately && lastVoted !== undefined && lastVoted >= flip - DAY - HORIZON;
     if (voted) log.info("already voted a day before the flip", { conduit, lastVoted });
     return !voted;
   };
-  const reads = dayBeforeReads(run, until);
+  const reads = perAttempt(() => readDayBefore(run, until));
   // The two conduits vote at once and are retried apart, so that neither holds the other back.
   const [klimaDone, v2Done] = await Promise.all([
     !klima ||
       !again(epoch.lastVoted, chain.conduit) ||
-      attempts("pass", async () => pass(run, await reads(), until), until),
+      attempts("pass", async (attempt) => pass(run, await reads(attempt), until), until),
     !v2 ||
       !again(epoch.v2?.lastVoted, chain.v2!.conduit) ||
-      attempts("v2 pass", async () => passV2(run, await reads(), until), until),
+      attempts("v2 pass", async (attempt) => passV2(run, await reads(attempt), until), until),
   ]);
   return failed || !klimaDone || !v2Done ? 1 : 0;
 }
 
 /** Runs `pass` up to ATTEMPTS times, while time is left before `until` (ms); returns whether it succeeded. */
-async function attempts(name: string, pass: () => Promise<void>, until: number): Promise<boolean> {
+async function attempts(name: string, pass: (attempt: number) => Promise<void>, until: number): Promise<boolean> {
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
     try {
-      await pass();
+      await pass(attempt);
       log.info(`${name} done`, { ms: Date.now() - started });
       return true;
     } catch (error) {
@@ -139,6 +147,19 @@ async function attempts(name: string, pass: () => Promise<void>, until: number):
       const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
       log.error(`${name} failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
       if (!retry) return false;
+      await sleep(RETRY_DELAY_MS);
+    }
+  }
+}
+
+/** connectV2, tried up to ATTEMPTS times: one failed read would leave out the immutable conduit until the flip. */
+async function reachV2(chain: Chain, config: Omit<V2, "priced">): Promise<V2> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await connectV2(chain, config);
+    } catch (error) {
+      if (attempt === ATTEMPTS) throw error;
+      log.warning("immutable conduit not reached, retrying", { attempt, error: errorMessage(error) });
       await sleep(RETRY_DELAY_MS);
     }
   }
