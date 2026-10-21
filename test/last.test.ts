@@ -260,6 +260,18 @@ test("the immutable conduit's vote goes only with a Klima conduit's vote it was 
   assert.deepEqual(readAts(pick(9, before, v2)), { klima: 50, v2: 350 }, "a Klima vote of an earlier block counts");
 });
 
+test("alone, the Klima conduit sends its freshest plan that answered the immutable conduit's votes in force", () => {
+  // The immutable conduit's only vote for the block was checked after a Klima vote of an earlier block, so it is not
+  // sent. The Klima conduit's plan at 300 answered it; the one at 100 answered the votes in force, which stay.
+  const v2 = laneOf(planned(250, voteB, voteB));
+  const answering = { ...planned(300, voteA), answered: true };
+  const picked = pick(9, laneOf({ ...planned(100, voteA), answered: false }, answering), v2);
+  assert.deepEqual(readAts(picked), { klima: 100, v2: undefined, unchecked: true });
+  assert.equal(picked.freshest?.readAt, 300, "its freshest, reported");
+  const allAnswering = pick(9, laneOf({ ...planned(100, voteA), answered: true }, answering), v2);
+  assert.deepEqual(readAts(allAnswering), { klima: 300, v2: undefined, unchecked: true }, "else its freshest");
+});
+
 test("the immutable conduit's values: the last read, read again in the background once per block", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 0 });
   let reads = 0;

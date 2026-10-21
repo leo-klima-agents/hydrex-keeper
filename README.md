@@ -45,9 +45,10 @@ votes, which go straight to the conduit.
   its own. The Klima conduit's vote answers the immutable conduit's vote ready for the same block, as it would any other
   vote, and that one is checked after the Klima conduit's too, so that it clears its check whichever lands first. At
   each deadline, the job sends the freshest pair of plans checked together, so either conduit may send a plan a few
-  hundred ms older than its latest; with no such pair, only the Klima conduit votes in that block. Neither conduit gives
-  up rewards for the other. Voting for both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit
-  voting on the same pools would.
+  hundred ms older than its latest; with no such pair, only the Klima conduit votes in that block, with its freshest
+  plan that answered the immutable conduit's votes in force, if it has one. Neither conduit gives up rewards for the
+  other. Voting for both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit voting on the same
+  pools would.
 - **Votes of others.** A vote of someone else for the conduit, in the block being built, takes that block: the job then
   does not send one, and the Klima conduit's vote answers it.
 - **Each on its own.** Neither conduit's failure stops the other's votes. The immutable conduit keeps voting if the

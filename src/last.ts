@@ -55,6 +55,8 @@ export type Plan = {
   votes?: Map<Address, bigint>;
   /** The vote of the other conduit `prepared` was checked after, if any. */
   rival?: Vote | undefined;
+  /** The Klima conduit's: whether its vote answered a vote of the immutable conduit, rather than its votes in force. */
+  answered?: boolean | undefined;
   summary: Record<string, unknown>;
 };
 
@@ -187,13 +189,14 @@ function forBlock(lane: Lane<Plan> | undefined, time: number): (Plan | undefined
  * What each conduit sends in the block at `time` (ms). The immutable conduit's vote goes only with a Klima conduit's
  * vote it was checked after, so that it clears its check whichever lands first: of the plans for that block, the pair
  * whose staler plan is the freshest, among those in which at most one conduit votes or the immutable conduit's vote was
- * checked after the Klima conduit's. Without such a pair, the Klima conduit's freshest plan alone, and `unchecked`.
+ * checked after the Klima conduit's. Without such a pair, the Klima conduit's alone, and `unchecked`: as the immutable
+ * conduit's votes in force stay, its freshest plan that answered those, if any, else its `freshest`.
  */
 export function pick(
   time: number,
   klima: Lane<Plan> | undefined,
   v2: Lane<Plan> | undefined,
-): { klima?: Plan | undefined; v2?: Plan | undefined; unchecked?: true } {
+): { klima?: Plan | undefined; v2?: Plan | undefined; unchecked?: true; freshest?: Plan | undefined } {
   const fresh = (p: Plan | undefined) => p?.readAt ?? Infinity;
   const checked = (k: Plan | undefined, v: Plan | undefined) => !k?.prepared || !v?.prepared || same(v.rival, k.vote);
   let best: { klima: Plan | undefined; v2: Plan | undefined; stale: number; freshest: number } | undefined;
@@ -208,7 +211,10 @@ export function pick(
     }
   }
   if (best) return { klima: best.klima, v2: best.v2 };
-  return { klima: klimas.reduce((a, b) => (fresh(b) > fresh(a) ? b : a)), unchecked: true };
+  const freshestOf = (plans: (Plan | undefined)[]) => plans.reduce((a, b) => (fresh(b) > fresh(a) ? b : a));
+  const inForce = klimas.filter((k) => k && !k.answered);
+  const freshest = freshestOf(klimas);
+  return { klima: inForce.length ? freshestOf(inForce) : freshest, unchecked: true, freshest };
 }
 
 /**
@@ -302,7 +308,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     if (!vote) return base;
     if (Number(lastVoted) * 1000 >= time) return { ...base, note: "already voted in this block" };
     const reusable = best?.prepared && best.time === time && same(best.vote, vote) && same(best.rival, rival?.vote);
-    if (reusable) return { ...best, readAt };
+    if (reusable) return { ...best, readAt, answered: base.answered };
     const target = { time: BigInt(Math.floor(time / 1000)), lastVoted };
     const prepared = await prepareVote(chain, signer, vote, dryRun, target, sender, rival);
     return { ...base, prepared, rival: rival?.vote };
@@ -374,7 +380,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       const answered = conduits.v2 ? v2Answered(v2Lane.best, time, dryRun) : undefined;
       const key = `${keyOf(state)}|${answered ? [...answered].join() : "-"}`;
       const { vote, reason, summary } = decidedKlima(key, () => decide(state, usd, answered));
-      const base = { readAt, time, vote, note: reason, summary };
+      const base = { readAt, time, vote, note: reason, summary, answered: answered !== undefined };
       return prepare(base, best, state.epoch.lastVoted, klimaSender(chain), account);
     },
   };
@@ -459,9 +465,13 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
     const picked = pick(time, conduits.klima ? klimaLane : undefined, conduits.v2 ? v2Lane : undefined);
     if (picked.unchecked) {
+      const { klima: alone, freshest } = picked;
+      const ageMs = (plan: Plan | undefined) => plan && Date.now() - plan.readAt;
       log.warning("not voting for v2 in this block: no vote of it was checked after the Klima conduit's", {
         conduit: chain.v2?.conduit,
         ...at,
+        // The Klima conduit sends a staler plan than its freshest, which answered a vote not sent.
+        ...(alone !== freshest ? { klimaAgeMs: ageMs(alone), freshestKlimaAgeMs: ageMs(freshest) } : {}),
       });
     } else if (conduits.v2) sendOne(picked.v2, v2Sender(chain), at);
     if (conduits.klima) sendOne(picked.klima, klimaSender(chain), at);
