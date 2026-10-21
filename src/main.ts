@@ -87,7 +87,9 @@ async function main(): Promise<number> {
     return (await claims(run, flip, until)) || failed ? 1 : 0;
   }
   if (!what && epoch.flip <= now() && now() - epoch.flip < 2n * HORIZON) {
-    // Retries of claims that waited all hour for the minter end here: those claims already failed.
+    // Retries of claims that waited all hour for the minter end here, and succeed on purpose, whatever else is wrong, an
+    // unusable CONDUIT included: the attempt that waited already failed, and alerted, for all of it. Failing again would
+    // only start another retry that ends here too.
     log.warning("nothing due: the hour of the claims is over, and the minter has not started the epoch", {
       flip: epoch.flip,
     });

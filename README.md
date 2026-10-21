@@ -176,7 +176,8 @@ detects keys, and change `tokens.json` by pull request, then redeploy.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes, and emails an alert. A paused or
   deleted schedule does neither; `check.sh` reports it.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job refuses to vote, and claims wait for the minter
-  until an hour after the flip.
+  until an hour after the flip. A retry that starts after that hour stops at once and succeeds, whatever else is wrong:
+  the attempt that waited already failed for all of it, and failing again would only start another retry.
 - **Immutable conduit:** without voting power this epoch, it gets no vote, and the job logs a warning. While Base's
   sequencer is down, and for an hour after, it takes no vote, so its votes fail the execution. When its own values
   cannot be read, the simulation of each vote is the only check. The proposer's balance works as the keeper's, and logs
