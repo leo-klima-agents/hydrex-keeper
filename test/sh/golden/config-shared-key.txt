@@ -1,0 +1,3 @@
+exit=1
+--- output ---
+error: the proposer needs its own key, not the keeper's

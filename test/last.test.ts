@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
+import { TransactionReceiptNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { Blocks, sleep, watch } from "../src/blocks.ts";
-import type { Client } from "../src/chain.ts";
-import { race, type Plan } from "../src/last.ts";
+import type { Chain as Connection, Client } from "../src/chain.ts";
+import {
+  keep,
+  lastBlockBefore,
+  outcome,
+  pick,
+  race,
+  refreshed,
+  v2Answered,
+  type Lane,
+  type Plan,
+} from "../src/last.ts";
+import type { Run } from "../src/pass.ts";
+import { klimaSender, v2Sender, type Tx } from "../src/vote.ts";
+
+const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 
 const flip = 1_790_812_800_000;
 const start = flip - 40_000;
@@ -60,10 +75,21 @@ async function drive<T>(t: TestContext, promise: Promise<T>): Promise<T> {
   return settled;
 }
 
-type Options = { chain?: Chain; seedOnly?: boolean; raceAt?: number; behave?: Parameters<typeof planner>[0] };
+type Options = {
+  chain?: Chain;
+  seedOnly?: boolean;
+  raceAt?: number;
+  behave?: Parameters<typeof planner>[0];
+  /** A second lane, planning apart, and how its plans behave. */
+  other?: Parameters<typeof planner>[0];
+};
 
 /** The sends of a race over the last 40 s before the flip, as ms from the flip. */
-async function run(t: TestContext, { chain = {}, seedOnly, raceAt = start, behave }: Options = {}, first?: Plan) {
+async function run(
+  t: TestContext,
+  { chain = {}, seedOnly, raceAt = start, behave, other }: Options = {},
+  first?: Plan,
+) {
   t.mock.timers.reset();
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: start });
   const blocks = new Blocks();
@@ -71,10 +97,19 @@ async function run(t: TestContext, { chain = {}, seedOnly, raceAt = start, behav
   blocks.observe({ number: BigInt(numberOf(seed)), timestamp: BigInt(seed / 1000), txs: 0 }, start);
   let watching = !seedOnly;
   const watcher = watching ? watch(client(chain), blocks, () => !watching) : Promise.resolve();
-  const sent: { time: number; at: number; plan: Plan | undefined }[] = [];
-  const send = (plan: Plan | undefined, time: number) =>
-    void sent.push({ time: time - flip, at: Date.now() - flip, plan });
-  const racing = sleep(raceAt - start).then(() => race(flip, { blocks, plan: planner(behave), send }, first));
+  const sent: { time: number; at: number; plan: Plan | undefined; other?: Plan | undefined }[] = [];
+  const lanes: Lane<Plan>[] = [
+    { name: "first", plan: planner(behave), best: first },
+    ...(other ? [{ name: "other", plan: planner(other) }] : []),
+  ];
+  const send = (time: number) =>
+    void sent.push({
+      time: time - flip,
+      at: Date.now() - flip,
+      plan: lanes[0]!.best,
+      ...(other ? { other: lanes[1]!.best } : {}),
+    });
+  const racing = sleep(raceAt - start).then(() => race(flip, { blocks, lanes, send }));
   const sends = await drive(t, racing);
   watching = false;
   await drive(t, watcher);
@@ -149,4 +184,208 @@ test("a plan that hangs is overtaken; when all hang or fail, the last that came 
     ["warm-up", "warm-up"],
   );
   assert.ok([...allHang, ...allFail].every(inTime));
+});
+
+test("lanes plan apart: one that only fails holds back no plan of the other", async (t) => {
+  const sent = await run(t, { behave: () => "fail", other: () => "ok" });
+  assert.deepEqual(
+    sent.map((s) => s.time),
+    [-3000, -1000],
+  );
+  for (const s of sent) {
+    assert.equal(s.plan, undefined, "the failing lane has nothing to send");
+    assert.ok(s.at - (s.other!.readAt - flip) < 300, "the other lane's plan is fresh");
+  }
+  assert.ok(sent.every(inTime));
+});
+
+const prepared = (signed?: Hex) => ({ tx: {} as Tx, from: zeroAddress, ...(signed ? { signed } : {}) });
+const v2Plan = (time: number, extra: Partial<Plan>): Plan => ({
+  readAt: 0,
+  time,
+  vote: { pools: [], weights: [] },
+  note: "",
+  summary: {},
+  votes: new Map([[zeroAddress, 5n]]),
+  ...extra,
+});
+
+const [voteA, voteB] = [
+  { pools: [addr(10)], weights: [1n] },
+  { pools: [addr(11)], weights: [1n] },
+];
+/** A plan for block 9 that came back at `readAt`, voting `vote` if prepared, after `rival` if any. */
+const planned = (readAt: number, vote: typeof voteA | null, rival?: typeof voteA, time = 9): Plan => ({
+  readAt,
+  time,
+  vote,
+  note: "",
+  summary: {},
+  ...(vote ? { prepared: prepared("0x01") } : {}),
+  ...(rival ? { rival } : {}),
+});
+const laneOf = (...plans: Plan[]) => {
+  const lane: Lane<Plan> = { name: "", plan: () => new Promise(() => {}) };
+  for (const plan of plans) keep(lane, plan);
+  return lane;
+};
+const readAts = ({ klima, v2, unchecked }: ReturnType<typeof pick>) => ({
+  klima: klima?.readAt,
+  v2: v2?.readAt,
+  ...(unchecked ? { unchecked } : {}),
+});
+
+test("each conduit sends its freshest plan for the block when the immutable conduit's was checked after the Klima conduit's", () => {
+  const klima = laneOf(planned(100, voteA), planned(300, voteA));
+  const v2 = laneOf(planned(200, voteB, voteA), planned(400, voteB, voteA));
+  assert.deepEqual(readAts(pick(9, klima, v2)), { klima: 300, v2: 400 });
+  const keeping = laneOf(planned(300, null));
+  assert.deepEqual(readAts(pick(9, keeping, v2)), { klima: 300, v2: 400 }, "the Klima conduit keeps its vote");
+  const v2Keeps = laneOf(planned(400, null));
+  assert.deepEqual(readAts(pick(9, klima, v2Keeps)), { klima: 300, v2: 400 }, "the immutable conduit keeps its own");
+  assert.deepEqual(readAts(pick(9, undefined, v2)), { klima: undefined, v2: 400 }, "no Klima conduit to vote for");
+  assert.deepEqual(readAts(pick(9, laneOf(), v2)), { klima: undefined, v2: 400 }, "nothing planned for the Klima one");
+  assert.deepEqual(readAts(pick(9, klima, undefined)), { klima: 300, v2: undefined }, "no immutable conduit");
+});
+
+test("the immutable conduit's vote goes only with a Klima conduit's vote it was checked after", () => {
+  // The Klima conduit's vote changed at 300, and no vote of the immutable conduit was checked after it yet.
+  const klima = laneOf(planned(100, voteA), planned(300, voteB));
+  const v2 = laneOf(planned(50, voteB), planned(350, voteB, voteA));
+  assert.deepEqual(readAts(pick(9, klima, v2)), { klima: 100, v2: 350 }, "the freshest pair checked together");
+  const changed = laneOf(planned(300, voteB));
+  assert.deepEqual(readAts(pick(9, changed, v2)), { klima: 300, v2: undefined, unchecked: true }, "none");
+  const before = laneOf(planned(50, voteA, undefined, 7));
+  assert.deepEqual(readAts(pick(9, before, v2)), { klima: 50, v2: 350 }, "a Klima vote of an earlier block counts");
+});
+
+test("the immutable conduit's values: the last read, read again in the background once per block", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 0 });
+  let reads = 0;
+  let fails = false;
+  const answers: (() => void)[] = [];
+  const read = () =>
+    new Promise<number>((resolve, reject) => {
+      const n = ++reads;
+      answers.push(() => (fails ? reject(new Error("timeout")) : resolve(n)));
+    });
+  const unread: unknown[] = [];
+  const values = refreshed(read, (error) => unread.push(error));
+  const answer = async () => {
+    answers.shift()!();
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  const first = values(1);
+  await answer();
+  assert.deepEqual(await first, { value: 1, version: 1 }, "the first call waits");
+  assert.deepEqual(await values(1), { value: 1, version: 1 });
+  assert.equal(reads, 1, "once per block");
+  assert.deepEqual(await values(3), { value: 1, version: 1 }, "the last values while the next block's are read");
+  await values(5);
+  assert.equal(reads, 2, "one read at a time");
+  await answer();
+  assert.deepEqual(await values(5), { value: 2, version: 2 });
+  fails = true;
+  await answer();
+  assert.equal(unread.length, 1);
+  assert.deepEqual(await values(5), { value: 2, version: 2 }, "the last values after a read fails");
+  assert.equal(reads, 3, "not read again at once");
+  t.mock.timers.tick(500);
+  await values(5);
+  assert.equal(reads, 4, "read again shortly after");
+});
+
+test("the Klima conduit answers only an immutable conduit's vote ready to send in the same block", () => {
+  const signed = prepared("0x01");
+  assert.deepEqual(v2Answered(v2Plan(9, { prepared: signed }), 9, false), new Map([[zeroAddress, 5n]]));
+  assert.equal(v2Answered(undefined, 9, false), undefined, "no plan");
+  assert.equal(v2Answered(v2Plan(7, { prepared: signed }), 9, false), undefined, "for an earlier block");
+  assert.equal(v2Answered(v2Plan(9, {}), 9, false), undefined, "keeping its vote, or not prepared");
+  assert.equal(v2Answered(v2Plan(9, { prepared: prepared() }), 9, false), undefined, "not signed: not sent");
+  assert.ok(v2Answered(v2Plan(9, { prepared: prepared() }), 9, true), "a dry run plans as if it were");
+});
+
+// Base's blocks are two seconds apart, on odd seconds: block n at 1 + 2n, so the last before an even flip is at flip - 1.
+const FLIP = 1_790_812_800n;
+const LAST = (FLIP - 2n) / 2n;
+const timeOf = (n: bigint) => 1n + 2n * n;
+const [KLIMA, V2, POOL] = [addr(1), addr(2), addr(3)];
+
+/** Its latest block is before the flip for the first `behind` reads of it. */
+function outcomeChain(
+  receipts: Record<Hex, { status: string; blockNumber: bigint }>,
+  lastVoted: (conduit: string, block: bigint) => bigint,
+  behind = 0,
+) {
+  const client = {
+    getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
+      const receipt = receipts[hash];
+      if (!receipt) throw new TransactionReceiptNotFoundError({ hash });
+      return { ...receipt, transactionHash: hash };
+    },
+    getBlock: async (args?: { blockNumber?: bigint }) => {
+      const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 6n); // ten seconds after the flip
+      return { number, timestamp: timeOf(number) };
+    },
+    multicall: async ({
+      contracts,
+      blockNumber,
+    }: {
+      contracts: { functionName: string; args: string[] }[];
+      blockNumber: bigint;
+    }) =>
+      contracts.map((c) =>
+        c.functionName === "lastVoted"
+          ? lastVoted(c.args[0]!.toLowerCase(), blockNumber)
+          : c.functionName === "poolVote"
+            ? POOL
+            : 1n,
+      ),
+  } as unknown as Client;
+  const chain = {
+    client,
+    bulk: client,
+    module: addr(4),
+    conduit: KLIMA,
+    keeper: addr(5),
+    voter: addr(6),
+    ve: addr(7),
+    v2: { conduit: V2, proposer: addr(8), priced: [] },
+  } as unknown as Connection;
+  return { chain, dryRun: false } as unknown as Run;
+}
+
+test("the last block before a time is found from the latest one", async () => {
+  const run = outcomeChain({}, () => 0n);
+  assert.equal(await lastBlockBefore(run.chain.client, FLIP), LAST);
+  assert.equal(await lastBlockBefore(run.chain.client, FLIP - 1n), LAST - 1n, "strictly before");
+});
+
+test("each conduit's vote this epoch is read at the last block before the flip, and an open conduit's lost block is no failure", async () => {
+  const vote = { pools: [POOL], weights: [1n] };
+  const [klimaHash, v2Hash]: [Hex, Hex] = ["0xaa", "0xbb"];
+  const run = outcomeChain(
+    { [klimaHash]: { status: "success", blockNumber: LAST }, [v2Hash]: { status: "reverted", blockNumber: LAST - 1n } },
+    // Someone voted for the immutable conduit first in our block, and again after the flip.
+    (conduit, block) => (conduit === V2 ? (block > LAST ? FLIP + 1n : timeOf(LAST - 1n)) : timeOf(LAST)),
+  );
+  const sent = [
+    { hash: klimaHash, vote, nonce: 1, sender: klimaSender(run.chain) },
+    { hash: v2Hash, vote, nonce: 1, sender: v2Sender(run.chain) },
+  ];
+  assert.equal(await outcome(run, FLIP, sent, [KLIMA, V2]), 0);
+  const reverted = outcomeChain({ [klimaHash]: { status: "reverted", blockNumber: LAST } }, () => timeOf(LAST - 5n));
+  assert.equal(
+    await outcome(reverted, FLIP, [{ ...sent[0]!, sender: klimaSender(reverted.chain) }], [KLIMA]),
+    1,
+    "the Klima conduit's revert fails",
+  );
+});
+
+test("whether each conduit voted this epoch is read again while the node is behind, and unread fails", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const lagging = (behind: number) => outcomeChain({}, () => timeOf(LAST), behind);
+  await assert.rejects(lastBlockBefore(lagging(1).chain.client, FLIP), /not past/);
+  assert.equal(await drive(t, outcome(lagging(2), FLIP, [], [KLIMA])), 0, "read at the third try");
+  assert.equal(await drive(t, outcome(lagging(3), FLIP, [], [KLIMA])), 1, "unread");
 });

@@ -88,18 +88,24 @@ for sa in "$KEEPER_SA" "$SCHEDULER_SA"; do
   if [ -z "$roles" ]; then ok "$sa has no project-level role"; else fail "$sa has project-level roles: $roles"; fi
 done
 
-# Keeper balance: the module's KEEPER(), then its ETH.
+# check_balance WHO ADDRESS MIN_WEI: fails if ADDRESS holds less than MIN_WEI.
+check_balance() {
+  balance=$(rpc eth_getBalance "[\"$2\",\"latest\"]")
+  balance=$(printf '%s' "${balance#0x}" | sed 's/^0*//')
+  if [ ${#balance} -gt 15 ]; then # over 1 ETH, and too large for shell arithmetic
+    ok "$1 $2 holds over 1 ETH"
+  else
+    balance=$((0x${balance:-0}))
+    eth=$(awk "BEGIN { printf \"%.4f\", $balance / 1e18 }")
+    if [ "$balance" -ge "$3" ]; then ok "$1 $2 holds $eth ETH"; else fail "$1 $2 holds $eth ETH; fund it"; fi
+  fi
+}
+
+# Keeper balance: the module's KEEPER(), then its ETH. The proposer signs the immutable conduit's votes.
 keeper=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
 keeper=0x$(printf '%s' "$keeper" | tail -c 40)
-balance=$(rpc eth_getBalance "[\"$keeper\",\"latest\"]")
-balance=$(printf '%s' "${balance#0x}" | sed 's/^0*//')
-if [ ${#balance} -gt 15 ]; then # over 1 ETH, and too large for shell arithmetic
-  ok "keeper $keeper holds over 1 ETH"
-else
-  balance=$((0x${balance:-0}))
-  eth=$(awk "BEGIN { printf \"%.4f\", $balance / 1e18 }")
-  if [ "$balance" -ge "$MIN_KEEPER_WEI" ]; then ok "keeper $keeper holds $eth ETH"; else fail "keeper $keeper holds $eth ETH; fund it"; fi
-fi
+check_balance keeper "$keeper" "$MIN_KEEPER_WEI"
+[ -z "$PROPOSER" ] || check_balance proposer "$PROPOSER" "$MIN_PROPOSER_WEI"
 
 # Alerts
 channel=$(find_channel "$KEEPER_PROJECT")

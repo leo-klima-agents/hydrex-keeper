@@ -384,7 +384,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       );
     }
     log.info("claim prepared", { ...fields, gas: tx.gas, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
-    const prepared = await signTx(account, tx, dryRun);
+    const prepared = await signTx(account, tx, dryRun, chain.keeper);
     const { signed } = prepared;
     const pairs = asked.flatMap((bribe) => tokens.map((token) => pairKey(bribe, token)));
     if (!signed || dryRun) {
