@@ -125,15 +125,16 @@ async function main(): Promise<number> {
     return !voted;
   };
   const reads = perAttempt(() => readDayBefore(run, until));
-  // The two conduits vote at once and are retried apart, so that neither holds the other back.
-  const [klimaDone, v2Done] = await Promise.all([
+  // The immutable conduit votes once the Klima conduit's vote is in, or has failed, so that its check counts the votes
+  // that one moves. The two are retried apart, and either votes whatever becomes of the other.
+  const klimaDone =
     !klima ||
-      !again(epoch.lastVoted, chain.conduit) ||
-      attempts("pass", async (attempt) => pass(run, await reads(attempt), until), until),
+    !again(epoch.lastVoted, chain.conduit) ||
+    (await attempts("pass", async (attempt) => pass(run, await reads(attempt), until), until));
+  const v2Done =
     !v2 ||
-      !again(epoch.v2?.lastVoted, chain.v2!.conduit) ||
-      attempts("v2 pass", async (attempt) => passV2(run, await reads(attempt), until), until),
-  ]);
+    !again(epoch.v2?.lastVoted, chain.v2!.conduit) ||
+    (await attempts("v2 pass", async (attempt) => passV2(run, await reads(attempt), until), until));
   return failed || !klimaDone || !v2Done ? 1 : 0;
 }
 

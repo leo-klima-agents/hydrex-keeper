@@ -40,12 +40,14 @@ votes, which go straight to the conduit.
   in force by $1. That score counts only WETH, cbBTC, USDC and EURC at their Chainlink prices, and some trading fees.
   The job values a vote at its own prices, then checks that score as the vote is sent, rounded to basis points, aiming
   for $1.10: when its best vote falls short, it sends the best vote at its prices that clears it.
-- **Both conduits.** In the last blocks, each conduit plans apart. The Klima conduit's vote answers the immutable
-  conduit's vote ready for the same block, as it would any other vote, and that one is checked after the Klima conduit's
-  too, so that it clears its check whichever lands first. At each deadline, the job sends the freshest pair of plans
-  checked together, so either conduit may send a plan a few hundred ms older than its latest; with no such pair, only
-  the Klima conduit votes in that block. Neither conduit gives up rewards for the other. Voting for both costs the Klima
-  conduit about 1–2% of its rewards, as any well-run conduit voting on the same pools would.
+- **Both conduits.** A day before the flip, the immutable conduit votes once the Klima conduit's vote is in, so that its
+  check counts the votes the Klima conduit's moves. In the last blocks, each conduit plans apart. The Klima conduit's
+  vote answers the immutable conduit's vote ready for the same block, as it would any other vote, and that one is
+  checked after the Klima conduit's too, so that it clears its check whichever lands first. At each deadline, the job
+  sends the freshest pair of plans checked together, so either conduit may send a plan a few hundred ms older than its
+  latest; with no such pair, only the Klima conduit votes in that block. Neither conduit gives up rewards for the other.
+  Voting for both costs the Klima conduit about 1–2% of its rewards, as any well-run conduit voting on the same pools
+  would.
 - **Votes of others.** A vote of someone else for the conduit, in the block being built, takes that block: the job then
   does not send one, and the Klima conduit's vote answers it.
 - **Each on its own.** Neither conduit's failure stops the other's votes. The immutable conduit keeps voting if the
