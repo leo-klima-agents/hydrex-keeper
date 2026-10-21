@@ -13,18 +13,25 @@ keeper_sa=hydrex-keeper@$project.iam.gserviceaccount.com
 scheduler_sa=hydrex-keeper-scheduler@$project.iam.gserviceaccount.com
 key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1
 module=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
+# Mirrors test/sh/config/conduit.env.
+conduit=0x692c323B425A9DfeebE302F56168a7798D93EAC5
+proposer=0x000000000000000000000000000000000000bEEF
+proposer_key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-proposer-v1/cryptoKeyVersions/1
 email=hydrex-admin@example.com
 channel=projects/$project/notificationChannels/1234567890
 run_uri=https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/$job:run
 
-# What exists; drift bends the live state; list-fails denies listing scheduler jobs and alert policies.
+# What exists; drift bends the live state; list-fails denies listing scheduler jobs and alert policies; with-conduit
+# deployed the job with the immutable conduit.
 has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no list_fails=no
+with_conduit=no
 case "$FAKE_GCLOUD_SCENARIO" in
   fresh) has_sas=no has_secret=no has_version=no has_channel=no has_alert=no has_job=no has_scheduler=no ;;
   first-deploy) has_job=no has_scheduler=no ;;
   existing) ;;
   drift) drift=yes ;;
   list-fails) list_fails=yes ;;
+  with-conduit) with_conduit=yes ;;
   *)
     printf 'fake-gcloud: unknown scenario %s\n' "$FAKE_GCLOUD_SCENARIO" >&2
     exit 98
@@ -38,6 +45,10 @@ job_json() {
   else
     sa=$keeper_sa retries=3
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"}'
+  fi
+  if [ "$with_conduit" = yes ]; then
+    env="$env"',{"name":"CONDUIT","value":"'$conduit'"},{"name":"PROPOSER","value":"'$proposer'"}'
+    env="$env"',{"name":"PROPOSER_KMS_KEY_VERSION","value":"'$proposer_key'"}'
   fi
   secrets='{"name":"BASE_RPC_URLS","valueFrom":{"secretKeyRef":{"key":"latest","name":"base-rpc-url"}}},{"name":"ALCHEMY_API_KEY","valueFrom":{"secretKeyRef":{"key":"latest","name":"alchemy-api-key"}}}'
   printf '{"spec":{"template":{"spec":{"taskCount":1,"template":{"spec":{"containers":[{"env":[%s,%s],"image":"%s-docker.pkg.dev/%s/cloud-run-source-deploy/%s@sha256:0"}],"maxRetries":%s,"serviceAccountName":"%s","timeoutSeconds":"5400"}}}}}}\n' \

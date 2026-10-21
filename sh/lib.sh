@@ -12,7 +12,8 @@ MAX_RETRIES=3
 # Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the job has work to do.
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-MIN_KEEPER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, to warn before claims stop at 0.001 ETH
+MIN_KEEPER_WEI=2000000000000000   # 0.002 ETH: check.sh fails below it, to warn before claims stop at 0.001 ETH
+MIN_PROPOSER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, before claims stop or a vote in busy blocks fails
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 
@@ -34,6 +35,26 @@ make_tmp() {
   trap 'exit 143' TERM
 }
 
+# require_address NAME VALUE: dies unless VALUE is a 20-byte hex address.
+require_address() {
+  case "$2" in
+    0x*[!0-9a-fA-F]*) die "$1 must be a 20-byte hex address" ;;
+    0x*) [ ${#2} -eq 42 ] || die "$1 must be a 20-byte hex address" ;;
+    *) die "$1 must be a 20-byte hex address" ;;
+  esac
+}
+
+# require_key_version NAME VALUE: dies unless VALUE is a full key version name outside KEEPER_PROJECT.
+require_key_version() {
+  case "$2" in
+    projects/?*/locations/?*/keyRings/?*/cryptoKeys/?*/cryptoKeyVersions/?*) ;;
+    *) die "$1 must be a full cryptoKeyVersions resource name" ;;
+  esac
+  key_project=${2#projects/}
+  key_project=${key_project%%/*}
+  [ "$key_project" != "$KEEPER_PROJECT" ] || die "the key must live in another project than KEEPER_PROJECT"
+}
+
 # require_tools TOOL...: dies unless every TOOL is on PATH.
 require_tools() {
   for tool in "$@"; do
@@ -45,7 +66,7 @@ load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
   case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
   unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE RPC_SECRET ALCHEMY_SECRET \
-    COINGECKO_SECRET ALERT_EMAIL
+    COINGECKO_SECRET ALERT_EMAIL CONDUIT PROPOSER PROPOSER_KMS_KEY_VERSION
   # shellcheck source=/dev/null
   . "$CONFIG_FILE"
   REGION=${REGION:-us-central1}
@@ -56,23 +77,26 @@ load_config() {
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
   COINGECKO_SECRET=${COINGECKO_SECRET:-}
+  CONDUIT=${CONDUIT:-}
+  PROPOSER=${PROPOSER:-}
+  PROPOSER_KMS_KEY_VERSION=${PROPOSER_KMS_KEY_VERSION:-}
 
   for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
     eval "value=\${$required:-}"
     [ -n "$value" ] || die "$required is not set in $CONFIG_FILE"
   done
-  case "$KMS_KEY_VERSION" in
-    projects/?*/locations/?*/keyRings/?*/cryptoKeys/?*/cryptoKeyVersions/?*) ;;
-    *) die "KMS_KEY_VERSION must be a full cryptoKeyVersions resource name" ;;
-  esac
-  key_project=${KMS_KEY_VERSION#projects/}
-  key_project=${key_project%%/*}
-  [ "$key_project" != "$KEEPER_PROJECT" ] || die "the key must live in another project than KEEPER_PROJECT"
-  case "$MODULE" in
-    0x*[!0-9a-fA-F]*) die "MODULE must be a 20-byte hex address" ;;
-    0x*) [ ${#MODULE} -eq 42 ] || die "MODULE must be a 20-byte hex address" ;;
-    *) die "MODULE must be a 20-byte hex address" ;;
-  esac
+  require_key_version KMS_KEY_VERSION "$KMS_KEY_VERSION"
+  require_address MODULE "$MODULE"
+  # The immutable conduit the job also votes for, and the key and address that sign its votes: all or none.
+  if [ -n "$CONDUIT$PROPOSER$PROPOSER_KMS_KEY_VERSION" ]; then
+    [ -n "$CONDUIT" ] && [ -n "$PROPOSER" ] && [ -n "$PROPOSER_KMS_KEY_VERSION" ] ||
+      die "CONDUIT, PROPOSER and PROPOSER_KMS_KEY_VERSION go together"
+    require_address CONDUIT "$CONDUIT"
+    require_address PROPOSER "$PROPOSER"
+    require_key_version PROPOSER_KMS_KEY_VERSION "$PROPOSER_KMS_KEY_VERSION"
+    [ "${PROPOSER_KMS_KEY_VERSION%/cryptoKeyVersions/*}" != "${KMS_KEY_VERSION%/cryptoKeyVersions/*}" ] ||
+      die "the proposer needs its own key, not the keeper's"
+  fi
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
     *) die "ALERT_EMAIL must be an email address" ;;
@@ -86,6 +110,9 @@ load_config() {
   SCHEDULE="50 23 * * 2,3"
   # Sorted by name, as check.sh reads them back.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
+  if [ -n "$CONDUIT" ]; then
+    ENV_VARS="CONDUIT=$CONDUIT,$ENV_VARS,PROPOSER=$PROPOSER,PROPOSER_KMS_KEY_VERSION=$PROPOSER_KMS_KEY_VERSION"
+  fi
   SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest,BASE_RPC_URLS=$RPC_SECRET:latest"
   SECRET_NAMES="$RPC_SECRET $ALCHEMY_SECRET"
   if [ -n "$COINGECKO_SECRET" ]; then

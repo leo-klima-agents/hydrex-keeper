@@ -31,6 +31,36 @@ export const conduitAbi = parseAbi([
   "event CarbonRetired(address indexed creditToken_, uint256 retireTonnes, uint256 kvcmSpent)",
 ]);
 
+// Source: hydrex-conduit's ImmutableVeTokenConduit, version 2.
+export const immutableAbi = parseAbi([
+  "function voter() view returns (address)",
+  "function veToken() view returns (address)",
+  "function vote(address[] pools, uint256[] weights) returns (uint256 oldScore, uint256 newScore)",
+  "function currentScore() view returns (uint256)",
+  "function poolValue(address pool) view returns (uint256 usd)",
+  "function pricedTokens(uint256 index) view returns (address token, address feed, uint256 maxAge, uint256 mul, uint256 div)",
+  "function claim(uint256 tokenId, address[] feeAddresses, address[] bribeAddresses, address[] tokens) returns (uint256[] amounts)",
+  "event VoteAccepted(uint256 indexed epoch, address indexed proposer, address[] pools, uint256[] weights, uint256 oldScore, uint256 newScore)",
+  "event Claimed(uint256 indexed tokenId, address indexed owner, address indexed caller, address[] tokens, uint256[] amounts, uint256[] fees, uint256 previousClaimBlock)",
+  "error SequencerDown()",
+  "error EpochStale()",
+  "error NoVotingPower()",
+  "error BadPoolCount()",
+  "error LengthMismatch()",
+  "error ZeroWeight()",
+  "error Duplicate(address account)",
+  "error ZeroVotes(address pool)",
+  "error DeadGauge(address pool)",
+  "error NotBetter(uint256 oldScore, uint256 newScore)",
+  "error NoRewardContracts()",
+  "error TokenCallFailed(address token)",
+  "error Reentrancy()",
+  // Raised by the Voter; the conduit re-raises them.
+  "error EpochFlipInProgress()",
+  "error VoteDelayNotMet()",
+  "error InsufficientVotingPower()",
+]);
+
 export const voterAbi = parseAbi([
   "function _epochTimestamp() view returns (uint256)",
   "function length() view returns (uint256)",

@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
-import { expected, proportional, select, toVote, waterFill, type Candidate } from "../src/select.ts";
+import {
+  asVoted,
+  expected,
+  gain,
+  proportional,
+  score,
+  select,
+  summarize,
+  toVote,
+  waterFill,
+  waterFillAbove,
+  type Candidate,
+} from "../src/select.ts";
 
 const A = "0x000000000000000000000000000000000000000a" as Address;
 const B = "0x000000000000000000000000000000000000000b" as Address;
@@ -100,4 +112,59 @@ test("a vote is in basis points, without the pools that get none", () => {
     pools: [A, C],
     weights: [7500n, 2500n],
   });
+});
+
+test("a smaller pool limit, as the immutable conduit's 20, applies to every allocation", () => {
+  assert.equal(waterFill(many(50), 1_000_000n, 20)!.filter((xi) => xi > 0).length, 20);
+  assert.equal(
+    proportional(
+      Array.from({ length: 50 }, (_, i) => i + 1),
+      20,
+    )!.filter((xi) => xi > 0).length,
+    20,
+  );
+  const { vote } = select(many(50), 1_000_000n, 20);
+  assert.equal(vote!.pools.length, 20);
+});
+
+test("a conduit's score values the same allocation at its own prices", () => {
+  const candidates = [candidate(A, 100, 1000n), candidate(B, 0, 1000n)];
+  assert.ok(Math.abs(score(candidates, [0, 100], [0.5, 0.5], 1000n) - (100 * 500) / 1500) < 1e-9);
+  assert.equal(score(candidates, [0, 100], [1, 0], 1000n), 0);
+});
+
+test("above a bar, the allocation gives up as little at our prices as the conduit's check needs", () => {
+  // We value A only, the conduit B only: the vote must put f on B with 100·f/(1 + f) ≥ 10, so f ≥ 1/9.
+  const candidates = [candidate(A, 100, 1000n), candidate(B, 0, 1000n)];
+  const x = waterFillAbove(candidates, 1000n, [0, 100], 10)!;
+  assert.ok(score(candidates, [0, 100], x, 1000n) >= 10);
+  assert.ok(Math.abs(x[1]! - 1 / 9) < 0.002, `put ${x[1]} on B`);
+  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 0), [1, 0], "no bar: our own best");
+  assert.equal(waterFillAbove(candidates, 1000n, [0, 100], 60), null, "not even all on B scores 60");
+  assert.equal(waterFillAbove(candidates, 1000n, [0, 0], 1), null, "the conduit values nothing");
+  const ours = waterFill(candidates, 1000n);
+  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 10, undefined, ours), x, "our water-filling, given");
+});
+
+test("the gain of an allocation is over the vote in force, at our prices", () => {
+  const candidates = [candidate(A, 1000, 100n, 25n), candidate(B, 1000, 100n, 25n)];
+  assert.ok(Math.abs(gain(candidates, [0.5, 0.5], 50n)) < 1e-9);
+  assert.ok(gain(candidates, [1, 0], 50n) < 0);
+});
+
+test("a vote's shares are its fractions rounded to basis points, as the Voter splits its power", () => {
+  assert.deepEqual(asVoted([0.33333, 0.66667]), [0.3333, 0.6667]);
+  assert.deepEqual(asVoted([0.00004, 0.99996]), [0, 1], "under half a basis point is no vote");
+  assert.deepEqual(asVoted([0, 0]), [0, 0]);
+});
+
+test("a summary gives the shares in percent, the expected reward and the vote in force", () => {
+  const candidates = [candidate(A, 100, 100n, 7n), candidate(B, 0, 100n)];
+  assert.deepEqual(summarize(candidates, [1, 0], 100n), {
+    plan: [{ pool: A, share: 100 }],
+    expectedUsd: 50,
+    currentVote: [{ pool: A, votes: 7n }],
+    power: 100n,
+  });
+  assert.deepEqual(summarize(candidates, null, 100n).plan, []);
 });

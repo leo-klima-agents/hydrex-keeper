@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   concatHex,
   decodeErrorResult,
+  encodeFunctionData,
   encodeAbiParameters,
   parseTransaction,
   toFunctionSelector,
@@ -11,9 +12,18 @@ import {
   type Hex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { moduleAbi } from "../src/abi.ts";
+import { immutableAbi, moduleAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
-import { broadcastTx, castVote, markMined, nonceTaken, prepareVote, VoteSent } from "../src/vote.ts";
+import {
+  broadcastTx,
+  castVote,
+  klimaSender,
+  markMined,
+  nonceTaken,
+  prepareVote,
+  v2Sender,
+  VoteSent,
+} from "../src/vote.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [MODULE, CONDUIT, VOTER, POOL, OTHER] = [addr(1), addr(2), addr(3), addr(4), addr(5)] as const;
@@ -31,28 +41,36 @@ type Behaviour = {
   verifyFails?: boolean;
   sendFails?: boolean;
   balance?: bigint;
+  revertsAfterRival?: boolean;
+  /** The conduit's `lastVoted` as of the receipt's block. */
+  lastVoted?: bigint;
 };
+
+const MINED_AT = 1_790_812_801n; // the timestamp of block 42, the receipt's
 
 /** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
   const simulatedAt: bigint[] = [];
   const simulatedOn: (bigint | undefined)[] = [];
+  const simulatedCalls: number[] = [];
   const client = {
     simulateBlocks: async ({
       blocks,
       blockNumber,
       blockTag,
     }: {
-      blocks: { blockOverrides: { time: bigint } }[];
+      blocks: { blockOverrides: { time: bigint }; calls: unknown[] }[];
       blockNumber?: bigint;
       blockTag?: string;
     }) => {
       assert.equal(blockTag, undefined, "simulates on top of the latest block, or of the one read");
       simulatedAt.push(blocks[0]!.blockOverrides.time);
       simulatedOn.push(blockNumber);
+      simulatedCalls.push(blocks[0]!.calls.length);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
-      return [{ calls: [b.reverts ? failure : { status: "success", gasUsed: 100_000n }] }];
+      const fails = b.reverts || (b.revertsAfterRival && blocks[0]!.calls.length > 1);
+      return [{ calls: [fails ? failure : { status: "success", gasUsed: 100_000n }] }];
     },
     estimateMaxPriorityFeePerGas: async () => 100n,
     getFeeHistory: async () => ({
@@ -62,7 +80,8 @@ function fakeChain(b: Behaviour = {}) {
     }),
     getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
       blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
-    getBlock: async (args?: object) => {
+    getBlock: async (args?: { blockNumber?: bigint }) => {
+      if (args?.blockNumber === 42n) return { number: 42n, timestamp: MINED_AT };
       assert.equal(args, undefined, "the latest block");
       return { number: 41n, timestamp: 1_790_812_797n };
     },
@@ -85,7 +104,9 @@ function fakeChain(b: Behaviour = {}) {
     multicall: async ({ contracts, blockNumber }: { contracts: { functionName: string }[]; blockNumber?: bigint }) => {
       assert.equal(blockNumber, 42n, "verification reads the receipt's block");
       if (b.verifyFails) throw new Error("header not found");
-      return contracts.map((c) => (c.functionName === "poolVote" ? (b.recorded ?? POOL) : 1n));
+      const answer = (functionName: string) =>
+        functionName === "poolVote" ? (b.recorded ?? POOL) : functionName === "lastVoted" ? (b.lastVoted ?? 1n) : 1n;
+      return contracts.map((c) => answer(c.functionName));
     },
   } as unknown as Client;
   const broadcast = async (signed: Hex) => {
@@ -103,7 +124,7 @@ function fakeChain(b: Behaviour = {}) {
     voter: VOTER,
     ve: addr(6),
   };
-  return { chain, sent, simulatedAt, simulatedOn };
+  return { chain, sent, simulatedAt, simulatedOn, simulatedCalls };
 }
 
 const vote = { pools: [POOL], weights: [100n] };
@@ -159,9 +180,9 @@ test("a reverted or mismatching vote is reported as sent, so it is not retried",
 
 test("a vote is simulated just after the block it is for, and not sent if it would revert", async () => {
   const { chain, simulatedAt, simulatedOn } = fakeChain();
-  await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 0n });
+  await prepareVote(chain, signer, vote, false, { time: 1_790_812_795n, lastVoted: 0n });
   await castVote(chain, signer, vote, false, far);
-  assert.deepEqual(simulatedAt, [1_790_812_800n, 1_790_812_798n]);
+  assert.deepEqual(simulatedAt, [1_790_812_796n, 1_790_812_798n]);
   assert.deepEqual(simulatedOn, [undefined, 41n], "a vote before the last blocks, on the block whose time it takes");
   const reverting = fakeChain({ reverts: true });
   await assert.rejects(castVote(reverting.chain, signer, vote, false, far), /VoteDelayNotMet/);
@@ -269,4 +290,150 @@ test("the module ABI names the Voter's and the conduit's errors that a simulated
   ]);
   const decoded = decodeErrorResult({ abi: moduleAbi, data });
   assert.deepEqual([decoded.errorName, decoded.args], ["AccessControlUnauthorizedAccount", [MODULE, role]]);
+});
+
+const proposer = privateKeyToAccount(generatePrivateKey());
+const V2 = addr(7);
+
+test("the immutable conduit's vote goes from the proposer straight to the conduit", async () => {
+  const { chain, sent } = fakeChain({ nonce: 5 });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  const tx = parseTransaction(sent[0]!);
+  assert.equal(tx.to, V2);
+  assert.equal(tx.nonce, 5);
+  const moduleVote = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args: [vote.pools, vote.weights] });
+  assert.equal(tx.data, moduleVote, "the same vote(address[],uint256[]) as the module's");
+  assert.throws(() => v2Sender(fakeChain().chain), /no immutable conduit/);
+});
+
+test("the keeper's and the proposer's pending votes are tracked apart", async () => {
+  const { chain, sent } = fakeChain({ nonce: 3, receipt: "timeout" });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await castVote(chain, signer, vote, false, far);
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  assert.equal(
+    parseTransaction(sent[1]!).maxFeePerGas,
+    1_000n,
+    "the keeper's pending vote does not bump the proposer's",
+  );
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  assert.equal(parseTransaction(sent[2]!).maxFeePerGas, 1_250n, "its own does");
+  markMined(chain, 3, proposer.address);
+  const keeperNext = await prepareVote(chain, signer, vote, false);
+  assert.deepEqual(
+    [keeperNext.tx.nonce, keeperNext.tx.maxFeePerGas],
+    [3, 1_250n],
+    "the proposer's receipt is not the keeper's",
+  );
+});
+
+test("a proposer short of funds is told so", async () => {
+  const { chain } = fakeChain({ balance: 1n });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await assert.rejects(castVote(chain, proposer, vote, false, far, v2Sender(chain)), /fund the proposer: 0x/);
+});
+
+test("the immutable conduit's ABI names its own errors and the Voter's it passes through", () => {
+  for (const name of ["SequencerDown", "EpochStale", "NoVotingPower", "VoteDelayNotMet", "EpochFlipInProgress"]) {
+    assert.equal(decodeErrorResult({ abi: immutableAbi, data: toFunctionSelector(`${name}()`) }).errorName, name);
+  }
+  const data = concatHex([
+    toFunctionSelector("NotBetter(uint256,uint256)"),
+    encodeAbiParameters([{ type: "uint256" }, { type: "uint256" }], [5n, 4n]),
+  ]);
+  assert.deepEqual(decodeErrorResult({ abi: immutableAbi, data }).args, [5n, 4n]);
+});
+
+test("a vote for the last block before a flip is simulated within its epoch, as the immutable conduit requires", async () => {
+  const { chain, simulatedAt } = fakeChain();
+  await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 0n });
+  assert.deepEqual(simulatedAt, [1_790_812_799n], "1_790_812_800 is a flip");
+});
+
+test("anyone may vote for the immutable conduit, so a later vote of it does not mean the proposer's was mined", async () => {
+  const { chain } = fakeChain({ nonce: 3 });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  const sender = v2Sender(chain);
+  const first = await prepareVote(chain, proposer, vote, false, { time: 1_790_812_797n, lastVoted: 100n }, sender);
+  await broadcastTx(chain, { ...first, signed: first.signed! }, far);
+  const target = { time: 1_790_812_799n, lastVoted: 1_790_812_797n };
+  const next = await prepareVote(chain, proposer, vote, false, target, sender);
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [3, 1_250n], "replaced, not queued behind");
+  markMined(chain, 3, proposer.address);
+  const after = await prepareVote(chain, proposer, vote, false, target, sender);
+  assert.equal(after.tx.nonce, 4, "its receipt still counts");
+});
+
+test("the immutable conduit's votes are prepared through a client of their own, which knows what was sent", async () => {
+  const { chain, simulatedCalls } = fakeChain({ nonce: 3 });
+  const own = fakeChain({ nonce: 3 });
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  chain.v2Client = own.chain.client;
+  const target = { time: 1_790_812_797n, lastVoted: 100n };
+  const first = await prepareVote(chain, proposer, vote, false, target, v2Sender(chain));
+  assert.deepEqual([simulatedCalls.length, own.simulatedCalls.length], [0, 1], "simulated through its own client");
+  await broadcastTx(chain, { ...first, signed: first.signed! }, far);
+  const next = await prepareVote(chain, proposer, vote, false, { ...target, time: 1_790_812_799n }, v2Sender(chain));
+  assert.deepEqual(
+    [next.tx.nonce, next.tx.maxFeePerGas],
+    [3, 1_250n],
+    "the vote it sent is replaced, not queued behind",
+  );
+  await prepareVote(chain, signer, vote, false, target);
+  assert.deepEqual(
+    [simulatedCalls.length, own.simulatedCalls.length],
+    [1, 2],
+    "the Klima conduit's, through the chain's",
+  );
+});
+
+test("an immutable conduit's vote that another vote beat to its block is decided again, not reported as sent", async () => {
+  const beatenTo = (lastVoted?: bigint) => {
+    const { chain } = fakeChain({ receipt: "reverted", ...(lastVoted ? { lastVoted } : {}) });
+    chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+    return chain;
+  };
+  const beaten = beatenTo(MINED_AT);
+  await assert.rejects(
+    castVote(beaten, proposer, vote, false, far, v2Sender(beaten)),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its block/.test(e.message),
+  );
+  const next = await prepareVote(beaten, proposer, vote, false, undefined, v2Sender(beaten));
+  assert.equal(next.tx.nonce, 8, "past the one the reverted vote took");
+  const lost = beatenTo();
+  await assert.rejects(castVote(lost, proposer, vote, false, far, v2Sender(lost)), VoteSent, "reverted for itself");
+  const klima = fakeChain({ receipt: "reverted", lastVoted: MINED_AT }).chain;
+  await assert.rejects(castVote(klima, signer, vote, false, far), VoteSent, "only the keeper votes for the Klima one");
+});
+
+test("a vote cast a day before the flip is also checked after the Klima conduit's, which may still be pending", async () => {
+  const { chain, sent, simulatedCalls } = fakeChain();
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  const rival = { sender: klimaSender(chain), vote: { pools: [OTHER], weights: [1n] } };
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain), rival);
+  assert.deepEqual(simulatedCalls, [1, 2], "alone, then after the Klima conduit's");
+  assert.equal(sent.length, 1);
+  const refused = fakeChain({ revertsAfterRival: true });
+  refused.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await assert.rejects(
+    castVote(refused.chain, proposer, vote, false, far, v2Sender(refused.chain), rival),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /after the keeper's/.test(e.message),
+  );
+  assert.equal(refused.sent.length, 0, "not sent, and retried");
+});
+
+test("with a rival vote, the vote is also simulated after it, and refused if it would revert there", async () => {
+  const target = { time: 1_790_812_797n, lastVoted: 0n };
+  const ok = fakeChain();
+  ok.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  const rival = { sender: klimaSender(ok.chain), vote: { pools: [OTHER], weights: [1n] } };
+  await prepareVote(ok.chain, proposer, vote, false, target, v2Sender(ok.chain), rival);
+  assert.deepEqual(ok.simulatedCalls, [1, 2], "alone, then after the rival's");
+  const refused = fakeChain({ revertsAfterRival: true });
+  refused.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await assert.rejects(
+    prepareVote(refused.chain, proposer, vote, false, target, v2Sender(refused.chain), rival),
+    /would revert after the keeper's/,
+  );
 });
