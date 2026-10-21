@@ -266,7 +266,10 @@ export async function nonceTaken({ client, keeper }: Chain, nonce: number, from:
   );
 }
 
-/** Prepares and sends the sender's vote; verifies the Voter recorded it, waiting at most until `until` (ms). */
+/**
+ * Prepares and sends the sender's vote, checked after `rival`'s if any; verifies the Voter recorded it, waiting at most
+ * until `until` (ms).
+ */
 export async function castVote(
   chain: Chain,
   account: LocalAccount | undefined,
@@ -274,8 +277,9 @@ export async function castVote(
   dryRun: boolean,
   until: number,
   sender: Sender = klimaSender(chain),
+  rival?: Rival,
 ): Promise<void> {
-  const prepared = await prepareVote(chain, account, vote, dryRun, undefined, sender);
+  const prepared = await prepareVote(chain, account, vote, dryRun, undefined, sender, rival);
   const { signed } = prepared;
   const { conduit } = sender;
   if (!signed) return;

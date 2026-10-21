@@ -407,6 +407,22 @@ test("an immutable conduit's vote that another vote beat to its block is decided
   await assert.rejects(castVote(klima, signer, vote, false, far), VoteSent, "only the keeper votes for the Klima one");
 });
 
+test("a vote cast a day before the flip is also checked after the Klima conduit's, which may still be pending", async () => {
+  const { chain, sent, simulatedCalls } = fakeChain();
+  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  const rival = { sender: klimaSender(chain), vote: { pools: [OTHER], weights: [1n] } };
+  await castVote(chain, proposer, vote, false, far, v2Sender(chain), rival);
+  assert.deepEqual(simulatedCalls, [1, 2], "alone, then after the Klima conduit's");
+  assert.equal(sent.length, 1);
+  const refused = fakeChain({ revertsAfterRival: true });
+  refused.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
+  await assert.rejects(
+    castVote(refused.chain, proposer, vote, false, far, v2Sender(refused.chain), rival),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /after the keeper's/.test(e.message),
+  );
+  assert.equal(refused.sent.length, 0, "not sent, and retried");
+});
+
 test("with a rival vote, the vote is also simulated after it, and refused if it would revert there", async () => {
   const target = { time: 1_790_812_797n, lastVoted: 0n };
   const ok = fakeChain();

@@ -4,8 +4,8 @@ import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { log, warnOnce } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
-import { proportional, toVote } from "./select.ts";
-import { castVote, v2Sender } from "./vote.ts";
+import { proportional, toVote, type Vote } from "./select.ts";
+import { castVote, klimaSender, v2Sender } from "./vote.ts";
 import type { Whitelist } from "./whitelist.ts";
 
 export type Run = {
@@ -66,18 +66,24 @@ export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Prom
   };
 }
 
-/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. */
-export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<void> {
+/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. Returns it once cast. */
+export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<Vote | undefined> {
   const fractions = proportional(valueRewards(run, pools, priced, true));
-  if (!fractions) return log.info("no pool pays anything; keeping the current vote");
-  await castVote(run.chain, run.account, toVote(pools, fractions), run.dryRun, until);
+  if (!fractions) {
+    log.info("no pool pays anything; keeping the current vote");
+    return undefined;
+  }
+  const vote = toVote(pools, fractions);
+  await castVote(run.chain, run.account, vote, run.dryRun, until);
+  return vote;
 }
 
 /**
- * The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check.
- * When the conduit's own values cannot be read, the simulation checks it.
+ * The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check,
+ * after `klima`, the Klima conduit's vote of the same pass, too: that one may still be pending. When the conduit's own
+ * values cannot be read, the simulation checks it.
  */
-export async function passV2(run: Run, { pools, priced }: DayBefore, until: number): Promise<void> {
+export async function passV2(run: Run, { pools, priced }: DayBefore, until: number, klima?: Vote): Promise<void> {
   const { chain } = run;
   const { conduit, priced: tokens } = chain.v2!;
   const [state, values, current] = await Promise.all([
@@ -91,5 +97,6 @@ export async function passV2(run: Run, { pools, priced }: DayBefore, until: numb
   const { vote, note, summary } = decideV2(state, valueRewards(run, state.pools, priced, false), onchain, true);
   if (!vote) return log.info(note, { conduit, ...summary });
   log.info("v2 vote", { conduit, ...summary });
-  await castVote(chain, run.proposer, vote, run.dryRun, until, v2Sender(chain));
+  const rival = klima && { sender: klimaSender(chain), vote: klima };
+  await castVote(chain, run.proposer, vote, run.dryRun, until, v2Sender(chain), rival);
 }
