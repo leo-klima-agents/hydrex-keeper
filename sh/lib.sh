@@ -13,7 +13,7 @@ MAX_RETRIES=3
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
 MIN_KEEPER_WEI=2000000000000000   # 0.002 ETH: check.sh fails below it, to warn before claims stop at 0.001 ETH
-MIN_PROPOSER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, before a vote in busy blocks could not be paid
+MIN_PROPOSER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, before claims stop or a vote in busy blocks fails
 # PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 

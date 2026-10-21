@@ -69,7 +69,8 @@ export type ModuleCall =
   | {
       functionName: "claimSwapAndDistribute";
       args: readonly [bigint, Address[], Hex[], Address[], Address[], Address[], bigint, bigint];
-    };
+    }
+  | { functionName: "claim"; args: readonly [bigint, Address[], Address[], Address[]] };
 
 type LastSent = Tx & { lastVoted?: bigint | undefined; mined?: boolean };
 
