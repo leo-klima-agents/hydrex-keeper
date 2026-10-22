@@ -28,40 +28,38 @@ import {
   type Sender,
 } from "./vote.ts";
 
-const WARMUP_MS = 60_000; // the pass starts this long before the flip, to learn the block timing
+const WARMUP_MS = 60_000; // starts this long before the flip to learn the block timing
 const PRICES_BY_MS = 5_000; // before the flip
 const TICK_MS = 50;
 const PLAN_EVERY_MS = 100;
-const MAX_PLANS = 3; // in flight, per lane
-const RECENT = 30; // plans kept per lane: more than come back for one block
+const MAX_PLANS = 3; // in flight per lane
+const RECENT = 30; // plans kept per lane, more than come back for one block
 const RETRY_DELAY_MS = 5_000;
-const SHARED_READ_MS = 50; // the lanes share a read of the votes started this recently
-const REREAD_MS = 500; // after a read of the immutable conduit's values fails
-const FIRST_READ_WAIT_MS = 3_000; // the longest a plan waits for the immutable conduit's first values
+const SHARED_READ_MS = 50; // lanes share a read of the votes started this recently
+const REREAD_MS = 500; // after a failed read of the immutable conduit's values
+const FIRST_READ_WAIT_MS = 3_000;
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
 
-/** A vote sent, and for the immutable conduit, its votes on each pool once it lands, by lowercase pool. */
 export type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender; votes?: Map<Address, bigint> | undefined };
 
-/** What to send for one conduit in the block with timestamp `time` (ms), from a read at `readAt` (ms). */
+/** What one conduit sends in the block at `time` (ms), planned from a read at `readAt` (ms). */
 export type Plan = {
   readAt: number;
   time: number;
   vote: Vote | null;
   note: string;
   prepared?: Prepared;
-  /** The immutable conduit's votes on each pool once its vote lands, by lowercase pool. */
+  /** The immutable conduit's votes on each pool once its vote lands, keyed by lowercase pool. */
   votes?: Map<Address, bigint>;
-  /** The vote of the other conduit `prepared` was checked after, if any. */
+  /** The other conduit's vote that `prepared` was checked after, if any. */
   rival?: Vote | undefined;
-  /** The Klima conduit's: whether its vote answered a vote of the immutable conduit, rather than its votes in force. */
+  /** Klima conduit only: whether its vote answered an immutable conduit vote rather than the votes in force. */
   answered?: boolean | undefined;
   summary: Record<string, unknown>;
 };
 
-/** One conduit's plans: `best` is the freshest that came back, and `recent` the last RECENT that did. */
 export type Lane<P> = {
   name: string;
   plan: (best: P | undefined) => Promise<P>;
@@ -72,20 +70,17 @@ export type Lane<P> = {
 type Race<P> = {
   blocks: Blocks;
   lanes: Lane<P>[];
-  /** Sends the lanes' plans for the block with timestamp `time` (ms). */
   send: (time: number) => void;
 };
 
-/** Keeps `plan` among the lane's recent ones, and makes it the lane's best if it is fresher. */
 export function keep<P extends { readAt: number }>(lane: Lane<P>, plan: P): void {
   lane.recent = [...(lane.recent ?? []), plan].slice(-RECENT);
   if (!lane.best || plan.readAt > lane.best.readAt) lane.best = plan;
 }
 
 /**
- * Starts a plan of each lane every PLAN_EVERY_MS, and sends the lanes' plans at the deadline of each of the last two
- * blocks before `flip` (ms). Deadlines come from the block timing alone, so a poll or a plan that hangs delays nothing,
- * and lanes plan apart, so a lane that fails or lags delays no other. Returns the number of sends.
+ * Deadlines come from block timing alone, so a hung poll or plan delays nothing. Lanes plan separately, so a lane that
+ * fails or lags holds up no other.
  */
 export async function race<P extends { readAt: number }>(
   flip: number,
@@ -141,10 +136,7 @@ export async function race<P extends { readAt: number }>(
   return sends;
 }
 
-/**
- * The Klima conduit's water-filling vote, or null to keep the current one, against everyone else's votes: with the
- * immutable conduit's `v2Votes` on each pool instead of its votes in force, if given.
- */
+/** With `v2Votes`, those replace the immutable conduit's votes in force. */
 function decide({ epoch, pools }: State, usd: number[], v2Votes?: Map<Address, bigint>) {
   const candidates = pools.map((p, i) => ({
     ...p,
@@ -157,8 +149,8 @@ function decide({ epoch, pools }: State, usd: number[], v2Votes?: Map<Address, b
 }
 
 /**
- * The immutable conduit's votes the Klima conduit answers in the block at `time` (ms): those of its plan for that
- * block, if that plan has a vote ready to send. Otherwise the Klima conduit answers its votes in force.
+ * The immutable conduit votes that the Klima conduit answers in the block at `time`: those of its plan for that block,
+ * if a vote is ready to send. Otherwise the Klima conduit answers the votes in force.
  */
 export function v2Answered(v2: Plan | undefined, time: number, dryRun: boolean): Map<Address, bigint> | undefined {
   const ready = v2?.prepared && v2.time === time && (v2.prepared.signed !== undefined || dryRun);
@@ -166,9 +158,9 @@ export function v2Answered(v2: Plan | undefined, time: number, dryRun: boolean):
 }
 
 /**
- * The nonces of the immutable conduit's sent votes that `state` shows in force. Anyone may vote for that conduit, so
- * its `lastVoted` does not tell whose vote landed, as the Klima conduit's does; but a vote in force with the same votes
- * on every pool as a sent one is that one, and its nonce is taken whatever a node behind says.
+ * The nonces of the immutable conduit's sent votes that `state` shows in force. Anyone can vote for that conduit, so
+ * its `lastVoted` doesn't say whose vote landed. But a vote in force that matches a sent one on every pool is that one,
+ * and its nonce is used, whatever a lagging node says.
  */
 export function landed(state: State, sent: Iterable<Sent>): number[] {
   if (!state.epoch.v2?.votedThisEpoch) return [];
@@ -177,10 +169,8 @@ export function landed(state: State, sent: Iterable<Sent>): number[] {
   );
 }
 
-/** The Klima conduit's vote prepared to send, which the immutable conduit's must clear after. */
 const rivalOf = (klima: Plan | undefined): Vote | undefined => (klima?.prepared && klima.vote) || undefined;
 
-/** The plans to send for each conduit: those that came back for the block, else the freshest. */
 function forBlock(lane: Lane<Plan> | undefined, time: number): (Plan | undefined)[] {
   if (!lane?.best) return [undefined];
   const plans = (lane.recent ?? []).filter((p) => p.time === time);
@@ -188,11 +178,12 @@ function forBlock(lane: Lane<Plan> | undefined, time: number): (Plan | undefined
 }
 
 /**
- * What each conduit sends in the block at `time` (ms). The immutable conduit's vote goes only with a Klima conduit's
- * vote it was checked after, so that it clears its check whichever lands first: of the plans for that block, the pair
- * whose staler plan is the freshest, among those in which at most one conduit votes or the immutable conduit's vote was
- * checked after the Klima conduit's. Without such a pair, the Klima conduit's alone, and `unchecked`: as the immutable
- * conduit's votes in force stay, its freshest plan that answered those, if any, else its `freshest`.
+ * What each conduit sends in the block at `time` (ms). The immutable conduit's vote only goes out with a Klima vote it
+ * was checked after, so that it clears its check whichever lands first. Among the plans for that block, the pair whose
+ * older plan is freshest wins, out of the pairs where at most one conduit votes or the immutable conduit's vote was
+ * checked after the Klima conduit's. With no such pair, only the Klima conduit votes and `unchecked` is set. The
+ * immutable conduit's votes in force then stay, so the Klima conduit sends its freshest plan that answered those, or
+ * else its `freshest`.
  */
 export function pick(
   time: number,
@@ -220,9 +211,9 @@ export function pick(
 }
 
 /**
- * The last value `read` gave, read again in the background once for each block, at its first call with that block's
- * `time`, and REREAD_MS after a read that fails; one read at a time. Only calls before any value wait for one, and for
- * `wait` ms at most: a read that hangs then holds back no plan.
+ * Gives the last value `read` returned. It reads again in the background once per block, on the first call with that
+ * block's `time`, and REREAD_MS after a failed read, one read at a time. Only calls made before there is any value wait
+ * for one, and for at most `wait` ms, so a hung read holds back no plan.
  */
 export function refreshed<T>(
   read: () => Promise<T>,
@@ -260,13 +251,11 @@ export function refreshed<T>(
   };
 }
 
-/** `decide` once for each key: plans that see the same votes decide alike. */
 function memo<T>(): (key: string, decide: () => T) => T {
   let last: { key: string; value: T } | undefined;
   return (key, decide) => (last?.key === key ? last : (last = { key, value: decide() })).value;
 }
 
-/** What a conduit's decision depends on in a read of the votes. */
 const keyOf = ({ epoch, pools }: State) =>
   [
     epoch.start,
@@ -277,12 +266,6 @@ const keyOf = ({ epoch, pools }: State) =>
     ...pools.flatMap((p) => [p.otherVotes, p.ownVotes, p.v2Votes]),
   ].join();
 
-/**
- * Votes in each of the last two blocks before the flip, as late as each allows, for each conduit in `conduits`. Each
- * plans in its own lane, so that neither's failure or delay holds the other back. The Klima conduit's vote answers the
- * immutable conduit's vote prepared for the same block, and that one is sent only together with a Klima conduit's vote
- * it was checked after, so that it clears its check whichever lands first. Returns the number of failures.
- */
 export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: boolean; v2: boolean }): Promise<number> {
   const { chain, account, proposer, dryRun } = run;
   const flipMs = Number(flip) * 1000;
@@ -300,10 +283,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   let failures = 0;
   let rewards: PoolRewards[] = [];
   let priced: Prices = new Map();
-  let usd: number[] = []; // each pool's rewards in USD, as `rewards`; votes do not change them
-  let valued: Address[] = []; // the pools the immutable conduit can value
+  let usd: number[] = [];
+  let valued: Address[] = [];
 
-  /** Prepares a conduit's vote for the block at `base.time`, or reuses the one prepared for the same block and votes. */
   const prepare = async (
     base: Plan,
     best: Plan | undefined,
@@ -321,11 +303,11 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return { ...base, prepared, rival: rival?.vote };
   };
 
-  // Signatures of one transaction differ, so copies of it are found by its unsigned hash.
+  // Two signatures of the same transaction differ, so copies are matched by the unsigned hash.
   const sent = new Map<Hex, Sent>();
 
-  // The votes in the block being built, read once for the lanes that plan at about the same time. A plan is as fresh
-  // as the read it uses, and for the block being built when that read started.
+  // The pending block's votes, read once for the lanes that plan at about the same time. A plan is for the block that
+  // was being built when its read started.
   let votes: { readAt: number; time: number; state: Promise<State> } | undefined;
   const votesNow = () => {
     const now = Date.now();
@@ -335,10 +317,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return votes;
   };
 
-  // The immutable conduit's own values and score are read only for a vote it would send. Its values of pools barely
-  // move, and reading them takes long, so plans use the last ones read, read again in the background once per block,
-  // through the client for heavy reads; until the first comes, plans go without, and the simulation checks their votes.
-  // Its score of the vote in force moves with every vote, so it is read with each such plan.
+  // The immutable conduit's pool values barely move and are slow to read, so plans use the last ones, refreshed in the
+  // background once per block. Until the first values come, plans go without them, and the simulation checks their
+  // votes. Its score of the vote in force changes with every vote, so it is read with each plan.
   const valuesNow = refreshed(
     () => readValues(chain, chain.bulk, valued, "pending"),
     warnOnce("v2's values unread; its simulation checks the vote"),
@@ -398,7 +379,6 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     return 0;
   }
 
-  // What every lane needs, read once: the block timing, the rewards and their value.
   for (;;) {
     try {
       const { number, timestamp } = await chain.client.getBlock();
@@ -419,10 +399,10 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       await sleep(RETRY_DELAY_MS);
     }
   }
-  // Each pool, with its votes as the first plans read them. A read that fails fails those plans, which log it.
+  // Logs each pool with its votes as the first plans see them. If that read fails, those plans fail and log it.
   const { state: first } = votesNow();
   void first.then(({ pools }) => valueRewards(run, pools, priced, true)).catch(() => undefined);
-  // Each lane's first plan, tried until one comes back, while the race starts: it is sent if no later one is.
+  // Each lane's first plan is retried until one comes back, while the race starts. It is sent if no later plan is.
   void Promise.all(
     lanes.map(async (lane) => {
       while (!lane.best && Date.now() + RETRY_DELAY_MS < flipMs - PRICES_BY_MS) {
@@ -467,7 +447,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       ),
     );
   };
-  // The immutable conduit's first, so that, at equal tips, its vote reaches the builder first.
+  // The immutable conduit's vote is sent first, so that at equal tips it reaches the builder first.
   const send = (time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
     const picked = pick(time, conduits.klima ? klimaLane : undefined, conduits.v2 ? v2Lane : undefined);
@@ -477,7 +457,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       log.warning("not voting for v2 in this block: no vote of it was checked after the Klima conduit's", {
         conduit: chain.v2?.conduit,
         ...at,
-        // The Klima conduit sends a staler plan than its freshest, which answered a vote not sent.
+        // Its freshest plan answered a vote that isn't sent, so the Klima conduit sends an older one.
         ...(alone !== freshest ? { klimaAgeMs: ageMs(alone), freshestKlimaAgeMs: ageMs(freshest) } : {}),
       });
     } else if (conduits.v2) sendOne(picked.v2, v2Sender(chain), at);
@@ -496,10 +476,6 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   return failures + (await outcome(run, flip, [...sent.values()], voters));
 }
 
-/**
- * Logs where each sent vote landed, checks the last one of each conduit before the flip, and that the Voter shows a
- * vote of each of `conduits` in the epoch that ends at `flip`. Returns the number of failures.
- */
 export async function outcome(
   { chain, dryRun }: Run,
   flip: bigint,
@@ -519,13 +495,13 @@ export async function outcome(
         log.info("vote not mined: replaced or dropped", { conduit, hash });
         continue;
       }
-      markMined(chain, nonce, sender.from); // so that the claims after the flip do not reuse its nonce
+      markMined(chain, nonce, sender.from); // so that the claims after the flip don't reuse its nonce
       const block = receipt.blockNumber;
       const fields = { conduit, hash, block, status: receipt.status };
       const { timestamp } = await chain.client.getBlock({ blockNumber: block });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);
       else if (receipt.status !== "success") {
-        // Anyone may vote for an open conduit, and the Voter takes one vote of it per block.
+        // The Voter takes one vote per block for a conduit, and anyone can vote for an open one.
         if (sender.open && (await lastVotedAt(chain, conduit, block)) === timestamp) {
           log.warning("vote reverted: another vote for the conduit was first in its block", fields);
         } else {
@@ -544,7 +520,8 @@ export async function outcome(
       log.error("vote not confirmed", { conduit, error: errorMessage(error) });
     });
   }
-  // As of the last block before the flip: anyone may vote for the immutable conduit in the next epoch already.
+  // Read at the last block before the flip, because anyone can already vote for the immutable conduit in the next
+  // epoch.
   const lastVotedBefore = async () => {
     const before = await lastBlockBefore(chain.client, flip);
     const calls = conduits.map((conduit) => voterCall(chain, "lastVoted", [conduit]));
@@ -557,7 +534,6 @@ export async function outcome(
     } catch (error) {
       const fields = { attempt, error: errorMessage(error) };
       if (attempt === OUTCOME_TRIES) {
-        // Whether each conduit voted this epoch is unknown.
         (dryRun ? log.warning : log.error)("lastVoted unread", fields);
         return failures + (dryRun ? 0 : 1);
       }
@@ -579,10 +555,7 @@ export async function outcome(
   return failures;
 }
 
-/**
- * Whether the vote prepared for `best` stands for `plan`: for the same block and votes, after the same `rival` vote, and
- * decided on the same last vote on chain, `lastVoted`. A vote that landed since may have taken its nonce.
- */
+/** A vote that landed since `best` was prepared may have taken its nonce, so `lastVoted` must match too. */
 export const reusable = (best: Plan | undefined, { time, vote }: Plan, lastVoted: bigint, rival?: Vote) =>
   !!best?.prepared &&
   best.time === time &&

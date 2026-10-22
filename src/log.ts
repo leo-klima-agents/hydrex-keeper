@@ -1,6 +1,6 @@
 import { BaseError, ContractFunctionRevertedError } from "viem";
 
-// JSON lines on stdout; Cloud Logging reads `severity` and `message`.
+// Cloud Logging reads `severity` and `message` from each JSON line.
 type Fields = Record<string, unknown>;
 
 const bigints = (_: string, v: unknown) => (typeof v === "bigint" ? v.toString() : v);
@@ -15,13 +15,13 @@ export const log = {
   error: (message: string, fields: Fields = {}) => emit("ERROR", message, fields),
 };
 
-/** The error's name and short message, with the custom error a contract reverted with, which viem leaves out of both. */
+/** The error's message, plus the custom error a contract reverted with, which viem leaves out. */
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     const { name, shortMessage, details } = error as Error & { shortMessage?: string; details?: string };
     const reverted = error instanceof BaseError ? error.walk((e) => e instanceof ContractFunctionRevertedError) : null;
     const data = reverted instanceof ContractFunctionRevertedError ? reverted.data : undefined;
-    // Error(string) and Panic(uint256) are in the short message already.
+    // viem already includes Error(string) and Panic(uint256) reasons in the short message.
     const custom = data && !["Error", "Panic"].includes(data.errorName) ? data : undefined;
     const why = custom ? ` ${custom.errorName}(${(custom.args ?? []).map(String).join(", ")})` : "";
     if (shortMessage) return `${name}: ${shortMessage}${why}${details ? ` (${details})` : ""}`;
@@ -30,10 +30,8 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/** `errorMessage` without its numbers: an error that recurs with other scores, amounts or blocks is of the same kind. */
 export const errorKind = (error: unknown) => errorMessage(error).replace(/\d+/g, "#");
 
-/** A handler for errors that logs `message` once for each kind of error, and gives undefined. */
 export function warnOnce(message: string, fields: Fields = {}): (error: unknown) => undefined {
   const seen = new Set<string>();
   return (error) => {

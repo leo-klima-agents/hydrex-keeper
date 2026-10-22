@@ -1,6 +1,5 @@
 import { parseAbi } from "viem";
 
-// Sources: hydrex-conduit-executor, and Hydrex's KlimaVeTokenConduit, VoterV5, BribeV2 and VotingEscrow on Base.
 export const moduleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
@@ -8,7 +7,7 @@ export const moduleAbi = parseAbi([
   "function claimSwapAndDistribute(uint256 veTokenId, address[] targets, bytes[] swaps, address[] feeAddresses, address[] bribeAddresses, address[] claimTokens, uint256 retireTonnes, uint256 maxKvcmIn)",
   "error NotKeeper()",
   "error ExecutionFailed()",
-  // Raised by the conduit or the Voter; the module re-raises them.
+  // Errors from the conduit and the Voter, which the module passes on.
   "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
   "error EpochFlipInProgress()",
   "error VoteDelayNotMet()",
@@ -31,7 +30,7 @@ export const conduitAbi = parseAbi([
   "event CarbonRetired(address indexed creditToken_, uint256 retireTonnes, uint256 kvcmSpent)",
 ]);
 
-// Source: hydrex-conduit's ImmutableVeTokenConduit, version 2.
+// ImmutableVeTokenConduit, version 2.
 export const immutableAbi = parseAbi([
   "function voter() view returns (address)",
   "function veToken() view returns (address)",
@@ -56,7 +55,7 @@ export const immutableAbi = parseAbi([
   "error NoRewardContracts()",
   "error TokenCallFailed(address token)",
   "error Reentrancy()",
-  // Raised by the Voter; the conduit re-raises them.
+  // Errors from the Voter, which the conduit passes on.
   "error EpochFlipInProgress()",
   "error VoteDelayNotMet()",
   "error InsufficientVotingPower()",
@@ -98,7 +97,7 @@ export const bribeAbi = parseAbi([
   "function firstBribeTimestamp() view returns (uint256)",
 ]);
 
-// Source: safe-modules' AllowanceModule, version 1.0.0, and the Safe it is enabled on.
+// Safe's AllowanceModule, version 1.0.0.
 export const allowanceAbi = parseAbi([
   "function getTokenAllowance(address safe, address delegate, address token) view returns (uint256[5])",
   "function executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)",
@@ -106,7 +105,6 @@ export const allowanceAbi = parseAbi([
 
 export const safeAbi = parseAbi(["function isModuleEnabled(address module) view returns (bool)"]);
 
-// Uniswap's SwapRouter02 and QuoterV2.
 export const uniswapRouterAbi = parseAbi([
   "struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }",
   "function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)",
@@ -119,7 +117,6 @@ export const uniswapQuoterAbi = parseAbi([
   "function quoteExactInputSingle(QuoteExactInputSingleParams params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
 ]);
 
-// Aero's Slipstream SwapRouter and Metaquoter.
 export const aeroRouterAbi = parseAbi([
   "struct ExactInputSingleParams { address tokenIn; address tokenOut; int24 tickSpacing; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }",
   "function exactInputSingle(ExactInputSingleParams params) payable returns (uint256 amountOut)",
@@ -131,12 +128,10 @@ export const aeroQuoterAbi = parseAbi([
   "function quoteExactInputSingleV3(address pool, address tokenIn, uint256 amountIn, uint160 sqrtPriceLimitX96) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed)",
 ]);
 
-// Carbonmark's retirement aggregator.
 export const retirementAbi = parseAbi([
   "function quoteRetireCreditViaKlima(address creditToken, uint256 tokenId, uint256 amount, address inputToken, address carbonClass, uint256 couponTonnes) view returns (uint256 tonnes, uint256 price, uint256, uint256)",
 ]);
 
-// KyberSwap's MetaAggregationRouterV2.
 export const kyberAbi = parseAbi([
   "struct SwapDescriptionV2 { address srcToken; address dstToken; address[] srcReceivers; uint256[] srcAmounts; address[] feeReceivers; uint256[] feeAmounts; address dstReceiver; uint256 amount; uint256 minReturnAmount; uint256 flags; bytes permit; }",
   "struct SwapExecutionParams { address callTarget; address approveTarget; bytes targetData; SwapDescriptionV2 desc; bytes clientData; }",

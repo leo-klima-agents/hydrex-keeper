@@ -8,8 +8,8 @@ const flip = 1_790_812_800_000;
 type Chain = { gap?: number; seal?: number; subBlocks?: number; leeway?: number };
 
 /**
- * Polls of blocks with the timestamps `times` (ms), each built from the previous one's seal, `seal` after its
- * timestamp, in `subBlocks` sub-blocks, the last one `leeway` before its seal. Returns when the last block started.
+ * Feeds `blocks` polls of a block at each of `times` (ms), each sealed `seal` ms after its timestamp and built in
+ * `subBlocks` steps that end `leeway` ms before the seal, and returns when the last block started.
  */
 function feed(blocks: Blocks, times: number[], { seal = 0, subBlocks = 10, leeway = 450 }: Chain = {}) {
   times.forEach((time, k) => {
@@ -28,7 +28,6 @@ function feed(blocks: Blocks, times: number[], { seal = 0, subBlocks = 10, leewa
 
 const every = (from: number, gap: number, count: number) => Array.from({ length: count }, (_, k) => from + k * gap);
 
-/** The blocks voted in, from `now` on. */
 function targets(blocks: Blocks, now: number) {
   const out: number[] = [];
   for (let t = blocks.next(flip, -Infinity, now); t !== undefined; t = blocks.next(flip, t, now)) out.push(t - flip);

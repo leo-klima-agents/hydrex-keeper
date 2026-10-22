@@ -42,7 +42,6 @@ const usdc = (dollars: number) => BigInt(Math.round(dollars * 1_000_000));
 const eth = (ether: number) => parseEther(String(ether));
 const low = (address: string) => address.toLowerCase();
 
-// VENUES, as the fake routers and quoters tell them apart.
 const AERO_POOLS: Record<string, number> = {
   [low("0x2A430bEbD2082d8e05D56d64DEDE8944279bbC24")]: 100,
   [low("0x4A7af46bC8aBc00048c6c7920a1488DAF568366c")]: 50,
@@ -53,28 +52,24 @@ assert.deepEqual(
   VENUE_NAMES,
 );
 
-/** Balances by lowercase address, and what the treasury allows the proposer this week. */
 type World = {
   eth: Record<string, bigint>;
   usdc: Record<string, bigint>;
-  /** WETH each router holds while it swaps. */
   weth: Record<string, bigint>;
-  /** USDC the proposer let each router take. */
   approved: Record<string, bigint>;
   enabled: boolean;
   allowed: bigint;
   spent: bigint;
-  /** What each of VENUES pays, as a share of the price; undefined reverts its quote. */
+  /** Each venue's payout as a fraction of the fair price. Undefined makes its quote revert. */
   venues: (number | undefined)[];
-  /** What they pay once an approval is in a block. */
+  /** The payouts that replace `venues` once an approval is mined. */
   afterApproval?: (number | undefined)[];
   pending?: boolean;
-  /** A call, by name, that reverts, and one whose receipt is never seen; a plain transfer is "transfer". */
   reverts?: string;
   lost?: string;
 };
 
-/** The keeper is short by 0.0016 ETH, the proposer by 0.0025; the treasury allows 20 USDC a week, and holds 50. */
+/** With the 0.003 ETH target, the keeper is 0.0016 ETH short and the proposer is 0.0025 ETH short. */
 function world(more: Partial<World> = {}): World {
   return {
     eth: { [low(KEEPER)]: eth(0.0014), [low(PROPOSER)]: eth(0.0005) },
@@ -97,7 +92,6 @@ const clone = (w: World): World => ({
   approved: { ...w.approved },
 });
 
-/** The WETH venue `index` pays for `amount` of USDC, or undefined if it cannot quote. */
 function wethFor(w: World, index: number, amount: bigint): bigint | undefined {
   const share = w.venues[index];
   if (share === undefined) return undefined;
@@ -112,7 +106,6 @@ function take(balances: Record<string, bigint>, who: string, amount: bigint, wha
   add(balances, who, -amount);
 }
 
-/** A router's swap and unwrap, in one multicall, as Uniswap's SwapRouter02 and Aero's SwapRouter do them. */
 function routerCall(w: World, from: Address, router: Address, args: readonly unknown[]): void {
   const uniswap = router === UNISWAP_ROUTER;
   assert.ok(uniswap || router === AERO_ROUTER, `a router: ${router}`);
@@ -136,7 +129,8 @@ function routerCall(w: World, from: Address, router: Address, args: readonly unk
   };
   assert.deepEqual([params.tokenIn, params.tokenOut], [USDC, WETH]);
   assert.ok((deadline ?? params.deadline)! * 1000n > BigInt(Date.now()), "a deadline ahead");
-  // The router keeps the WETH to unwrap it: Uniswap's as ADDRESS_THIS, Aero's as zero.
+  // The router must receive the WETH itself so that it can unwrap it. Uniswap's router reads address 2 as itself, and
+  // Aero's reads the zero address that way.
   assert.equal(params.recipient, uniswap ? addr(2) : zeroAddress);
   const index = uniswap ? (params.fee === 500 ? 0 : -1) : VENUE_NAMES.indexOf(`Aero ${params.tickSpacing}`);
   assert.ok(index >= 0, "a venue the job lists");
@@ -154,10 +148,9 @@ function routerCall(w: World, from: Address, router: Address, args: readonly unk
   w.weth[low(router)] = 0n;
 }
 
-/** A transaction or call of the proposer's: a plain transfer of ETH is named "transfer". */
+/** A plain ETH transfer has the functionName "transfer". */
 type Sent = { from: Address; to: Address; functionName: string; args: readonly unknown[]; value: bigint };
 
-/** Does what `sent` does to the world; throws as a revert. Only the proposer sends. */
 function apply(w: World, { from, to, functionName, args, value }: Sent): void {
   assert.equal(from, PROPOSER, "the proposer sends every transaction of a top-up");
   if (functionName === w.reverts) throw new Error(`${functionName} reverted`);
@@ -298,7 +291,7 @@ function fakeChain(w: World, { v2 = true } = {}) {
     },
     estimateMaxPriorityFeePerGas: async () => 1_000_000n,
     getFeeHistory: async () => ({ baseFeePerGas: [5_000_000n, 5_000_000n], gasUsedRatio: [0.2, 0.3], reward: [] }),
-    // In blocks, then also in the mempool: a transaction whose receipt is never seen stays there.
+    // "latest" counts mined transactions, and "pending" also counts sent ones. A lost transaction stays pending.
     getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag: string }) =>
       blockTag === "latest"
         ? mined.filter((s) => s.from === address).length
@@ -381,7 +374,6 @@ const drawn = (sent: Sent[]) => sent.find((s) => s.functionName === "executeAllo
 
 const ethOf = (w: World, who: Address) => w.eth[low(who)] ?? 0n;
 
-/** What the swap sold, the least it took, and its deadline, as its router reads them. */
 function swapOf(sent: Sent[]): { amountIn: bigint; minimum: bigint; deadline: bigint } {
   const { to, args } = sent.find((s) => s.functionName === "multicall")!;
   const uniswap = to === UNISWAP_ROUTER;
@@ -396,7 +388,6 @@ function swapOf(sent: Sent[]): { amountIn: bigint; minimum: bigint; deadline: bi
   return { amountIn: params.amountIn, minimum: params.amountOutMinimum, deadline };
 }
 
-/** The errors logged while `body` runs. */
 async function errorsOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<string[]> {
   const write = t.mock.method(process.stdout, "write", () => true);
   try {
@@ -438,7 +429,8 @@ test("the swap goes through the venue quoted most, past those whose quote fails"
 });
 
 test("the swap is quoted again after the draw and the approval, so that its minimum follows the price", async () => {
-  // Quoted at 99.8%, the swap's minimum would be 99.3%: it pays 99.1% once the approval is in.
+  // The first quote is 99.8%, which would set the minimum at 99.3%. After the approval the venue pays only 99.1%, so
+  // the swap has to be quoted again.
   const w = world({ afterApproval: [0.99, 0.991, undefined] });
   const { chain, sent } = fakeChain(w);
   assert.equal(await topUp(runOf(chain), until()), 0);
@@ -447,7 +439,7 @@ test("the swap is quoted again after the draw and the approval, so that its mini
 });
 
 test("a swap's minimum is never further under the prices than the most a swap may lose, even quoted near it", async () => {
-  // Quoted at 98.1%, half a percent under would be 97.6%: the most a swap may lose takes it to 98%.
+  // The quote is 98.1%, and half a percent under it is 97.6%. The 2% loss limit raises the minimum to 98%.
   const w = world({ venues: [0.981, 0.975, undefined] });
   const { chain, sent } = fakeChain(w);
   assert.equal(await topUp(runOf(chain), until()), 0);
@@ -640,8 +632,9 @@ test("a dry run fails as the run would, on a transaction pending at the proposer
 });
 
 test("a dry run checks each step on what the steps before it leave the proposer", async (t) => {
-  // At the fake's fees, a step may cost 150,000 gas at 11 gwei, and is expected to cost 100,000 at 6; both with an L1
-  // fee of 5,000 wei. The proposer can pay for the draw and the approval, but not then for the swap.
+  // With the fake's fees, a step can cost up to 150,000 gas at 0.011 gwei and is expected to cost 100,000 gas at
+  // 0.006 gwei, plus a 5,000 wei L1 fee each time. The proposer can pay for the draw and the approval, but then not for
+  // the swap.
   const [most, expected] = [150_000n * 11_000_000n + 5_000n, 100_000n * 6_000_000n + 5_000n];
   const w = world({ eth: { [low(KEEPER)]: eth(0.0014), [low(PROPOSER)]: most + expected + expected / 2n } });
   const { chain } = fakeChain(w);

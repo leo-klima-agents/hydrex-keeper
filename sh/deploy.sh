@@ -1,5 +1,4 @@
 #!/bin/sh
-# Builds the image from this checkout and deploys the job and its schedule. Idempotent.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh

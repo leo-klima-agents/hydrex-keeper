@@ -1,5 +1,4 @@
 #!/bin/sh
-# Runs the scripts in sh/ under $TEST_SH (default dash) against fake-gcloud.sh and fake-curl.sh, and diffs with golden/.
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -25,7 +24,7 @@ PATH=$tmp/bin:$PATH
 export PATH
 failures=0
 
-# golden_case NAME SCENARIO CONFIG SCRIPT [ARGS...]: runs SCRIPT with config/CONFIG.env and compares.
+# golden_case NAME SCENARIO CONFIG SCRIPT [ARGS...]
 golden_case() {
   name=$1
   scenario=$2
@@ -42,7 +41,7 @@ golden_case() {
     cat "$tmp/$name.out"
   } >>"$log"
   golden=$root/test/sh/golden/$name.txt
-  if grep -Eq '^exit=12[67]$' "$log"; then # 126/127: broken script
+  if grep -Eq '^exit=12[67]$' "$log"; then # the shell couldn't run a command
     printf 'FAIL    %s: exit 126/127\n' "$name"
     cat "$tmp/$name.out"
     failures=$((failures + 1))

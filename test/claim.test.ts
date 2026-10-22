@@ -52,18 +52,14 @@ const signer = privateKeyToAccount(generatePrivateKey());
 const proposer = privateKeyToAccount(generatePrivateKey());
 
 const WEEK = 604_800n;
-const START = 1_792_022_400n; // the epoch that just began
+const START = 1_792_022_400n;
 const ENDED = START - WEEK;
 const RETIRE_BPS = 3333n;
 const KVCM_PER_TONNE = 5n;
 const E18 = 10n ** 18n;
 const usdc = (dollars: number) => BigInt(dollars * 1_000_000);
 
-/**
- * veNFT 1 is delegated elsewhere. 2 is OWNER's, 3 the Klima Foundation's, and 4 SMALL's, with $1 to claim. 5 is burned,
- * and 6 has not allowed the conduit to claim for it. 7, the Klima Foundation's, and 8, OWNER's, are delegated to the
- * immutable conduit.
- */
+// veNFT 5 has no owner because it was burned.
 const owners: Record<string, Address> = {
   1: OTHER,
   2: OWNER,
@@ -77,46 +73,42 @@ const powers: Record<string, bigint> = { 1: 7n, 2: 100n, 3: 800n, 4: 1n, 5: 99n,
 const unapproved = new Set(["6"]);
 const delegateOf = (id: unknown): Address => ({ 1: OTHER, 7: V2, 8: V2 })[String(id)] ?? CONDUIT;
 
-/** A pool's fee contract, then its other bribe contract, each with the tokens it lists. */
+/** A pool's fee contract and its bribe contract, each with the reward tokens it lists. */
 type Pool = [[Address, Address[]], [Address, Address[]]];
 
 type World = {
   pools: Pool[];
   earned: Map<string, bigint>;
-  /** The job also claims through the immutable conduit. */
   v2?: boolean;
-  /** How many epoch reads come before the minter starts the epoch. */
+  /** Number of epoch reads that happen before the minter starts the new epoch. */
   lag?: number;
-  /** The node stays at the block before the claims, so it still shows what they took as owed. */
+  /** The node never moves past the block before the claims, so it keeps reporting claimed rewards as owed. */
   stale?: boolean;
-  /** earned() reads zero for this token after the first read. */
+  /** After the first read, earned() returns zero for this token. */
   hide?: Address;
-  /** How many reads of the owners fail first, as on a node error, and of the delegates, as on a timeout. */
+  /** Number of owner reads that fail with a node error, and of delegate reads that time out, before reads succeed. */
   ownersFail?: number;
   delegatesFail?: number;
   balance?: bigint;
   proposerBalance?: bigint;
   gas?: (swaps: number, pairs: number) => bigint;
-  /** A claim takes one more unit of USDC than is earned. */
+  /** Each claim collects one more unit of USDC than earned() reported. */
   overpays?: boolean;
-  /** The price per tonne falls with the amount, and a whole tonne costs more than a claim spends. */
+  /** The retirement price per tonne drops as the amount grows, and a whole tonne costs more than a claim spends. */
   falling?: boolean;
   pending?: boolean;
-  /** A pair, by `key`, that a claim only half empties, as when more than 50 epochs are owed. */
+  /** A pair, by `key`, that one claim only half empties. This happens when more than 50 epochs are owed. */
   partial?: string;
   /**
-   * Rewards, by `key`, that earned() does not see yet: the veNFT never claimed there, and the contract's first bribe
-   * was 60 epochs ago.
+   * Rewards, by `key`, that earned() can't see yet. This happens when the veNFT never claimed from a contract whose
+   * first bribe was 60 epochs ago.
    */
   hidden?: Map<string, bigint>;
 };
 
 const key = (id: unknown, bribe: Address, token: Address) => `${id}${bribe}${token}`.toLowerCase();
 
-/**
- * veNFT 2 is owed $60 of USDC on E1, $10 of USDC and $30 of kVCM on I1, and $10 of HYDX on E2, and veNFT 7 $30 of USDC
- * on E1 and $10 of HYDX on E2. The others are owed some USDC.
- */
+// At the test prices, 1,000 kVCM is worth $30 and 400 HYDX is worth $10.
 function world(more: Partial<World> = {}): World {
   const earned = new Map([
     [key(2, E1, USDC), usdc(60)],
@@ -144,7 +136,6 @@ function world(more: Partial<World> = {}): World {
   return { pools, earned, ...more };
 }
 
-/** The default world, with 15 more pools whose two contracts each owe veNFT 2 $3 of USDC, and $8 of HYDX on I1. */
 function crowded(more: Partial<World> = {}): World {
   const w = world(more);
   w.earned.set(key(2, I1, HYDX), 8n * 40n * E18);
@@ -174,7 +165,6 @@ const reverts = (functionName: string) =>
 const failed = ({ address, functionName, args }: Call, cause: unknown) =>
   new ContractFunctionExecutionError(cause as BaseError, { abi: [], contractAddress: address, functionName, args });
 
-/** A claim through the module, or through the immutable conduit. */
 type Sent = { to: Address; args: readonly unknown[] };
 
 const isV2 = (to: Address | null | undefined) => !!to && isAddressEqual(to, V2);
@@ -189,14 +179,12 @@ function fakeChain(w: World = world()) {
   const listed = new Map(w.pools.flatMap(([fees, other]) => [fees, other]));
   const sent: Hex[] = [];
   const earnedFor = new Set<string>();
-  /** Calls read, by function. */
   const called = new Map<string, number>();
   let polls = 0;
   let reads = 0;
   let [ownersFail, delegatesFail] = [w.ownersFail ?? 0, w.delegatesFail ?? 0];
   const inFlight = new Map<Hex, Sent>();
   let head = 40n;
-  /** What is owed from each block on: each claim mined adds one. */
   const history: [bigint, Map<string, bigint>][] = [[head, initial]];
 
   const owedAt = (block?: bigint) => {
@@ -204,10 +192,7 @@ function fakeChain(w: World = world()) {
     return history.findLast(([since]) => since <= at)![1];
   };
 
-  /**
-   * What is owed after the claim. A claim through the module reverts, and takes nothing, if a swap sells more than the
-   * claim took.
-   */
+  // Like the real conduit, a module claim reverts and takes nothing if a swap sells more than the claim collected.
   function claim(owed: Map<string, bigint>, { to, args }: Sent) {
     const v2 = isV2(to);
     const [id, targets, swaps, fees, bribes, tokens] = (v2 ? [args[0], [], [], ...args.slice(1)] : args) as [
@@ -284,7 +269,7 @@ function fakeChain(w: World = world()) {
       case `${VOTER}.gauges`:
         return addr(2_000 + Number(BigInt(a as Address)) - 1_000);
       case `${VOTER}.isAlive`:
-        return a !== addr(2_001); // the second pool's gauge is killed, but its contracts still pay
+        return a !== addr(2_001); // the second pool's gauge is dead, but its bribe contracts still pay
       case `${VOTER}.internal_bribes`:
         return w.pools[Number(BigInt(a as Address)) - 2_000]![0][0];
       case `${VOTER}.external_bribes`:
@@ -376,7 +361,7 @@ function fakeChain(w: World = world()) {
       const answer = (c: Call) => answerAt(c, owed);
       if (!allowFailure) return contracts.map(answer);
       if (contracts.some((c) => c.functionName === "ownerOf") && ownersFail-- > 0) {
-        // A node error (-32603) looks like a revert of the multicall contract.
+        // A node error (-32603) shows up as a revert of the multicall contract.
         const error = failed({ address: MULTICALL3, functionName: "aggregate3" }, reverts("aggregate3"));
         return contracts.map(() => ({ status: "failure", error }));
       }
@@ -467,7 +452,7 @@ type Swaps = {
   lossy?: (token: Address, amountIn: bigint) => boolean;
 };
 
-/** Swaps at `prices`, minus slippage. `refuse` has no route, `bad` gets a wrong answer, and `lossy` returns half. */
+/** Tokens matching `refuse` get no route, `bad` gets a wrong quote, and swaps matching `lossy` return half. */
 function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
   const asked: Address[] = [];
   const swapper: Swapper = async ({ tokenIn, tokenOut, amountIn, account, slippageBps }) => {
@@ -515,7 +500,6 @@ const decodeV2 = (signed: Hex) => {
   return { id, fees, bribes, tokens };
 };
 
-/** The sent claims through the module, or through the immutable conduit. */
 const through = (sent: Hex[], v2 = false) => sent.filter((signed) => isV2(parseTransaction(signed).to) === v2);
 
 const until = () => Date.now() + 600_000;
@@ -575,7 +559,7 @@ test("a read both conduits share that fails is read again, once for both", async
 });
 
 test("each conduit's claims go on when the other's stop", async () => {
-  const broke = 10n ** 15n; // less than a claim and the reserve for the votes
+  const broke = 10n ** 15n; // only the 0.001 ETH kept for votes, so nothing is left for a claim
   const keeper = fakeChain(world({ v2: true, balance: broke }));
   assert.equal(await claims(runOf(keeper.chain), START, until(), fakeSwapper().swapper), 1);
   assert.deepEqual([through(keeper.sent).length, through(keeper.sent, true).length], [0, 1]);
@@ -618,7 +602,8 @@ test("tokens KyberSwap cannot route do not use up a claim's plans, and are asked
 
 test("a token KyberSwap has no route for at one veNFT's amount is still swapped for another's", async () => {
   const w = world();
-  w.earned.set(key(4, E2, HYDX), 300n * E18); // $7.50, while veNFT 2 has 400
+  // veNFT 4 has 300 HYDX, under the 350 that KyberSwap refuses. veNFT 2 has 400, which is over it.
+  w.earned.set(key(4, E2, HYDX), 300n * E18);
   const { chain, sent } = fakeChain(w);
   const { swapper } = fakeSwapper({ refuse: (token, amountIn) => token === HYDX && amountIn > 350n * E18 });
   assert.equal(await claims(runOf(chain), START, until(), swapper), 0);
@@ -671,7 +656,7 @@ test("a dry run simulates each claim after those it prepared, and signs them wit
 });
 
 test("a veNFT is claimed for as long as what it has left is worth a claim", async () => {
-  // 60 more pools whose two contracts each owe veNFT 2 $1 of USDC. A claim of USDC alone fits 26 contracts at most.
+  // A claim of USDC alone can include at most 26 contracts.
   const w = world();
   for (let i = 0; i < 60; i++) {
     const [fees, other] = [addr(300 + 2 * i), addr(301 + 2 * i)];
@@ -692,7 +677,8 @@ test("a veNFT is claimed for as long as what it has left is worth a claim", asyn
 });
 
 test("a claim too large for a transaction is planned again, smaller than it was", async () => {
-  // Each contract and token uses 1.07M gas instead of the 0.3M planned: the first claim, planned at 5.6M, uses 12.5M.
+  // Each contract and token really uses 1.07M gas, not the 0.3M the planner assumes. So the first claim, planned at
+  // 5.6M, uses 12.5M.
   const gas = (swaps: number, pairs: number) => 1_300_000n + 800_000n * BigInt(swaps) + 1_066_667n * BigInt(pairs);
   const { chain, sent } = fakeChain(world({ gas }));
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
@@ -714,7 +700,7 @@ test("the tonnes retired cost at most their budget, even when the price per tonn
 });
 
 test("a claim that refusals leave empty after a smaller plan is too little, not too large", async () => {
-  // The first plan uses just over 12M gas. Then KyberSwap refuses USDC, the only token.
+  // The first plan needs just over 12M gas. From the second request on, KyberSwap refuses USDC, the only token.
   const earned = new Map([
     [key(2, E1, USDC), usdc(60)],
     [key(2, I1, USDC), usdc(10)],
@@ -736,7 +722,7 @@ test("a claim also asks for rewards past the 50 epochs earned() reads, to make t
 });
 
 test("a veNFT whose rewards are past the 50 epochs earned() reads gets the claim that makes them claimable", async () => {
-  // veNFT 4 has $1 of USDC to claim, and $8 that earned() does not see yet.
+  // veNFT 4's $1 of USDC isn't worth a claim on its own. The $8 that earned() can't see yet makes it worth one.
   const hidden = new Map([[key(4, E2, ODD[0]!), 8n * E18]]);
   const { chain, sent } = fakeChain(world({ hidden }));
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
@@ -808,7 +794,7 @@ test("a plan asks the bribe contracts that pay most for the tokens that pay most
   const pairs = [pair(E1, USDC, 60), pair(I1, USDC, 10, true), pair(I1, KVCM, 30, true), pair(E2, HYDX, 10)];
   const plan = planClaim(pairs, 10_000_000n, 0, swapped)!;
   assert.deepEqual([plan.tokens, plan.fees, plan.bribes, plan.usd], [[USDC, KVCM, HYDX], [I1], [E1, E2], 110]);
-  // 1.3M, plus 0.8M per swap, plus 0.3M per contract and token
+  // 1.3M base, 0.8M per swap and 0.3M per contract and token pair
   assert.equal(plan.gas, 1_300_000n + 2n * 800_000n + 3n * 900_000n);
   const tight = planClaim(pairs, 3_000_000n, 0, swapped)!;
   assert.deepEqual([tight.tokens, tight.bribes, tight.fees], [[USDC], [E1], [I1]], "one token, two contracts fit");
@@ -833,7 +819,7 @@ test("a cap counts what a claim swaps, not what it makes claimable past the 50 e
 });
 
 test("a bribe contract that does not pay for its gas is left out", () => {
-  const usdPerGas = 1e-8; // 300k gas costs $0.003, so a contract must pay at least $0.06
+  const usdPerGas = 1e-8; // a contract's 300k gas costs $0.003, so it must pay at least $0.06
   const plan = planClaim([pair(E1, USDC, 0.07), pair(E2, USDC, 0.05)], 10_000_000n, usdPerGas, swapped)!;
   assert.deepEqual(plan.bribes, [E1]);
 });

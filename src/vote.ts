@@ -17,12 +17,12 @@ import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
 
 export const RECEIPT_TIMEOUT_MS = 60_000;
-const CONGESTED = 0.9; // in a block this full, the builder picks by tip
+const CONGESTED = 0.9; // in blocks this full, the builder orders by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
-const MAX_GAS = 16_777_216n; // per transaction on Base, since its Azul upgrade
+const MAX_GAS = 16_777_216n; // Base's gas limit per transaction since its Azul upgrade
 
-/** Failed after the transaction was sent: retrying would send another one. */
+/** The vote was already sent, so retrying would send a second one. */
 export class VoteSent extends Error {}
 
 export type Tx = {
@@ -36,15 +36,14 @@ export type Tx = {
   nonce: number;
 };
 
-/** The block a vote in the last blocks is for: its timestamp (s), and the conduit's `lastVoted` as read on it. */
+/** The block a last-block vote is for: its timestamp in seconds, and the conduit's `lastVoted` read on it. */
 type Target = { time: bigint; lastVoted: bigint };
 
-/** `from` signs it. */
 export type Prepared = { tx: Tx; from: Address; signed?: Hex | undefined; lastVoted?: bigint | undefined };
 
 /**
- * Who signs a conduit's transactions and where they go; `conduit` is the voter the Voter records. Anyone may vote for
- * an `open` conduit, so a vote of it on chain need not be the sender's. Its transactions are prepared through `client`.
+ * `conduit` is the address the Voter records votes for. Anyone can vote for an `open` conduit, so a vote on chain may
+ * not be the sender's.
  */
 export type Sender = {
   name: string;
@@ -56,7 +55,6 @@ export type Sender = {
   client: Client;
 };
 
-/** The Klima conduit's: the keeper calls the module, which calls the conduit. Only the keeper votes for it. */
 export const klimaSender = ({ client, keeper, module, conduit }: Chain): Sender => ({
   name: "keeper",
   from: keeper,
@@ -67,7 +65,6 @@ export const klimaSender = ({ client, keeper, module, conduit }: Chain): Sender 
   client,
 });
 
-/** The immutable conduit's: the proposer calls it directly, as anyone may, through a client of its own. */
 export function v2Sender({ v2, v2Client }: Chain): Sender {
   if (!v2) throw new Error("no immutable conduit configured");
   const { proposer, conduit } = v2;
@@ -85,15 +82,13 @@ export type ModuleCall =
     }
   | { functionName: "claim"; args: readonly [bigint, Address[], Address[], Address[]] };
 
-/** What a transaction does: calls `functionName` of `abi` at `to`, or, without `abi`, sends `to` plain ETH. */
+/** Without `abi`, a plain transfer of ETH to `to`. */
 export type TxCall = { to: Address; abi?: Abi; functionName?: string; args?: readonly unknown[]; value?: bigint };
 
-/** Whose transaction it is: the address that signs it, and the client it is prepared through. */
 export type From = { from: Address; client: Client };
 
 type LastSent = Tx & { lastVoted?: bigint | undefined; mined?: boolean };
 
-/** By client, then by sender. */
 const lastSentBy = new WeakMap<Client, Map<Address, LastSent>>();
 
 function sentBy(client: Client): Map<Address, LastSent> {
@@ -102,10 +97,7 @@ function sentBy(client: Client): Map<Address, LastSent> {
   return sent;
 }
 
-/**
- * Simulates the sender's vote just after the block it is for, by default the latest, and signs it unless there is no
- * key; with a `rival`, also after the rival's vote, and fails unless both succeed. Its fees are prepareTx's.
- */
+/** With a `rival`, the vote must also succeed after the rival's. */
 export async function prepareVote(
   chain: Chain,
   account: LocalAccount | undefined,
@@ -116,7 +108,7 @@ export async function prepareVote(
   rival?: Rival,
 ): Promise<Prepared> {
   const { tx, cost, balance, tip, congested } = await prepareCall(chain, voteCall(vote), { target, sender, rival });
-  // A vote before the last blocks must leave enough to vote in them.
+  // A vote before the last blocks must leave enough ETH to vote again in them.
   const needed = (target ? 1n : 2n) * cost;
   const { name, from, conduit } = sender;
   if (balance < needed) {
@@ -137,23 +129,19 @@ type CallOptions = {
   rival?: Rival | undefined;
 };
 
-/**
- * Builds and simulates the sender's vote or claim for `call`, after the calls in `before`, which a dry run built but did
- * not send: see prepareTx.
- */
 export async function prepareCall(
   chain: Chain,
   call: ModuleCall,
   { target, before = [], at, sender = klimaSender(chain), rival }: CallOptions = {},
 ) {
-  // Votes are simulated just after the latest block, which may already be the one a last-block vote is for, but
-  // within its epoch: the last block before a flip is a second before it, and the immutable conduit refuses a vote
-  // from the next epoch. Other votes name that block by number, since a node further ahead would refuse a time before
-  // its own latest block. Claims need no time.
+  // Votes are simulated just after the latest block, at a time kept inside the epoch. The latest block may already be
+  // the one a last-block vote is for, that block is one second before the flip, and the immutable conduit refuses votes
+  // from the next epoch. Votes without a target also name the latest block by number, because a node further ahead
+  // would refuse a time before its own latest block. Claims need no time.
   const head = call.functionName === "vote" && !target ? await sender.client.getBlock() : undefined;
   const time = target?.time ?? head?.timestamp;
-  // For a conduit only the sender votes for, a later vote on chain than the one the last sent vote was decided on
-  // means that one is in a block, whatever the node says.
+  // For a conduit only the sender votes for, a `lastVoted` newer than the one our last vote was decided on means that
+  // vote is in a block, whatever the node says.
   const lastSent = sentBy(chain.client).get(lower(sender.from));
   const later =
     !sender.open && target !== undefined && lastSent?.lastVoted !== undefined && target.lastVoted > lastSent.lastVoted;
@@ -174,14 +162,12 @@ export async function prepareCall(
 const txCallOf = ({ to, abi }: Sender, { functionName, args }: ModuleCall): TxCall => ({ to, abi, functionName, args });
 
 type TxOptions = {
-  /** What the transaction is, for its errors: the vote, the claim. */
   what: string;
-  /** The sender's calls to simulate first, which a dry run built but did not send. */
+  /** Calls to simulate first: those a dry run built but did not send. */
   before?: readonly TxCall[];
-  /** The block to simulate after, by default the latest, and the time to give the next one. */
   blockNumber?: bigint | undefined;
   time?: bigint | undefined;
-  /** Another sender's calls that may come first in the block: the transaction must succeed after them too. */
+  /** Another sender's calls that may come first in the block. The transaction must succeed after them too. */
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
@@ -190,7 +176,7 @@ type TxOptions = {
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
   abi ? encodeFunctionData({ abi, functionName, args } as never) : "0x";
 
-/** `call` as simulateBlocks takes it from `account`: decoded, so that a revert names its error. */
+// Decoded, so that a revert names its error.
 const simulatedAs =
   (account: Address) =>
   ({ to, abi, functionName, args, value }: TxCall) => ({
@@ -201,11 +187,9 @@ const simulatedAs =
   });
 
 /**
- * Builds and simulates the sender's transaction for `call`, after the calls in `before`, through the sender's client.
- * Throws if it would revert. The max fee is twice the base fee plus the tip; if either of the last two blocks was
- * congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. Costs are in wei, L1 fee included, and
- * leave out the value sent. `queued` is whether another transaction of the sender is pending at its nonce. What was
- * sent is known by the chain's client.
+ * Throws if the transaction would revert. The max fee is twice the base fee plus the tip. If either of the last two
+ * blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. Costs are in wei, include
+ * the L1 fee and leave out the value sent. `queued` means another transaction of the sender is pending at its nonce.
  */
 export async function prepareTx(chain: Chain, { from, client }: From, call: TxCall, options: TxOptions) {
   const { what, before = [], blockNumber, time, rival, landed = false } = options;
@@ -238,10 +222,10 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
   const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
-  // The confirmed nonce, so that a pending transaction is replaced, not queued behind: at a quarter more than the one
-  // this process sent, or at twice the fees over one of unknown fees. Once its receipt was seen, or the Voter shows its
-  // votes in force (see `landed` in last.ts), or the caller knows otherwise that it is in a block, it is, whatever the
-  // node says.
+  // The confirmed nonce, so that a pending transaction is replaced rather than queued behind. A replacement pays a
+  // quarter more than the one this process sent, or twice the fees when the pending one's fees are unknown. The last
+  // transaction counts as mined, whatever the node says, once its receipt was seen, once the Voter shows its votes (see
+  // `landed` in last.ts), or when the caller knows it is in a block.
   const lastSent = sentBy(chain.client).get(lower(from));
   const mined = lastSent?.mined === true || landed;
   const nonce = Math.max(latest, mined && lastSent ? lastSent.nonce + 1 : 0);
@@ -254,7 +238,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     to,
     data,
     ...(value ? { value } : {}),
-    // Refunds and the 63/64 rule make the gas needed exceed the gas used, by up to about a third.
+    // Refunds and the 63/64 rule mean a transaction can need about a third more gas than it uses.
     gas: min((max(simulated.gasUsed, second?.gasUsed ?? 0n) * 3n) / 2n, MAX_GAS),
     maxFeePerGas: bump(2n * baseFee + tip, own?.maxFeePerGas),
     maxPriorityFeePerGas: bump(tip, own?.maxPriorityFeePerGas),
@@ -296,14 +280,13 @@ export async function signTx(
   }
 }
 
-/** Sends a signed transaction to every RPC; resolves with its hash once one accepts it before `until` (ms). */
 export async function broadcastTx(
   chain: Chain,
   { tx, signed, lastVoted, from }: Prepared & { signed: Hex },
   until: number,
 ): Promise<Hex> {
   if (Date.now() >= until) throw new Error("out of time before sending");
-  // Before sending: a send that fails may still have reached a node.
+  // Recorded before sending, because a send that fails may still have reached a node.
   sentBy(chain.client).set(lower(from), { ...tx, lastVoted });
   return chain.broadcast(signed, until);
 }
@@ -314,13 +297,10 @@ export function markMined({ client, keeper }: Chain, nonce: number, from: Addres
   if (lastSent?.nonce === nonce) sent.set(lower(from), { ...lastSent, mined: true });
 }
 
-/** A transaction sent whose outcome is unknown: it may still land, so sending another could do the same twice. */
+/** The transaction's outcome is unknown. It may still land, so sending another could do the same thing twice. */
 export class Unconfirmed extends Error {}
 
-/**
- * Waits for the receipt of `from`'s transaction `hash`, at `nonce`, two blocks deep. Throws Unconfirmed if it is not seen
- * in time or another transaction replaced it, and an Error if it reverted. `what` names it in errors: the claim.
- */
+/** Throws Unconfirmed if the receipt isn't seen in time or another transaction replaced this one. */
 export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: number, what: string) {
   let receipt;
   try {
@@ -336,8 +316,8 @@ export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: n
 }
 
 /**
- * Whether the sender's nonce is past `nonce` in the block being built. A vote decided before the one it replaces landed
- * reuses that one's nonce, and nodes then refuse it.
+ * Whether `nonce` is already used in the pending block. A vote decided before the one it replaces landed would reuse
+ * that nonce, and nodes refuse it.
  */
 export async function nonceTaken({ client, keeper }: Chain, nonce: number, from: Address = keeper): Promise<boolean> {
   return client.getTransactionCount({ address: from, blockTag: "pending" }).then(
@@ -346,10 +326,6 @@ export async function nonceTaken({ client, keeper }: Chain, nonce: number, from:
   );
 }
 
-/**
- * Prepares and sends the sender's vote, checked after `rival`'s if any; verifies the Voter recorded it, waiting at most
- * until `until` (ms).
- */
 export async function castVote(
   chain: Chain,
   account: LocalAccount | undefined,
@@ -385,8 +361,8 @@ export async function castVote(
   }
   markMined(chain, prepared.tx.nonce, sender.from);
   if (receipt.status !== "success") {
-    // Anyone may vote for an open conduit, and the Voter takes one vote of it per block: when another vote took the
-    // block, the pass decides again, against that vote.
+    // The Voter takes one vote per block for a conduit, and anyone can vote for an open one. When another vote took the
+    // block, the pass decides again against that vote.
     const taken = sender.open && (await tookBlock(chain, conduit, receipt.blockNumber).catch(() => false));
     if (taken) throw new Error(`vote ${hash} reverted: another vote for ${conduit} was first in its block; again`);
     throw new VoteSent(`vote ${hash} reverted`);
@@ -394,13 +370,11 @@ export async function castVote(
   await verifyVote(chain, vote, hash, receipt.blockNumber, sender.conduit);
 }
 
-/** When the Voter last recorded a vote of `conduit`, as of block `blockNumber`. */
 export async function lastVotedAt(chain: Chain, conduit: Address, blockNumber: bigint): Promise<bigint> {
   const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [conduit])], { blockNumber });
   return lastVoted!;
 }
 
-/** Whether a vote of `conduit` is recorded in block `blockNumber`. */
 async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): Promise<boolean> {
   const [{ timestamp }, lastVoted] = await Promise.all([
     chain.client.getBlock({ blockNumber }),
@@ -410,8 +384,8 @@ async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): P
 }
 
 /**
- * Whether the vote of the immutable conduit that the Voter recorded at `lastVoted` (s) is the sender's: the conduit
- * accepted a vote the sender proposed in the block at that time, and the Voter takes one vote of a conduit per block.
+ * Whether the immutable conduit's vote recorded at `lastVoted` (s) is the sender's. The Voter takes one vote per
+ * conduit per block, so it is if the conduit accepted a vote the sender proposed in that block.
  */
 export async function votedAt({ client }: Chain, { from, conduit }: Sender, lastVoted: bigint): Promise<boolean> {
   const block = await lastBlockBefore(client, lastVoted + 1n);
@@ -427,12 +401,12 @@ export async function votedAt({ client }: Chain, { from, conduit }: Sender, last
 }
 
 /**
- * The vote this process sent last for the sender, while it may still land: until its receipt is seen, while a
- * transaction of the sender is pending at its nonce. Unknown counts as pending.
+ * The vote this process sent last for the sender, while it may still land: until its receipt is seen, and while a
+ * transaction of the sender is pending at its nonce. If that can't be read, it counts as pending.
  */
 export async function pendingVote(chain: Chain, { from, to, abi, client }: Sender): Promise<Vote | undefined> {
   const last = sentBy(chain.client).get(lower(from));
-  // The sender's last transaction may have gone elsewhere, as a top-up's does: `abi` cannot read it, and it is no vote.
+  // The last transaction may have gone elsewhere, like a top-up's. Then it isn't a vote, and `abi` can't decode it.
   if (!last || last.mined || !isAddressEqual(last.to, to)) return undefined;
   const { functionName, args } = decodeFunctionData({ abi, data: last.data });
   if (functionName !== "vote") return undefined;
@@ -447,7 +421,6 @@ export async function pendingVote(chain: Chain, { from, to, abi, client }: Sende
   return pending ? { pools: [...pools], weights: [...weights] } : undefined;
 }
 
-/** Checks that the Voter recorded `vote` for `conduit` as of block `blockNumber`. */
 export async function verifyVote(
   chain: Chain,
   vote: Vote,
@@ -477,7 +450,7 @@ const min = (a: bigint, b: bigint) => (a < b ? a : b);
 
 type Promises<T extends readonly unknown[]> = { [K in keyof T]: Promise<T[K]> };
 
-/** Like Promise.all, but the rejection reported is the earliest in the list, not the earliest in time. */
+/** Like Promise.all, but the rejection reported is the first in the list, not the first in time. */
 async function allOrFirstFailure<T extends readonly unknown[]>(promises: Promises<T>): Promise<T> {
   const settled = await Promise.allSettled(promises);
   const failure = settled.find((s) => s.status === "rejected");

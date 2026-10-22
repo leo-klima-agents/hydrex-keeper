@@ -1,20 +1,19 @@
 #!/bin/sh
-# Sourced by the scripts in sh/.
 # shellcheck disable=SC2034
 
-# cloudkms: the job signs with a key in another project, which needs the API enabled in both.
-# cloudresourcemanager, iamcredentials, sts: CI's Workload Identity Federation and check.sh.
+# cloudkms is needed in this project too, because the job signs with a key in another project. cloudresourcemanager,
+# iamcredentials and sts are for CI's Workload Identity Federation and check.sh.
 SERVICES="artifactregistry.googleapis.com cloudbuild.googleapis.com cloudkms.googleapis.com
 cloudresourcemanager.googleapis.com cloudscheduler.googleapis.com iam.googleapis.com iamcredentials.googleapis.com
 logging.googleapis.com monitoring.googleapis.com run.googleapis.com secretmanager.googleapis.com sts.googleapis.com"
 TASK_TIMEOUT=5400 # seconds
 MAX_RETRIES=3
-# Cloud Scheduler retries a failed start after 15, 30 and 60 s: within 5 minutes, before the job has work to do.
+# Cloud Scheduler retries a failed start after 15, 30 and 60 s, all within 5 minutes and before the job has work to do.
 SCHEDULER_RETRY_FLAGS="--max-retry-attempts=3 --min-backoff=15s --max-backoff=60s --max-doublings=2 --max-retry-duration=300s"
 ALERT_METRIC=run.googleapis.com/job/completed_task_attempt_count
-MIN_KEEPER_WEI=2000000000000000   # 0.002 ETH: check.sh fails below it, to warn before claims stop at 0.001 ETH
-MIN_PROPOSER_WEI=2000000000000000 # 0.002 ETH: check.sh fails below it, before claims stop or a vote in busy blocks fails
-# PUBLIC_RPCS in src/main.ts; check.sh reads the keeper's balance from the first that answers.
+MIN_KEEPER_WEI=2000000000000000   # 0.002 ETH, so that check.sh fails before claims stop at 0.001 ETH
+MIN_PROPOSER_WEI=2000000000000000 # 0.002 ETH, so that check.sh fails before claims stop or a vote in busy blocks fails
+# The same as PUBLIC_RPCS in src/main.ts.
 PUBLIC_RPCS="https://mainnet.base.org https://base.drpc.org https://base-rpc.publicnode.com"
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -35,7 +34,6 @@ make_tmp() {
   trap 'exit 143' TERM
 }
 
-# require_address NAME VALUE: dies unless VALUE is a 20-byte hex address.
 require_address() {
   case "$2" in
     0x*[!0-9a-fA-F]*) die "$1 must be a 20-byte hex address" ;;
@@ -44,7 +42,6 @@ require_address() {
   esac
 }
 
-# require_key_version NAME VALUE: dies unless VALUE is a full key version name outside KEEPER_PROJECT.
 require_key_version() {
   case "$2" in
     projects/?*/locations/?*/keyRings/?*/cryptoKeys/?*/cryptoKeyVersions/?*) ;;
@@ -55,7 +52,6 @@ require_key_version() {
   [ "$key_project" != "$KEEPER_PROJECT" ] || die "the key must live in another project than KEEPER_PROJECT"
 }
 
-# require_tools TOOL...: dies unless every TOOL is on PATH.
 require_tools() {
   for tool in "$@"; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found on PATH"
@@ -64,7 +60,7 @@ require_tools() {
 
 load_config() {
   [ -f "$CONFIG_FILE" ] || die "$CONFIG_FILE missing; copy config.env.example"
-  case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # else `.` searches PATH
+  case "$CONFIG_FILE" in */*) ;; *) CONFIG_FILE=./$CONFIG_FILE ;; esac # so that `.` doesn't search PATH
   unset KEEPER_PROJECT REGION JOB KEEPER_SA_NAME SCHEDULER_SA_NAME KMS_KEY_VERSION MODULE RPC_SECRET ALCHEMY_SECRET \
     COINGECKO_SECRET ALERT_EMAIL CONDUIT PROPOSER PROPOSER_KMS_KEY_VERSION
   # shellcheck source=/dev/null
@@ -87,7 +83,6 @@ load_config() {
   done
   require_key_version KMS_KEY_VERSION "$KMS_KEY_VERSION"
   require_address MODULE "$MODULE"
-  # The immutable conduit the job also votes for, and the key and address that sign its votes: all or none.
   if [ -n "$CONDUIT$PROPOSER$PROPOSER_KMS_KEY_VERSION" ]; then
     [ -n "$CONDUIT" ] && [ -n "$PROPOSER" ] && [ -n "$PROPOSER_KMS_KEY_VERSION" ] ||
       die "CONDUIT, PROPOSER and PROPOSER_KMS_KEY_VERSION go together"
@@ -105,10 +100,10 @@ load_config() {
   KEEPER_SA=$KEEPER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   SCHEDULER_SA=$SCHEDULER_SA_NAME@$KEEPER_PROJECT.iam.gserviceaccount.com
   RUN_URI=https://run.googleapis.com/v2/projects/$KEEPER_PROJECT/locations/$REGION/jobs/$JOB:run
-  # Tuesday and Wednesday 23:50 UTC: ten minutes before the vote a day before the Thursday 00:00 flip, and before the
-  # last blocks; see src/schedule.ts.
+  # Tuesday and Wednesday at 23:50 UTC: ten minutes before the day-before vote, and before the last blocks of the
+  # Thursday 00:00 flip. See src/schedule.ts.
   SCHEDULE="50 23 * * 2,3"
-  # Sorted by name, as check.sh reads them back.
+  # Sorted by name, because that is how check.sh reads them back.
   ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
   if [ -n "$CONDUIT" ]; then
     ENV_VARS="CONDUIT=$CONDUIT,$ENV_VARS,PROPOSER=$PROPOSER,PROPOSER_KMS_KEY_VERSION=$PROPOSER_KMS_KEY_VERSION"
@@ -121,12 +116,11 @@ load_config() {
   fi
   ALERT_NAME="$JOB failed"
   ALERT_FILTER="metric.type=\"$ALERT_METRIC\" AND resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$JOB\" AND metric.labels.result=\"failed\""
-  # Cloud Scheduler logs an AttemptFinished entry for each attempt to start the job, at ERROR if it failed.
+  # Cloud Scheduler logs an AttemptFinished entry for each attempt to start the job, at ERROR when it fails.
   START_ALERT_NAME="$JOB start failed"
   START_ALERT_FILTER="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"$JOB\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
 }
 
-# render_policy FILE: policy/FILE with the service accounts filled in.
 render_policy() {
   jq --arg keeper "$KEEPER_SA" --arg scheduler "$SCHEDULER_SA" '
     walk(if type == "string"
@@ -135,17 +129,15 @@ render_policy() {
   ' "$POLICY_DIR/$1"
 }
 
-# json_field JSON FILTER: "" if null or absent.
+# json_field JSON FILTER prints "" when the value is null or missing.
 json_field() {
   printf '%s\n' "$1" | jq -r "($2) // \"\"" || die "cannot parse JSON"
 }
 
-# require_json JSON LABEL: dies unless JSON parses.
 require_json() {
   printf '%s\n' "$1" | jq -e . >/dev/null 2>&1 || die "$2 is not JSON: $1"
 }
 
-# Canonical policy: sorted bindings, without etag and version.
 normalize_policy() {
   jq -S '{
     bindings: ((.bindings // [])
@@ -154,21 +146,20 @@ normalize_policy() {
   }'
 }
 
-# policy_differs LIVE DESIRED. Leaves live_norm and desired_norm set.
+# policy_differs LIVE DESIRED sets live_norm and desired_norm for show_policy_diff.
 policy_differs() {
   live_norm=$(printf '%s\n' "$1" | normalize_policy)
   desired_norm=$(printf '%s\n' "$2" | normalize_policy)
   [ "$live_norm" != "$desired_norm" ]
 }
 
-# Prints the diff from the last policy_differs.
 show_policy_diff() {
   printf '%s\n' "$desired_norm" >"$TMP/expected.json"
   printf '%s\n' "$live_norm" >"$TMP/live.json"
   diff -u "$TMP/expected.json" "$TMP/live.json" | tail -n +3 >&2 || true
 }
 
-# get_iam RESOURCE FLAGS gcloud-subcommand...: FLAGS is one word-split string, "" for none.
+# get_iam RESOURCE FLAGS SUBCOMMAND...: FLAGS is a single string that gets word-split, or "" for none.
 get_iam() {
   iam_resource=$1
   iam_flags=$2
@@ -179,7 +170,7 @@ get_iam() {
   printf '%s\n' "$iam_json"
 }
 
-# set_iam RESOURCE FLAGS DESIRED gcloud-subcommand...: writes DESIRED in full, with the live etag, unless it matches.
+# set_iam RESOURCE FLAGS DESIRED SUBCOMMAND... replaces the whole policy with DESIRED, unless it already matches.
 set_iam() {
   set_iam_resource=$1
   set_iam_flags=$2
@@ -197,7 +188,6 @@ set_iam() {
   gcloud "$@" set-iam-policy $set_iam_flags "$set_iam_resource" "$TMP/policy.json" >/dev/null
 }
 
-# find_channel PROJECT: name of PROJECT's email notification channel for ALERT_EMAIL, or "".
 find_channel() {
   channels=$(gcloud beta monitoring channels list --project="$1" --format=json) || die "cannot list notification channels"
   require_json "$channels" "channel list"
@@ -205,7 +195,6 @@ find_channel() {
     jq -r --arg email "$ALERT_EMAIL" 'first(.[] | select(.type == "email" and .labels.email_address == $email) | .name) // ""'
 }
 
-# find_alert PROJECT NAME: PROJECT's alert policy named NAME as JSON, or "".
 find_alert() {
   alerts=$(gcloud monitoring policies list --project="$1" --format=json) || die "cannot list alert policies"
   require_json "$alerts" "alert policy list"
@@ -216,14 +205,12 @@ describe_job() { gcloud run jobs describe "$JOB" --region="$REGION" --project="$
 
 describe_scheduler() { gcloud scheduler jobs describe "$1" --location="$REGION" --project="$KEEPER_PROJECT" --format=json 2>/dev/null; }
 
-# has_version SECRET: whether SECRET has an enabled version.
 has_version() {
   versions=$(gcloud secrets versions list "$1" --project="$KEEPER_PROJECT" --format=json) || die "cannot list versions of $1"
   require_json "$versions" "secret version list"
   printf '%s\n' "$versions" | jq -e 'any(.[]; .state == "ENABLED")' >/dev/null
 }
 
-# rpc METHOD PARAMS: the result of a JSON-RPC call to the first of PUBLIC_RPCS that answers.
 rpc() {
   for rpc_url in $PUBLIC_RPCS; do
     rpc_reply=$(curl -sS --max-time 15 -H 'content-type: application/json' \
@@ -234,8 +221,8 @@ rpc() {
   die "$1 failed on every public Base node"
 }
 
-# stale_schedulers: scheduler jobs named $JOB-*, as older versions named them, space-separated.
-# Assign its output (x=$(stale_schedulers)) so that a failed listing stops the script.
+# Older versions named their scheduler jobs $JOB-*. Call this as x=$(stale_schedulers), so that a failed listing
+# stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"

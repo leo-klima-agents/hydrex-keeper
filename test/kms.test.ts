@@ -24,7 +24,6 @@ function derInteger(value: bigint): number[] {
   return [0x02, bytes.length, ...bytes];
 }
 
-/** DER as KMS returns it. */
 function der(r: bigint, s: bigint): Uint8Array {
   const body = [...derInteger(r), ...derInteger(s)];
   return Uint8Array.from([0x30, body.length, ...body]);
@@ -42,7 +41,6 @@ const tx = {
   data: "0x1234" as Hex,
 };
 
-/** fetch stub: metadata token, then KMS signing with the local key in DER, high-s when asked. */
 function fakeFetch(options: { highS?: boolean; metadata?: boolean } = {}) {
   const calls: string[] = [];
   const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {

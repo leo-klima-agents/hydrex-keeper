@@ -1,6 +1,4 @@
 #!/bin/sh
-# curl stub for the golden tests: logs each JSON-RPC call to $FAKE_GCLOUD_LOG and answers check.sh's two calls.
-# In the drift scenario, the first node times out and the keeper is underfunded.
 set -eu
 
 : "${FAKE_GCLOUD_LOG:?}" "${FAKE_GCLOUD_SCENARIO:?}"

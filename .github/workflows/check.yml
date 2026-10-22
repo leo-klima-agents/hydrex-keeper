@@ -2,7 +2,7 @@ name: check
 
 on:
   schedule:
-    - cron: "0 12 * * 5" # Friday 12:00 UTC, after the weekly vote
+    - cron: "0 12 * * 5" # Fridays at 12:00 UTC, after the weekly vote
   workflow_dispatch:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CI_SERVICE_ACCOUNT }}
-      # config.env from the repository variables named in config.env.example.
+      # Builds config.env from the repository variables named in config.env.example.
       - env:
           VARS: ${{ toJSON(vars) }}
         run: |

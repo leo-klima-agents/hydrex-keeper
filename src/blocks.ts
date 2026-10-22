@@ -1,34 +1,32 @@
 import type { Client } from "./chain.ts";
 
-const HISTORY = 30; // blocks the timing is learned from
+const HISTORY = 30;
 const DEFAULT_GAP_MS = 2_000;
-const SEND_MARGIN_MS = 200; // polls see a sub-block up to POLL_MS late, and a vote takes time to reach the builder
+const SEND_MARGIN_MS = 200; // covers poll lag and the time a vote takes to reach the builder
 const POLL_MS = 50;
 const POLL_TIMEOUT_MS = 500;
 
 type Header = { number: bigint; timestamp: bigint; txs: number };
 
-/** In ms: blocks are `gap` apart, at most `maxGap`; each is sealed `seal` after its timestamp. */
+/** In ms. `seal` is how long after its timestamp a block is sealed, and `lead` how long before it a vote is sent. */
 type Timing = { gap: number; maxGap: number; seal: number; lead: number };
 
 type Seen = { time: number; txs: number; changes: number[] };
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 
-// On the global setTimeout, which node:test's mock timers replace, unlike that of node:timers/promises.
+// The global setTimeout, because node:test's mock timers can replace it but not the one in node:timers/promises.
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Block timing, learned from polls of the block being built; times are in ms. A block is built in sub-blocks that
- * appear one after another until shortly before it is sealed, each started when the one before appears. A vote is sent
- * `lead` before the block's timestamp, so that it reaches the builder before the last sub-block starts; without
- * sub-blocks, half a gap before.
+ * Learns block timing from polls of the pending block. Base builds each block in sub-blocks, which appear one after
+ * another until shortly before the block is sealed. A vote is sent `lead` ms before the block's timestamp so that it
+ * reaches the builder before the last sub-block starts. When no sub-blocks are seen, it is sent half a block early.
  */
 export class Blocks {
   #seen = new Map<bigint, Seen>();
   #last: bigint | undefined;
 
-  /** Records a poll that saw block `number` holding `txs` transactions at `at`. */
   observe({ number, timestamp, txs }: Header, at: number): void {
     if (this.#last !== undefined && number < this.#last) return;
     const seen = this.#seen.get(number);
@@ -58,7 +56,6 @@ export class Blocks {
     return { gap, maxGap: Math.max(gap, ...gaps), seal, lead };
   }
 
-  /** The timestamp of the block being built at `now`, extrapolated from the last one seen; undefined before any. */
   building(now: number, { gap, seal } = this.timing): number | undefined {
     if (this.#last === undefined) return undefined;
     let time = this.#seen.get(this.#last)!.time;
@@ -66,7 +63,7 @@ export class Blocks {
     return time;
   }
 
-  /** The first block after `after` that may be one of the last two before `flip`; undefined if none is left. */
+  /** The first block after `after` that could be one of the last two before `flip`. */
   next(flip: number, after: number, now: number): number | undefined {
     const timing = this.timing;
     let time = this.building(now, timing);
@@ -76,7 +73,6 @@ export class Blocks {
   }
 }
 
-/** Polls the block being built into `blocks` until `stop()`; a poll that fails, hangs or is malformed is skipped. */
 export async function watch(client: Client, blocks: Blocks, stop: () => boolean): Promise<void> {
   while (!stop()) {
     const started = Date.now();

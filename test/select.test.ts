@@ -26,7 +26,6 @@ const candidate = (pool: Address, rewardsUsd: number, otherVotes: bigint, ownVot
   ownVotes,
 });
 
-/** Best expected value over a fine grid of splits between two pools. */
 function gridBest(candidates: Candidate[], power: bigint): number {
   let best = 0;
   for (let k = 0; k <= 10_000; k++) best = Math.max(best, expected(candidates, [k / 10_000, 1 - k / 10_000], power));
@@ -76,7 +75,6 @@ test("keeps the current vote unless the gain is at least a dollar", () => {
   assert.deepEqual(voted(0n, 0n)?.weights, [5000n, 5000n], "first vote of the epoch");
 });
 
-/** `n` pools paying 1, 2, ... n, each with 100 votes from others. */
 const many = (n: number) =>
   Array.from({ length: n }, (_, i) => candidate(`0x${(i + 1).toString(16).padStart(40, "0")}` as Address, i + 1, 100n));
 
@@ -134,7 +132,8 @@ test("a conduit's score values the same allocation at its own prices", () => {
 });
 
 test("above a bar, the allocation gives up as little at our prices as the conduit's check needs", () => {
-  // We value A only, the conduit B only: the vote must put f on B with 100·f/(1 + f) ≥ 10, so f ≥ 1/9.
+  // Our prices value only A and the conduit's check values only B. Scoring 10 needs a share f on B with
+  // 100·f/(1 + f) ≥ 10, so f ≥ 1/9.
   const candidates = [candidate(A, 100, 1000n), candidate(B, 0, 1000n)];
   const x = waterFillAbove(candidates, 1000n, [0, 100], 10)!;
   assert.ok(score(candidates, [0, 100], x, 1000n) >= 10);

@@ -18,7 +18,6 @@ type Call = { address: Address; functionName: string; args?: readonly unknown[] 
 let multicalls = 0;
 const blockTags: unknown[] = [];
 
-/** A client whose multicall answers from a table and counts round trips; unknown calls fail. */
 function fakeChain(answer: (call: Call) => unknown): Chain {
   const client = {
     multicall: async ({ contracts, blockTag }: { contracts: Call[]; blockTag?: string }) => {

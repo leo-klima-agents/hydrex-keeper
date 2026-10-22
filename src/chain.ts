@@ -18,11 +18,11 @@ import { conduitAbi, moduleAbi, voterAbi } from "./abi.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
-export const CHUNK = 1_000; // calls per eth_call: publicnode takes 1,132 and rejects 2,264
-export const HEDGE_DELAY_MS = 250; // a healthy provider answers a pass's read in about 125 ms
+export const CHUNK = 1_000; // calls per eth_call. publicnode accepts 1,132 and rejects 2,264.
+export const HEDGE_DELAY_MS = 250; // a healthy node answers a read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
-const BLOCK_SECONDS = 2n; // on Base
+const BLOCK_SECONDS = 2n;
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 
@@ -30,17 +30,16 @@ export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
 export const lower = (address: Address) => address.toLowerCase() as Address;
 
-/** The host of an RPC URL, for logs: provider URLs carry their API key. */
+// Logs only show the host, because provider URLs contain API keys.
 export const hostOf = (url: string) => (URL.canParse(url) ? new URL(url).host : "invalid URL");
 
 // mainnet.base.org rejects JSON-RPC batches of more than 10 calls.
 const transportOf = (url: string) => http(url, { batch: { batchSize: 10 }, timeout: TIMEOUT_MS });
 
 /**
- * Asks the URLs in order, hedged: when one has not answered within HEDGE_DELAY_MS, or has failed, the next is asked
- * too, and the first answer wins. A URL that missed the delay is asked together with the next until it answers within
- * it again, so a hung primary costs the delay once, not on every call. A revert is returned as is. No retries:
- * main.ts retries whole passes.
+ * Asks the URLs in order. When one fails or hasn't answered within HEDGE_DELAY_MS, the next is asked too, and the first
+ * answer wins. A URL that was too slow is asked alongside the next one until it is fast again, so a hung node costs the
+ * delay once, not on every call. There are no retries here, because main.ts retries whole passes.
  */
 export function hedged(rpcUrls: string[]): Transport {
   return ({ chain }) => {
@@ -80,12 +79,9 @@ export function hedged(rpcUrls: string[]): Transport {
   };
 }
 
-/**
- * Sends a signed transaction to every URL at once, so that inclusion does not depend on one node, and resolves with its
- * hash once one accepts it or already has it; the other answers are logged. Rejects if none does before `until` (ms).
- */
+/** Sends to every URL at once, so that inclusion doesn't depend on one node. */
 export function broadcaster(rpcUrls: string[]) {
-  // Unbatched, so that a vote does not wait for reads sent to the same URL.
+  // Not batched, so that a transaction never waits behind reads to the same URL.
   const nodes = rpcUrls.map((url) => ({ host: hostOf(url), transport: http(url) }));
   return (signed: Hex, until: number): Promise<Hex> => {
     const hash = keccak256(signed);
@@ -132,11 +128,11 @@ const bulkTransport = (rpcUrls: string[]) =>
 
 export type Chain = {
   client: Client;
-  /** For heavy reads, which take seconds: they go to one URL at a time instead of being hedged. */
+  /** For slow, heavy reads, which go to one URL at a time instead of being hedged. */
   bulk: Client;
   /**
-   * Like `client`, with batches and hedging of its own, for the immutable conduit's votes: the calls one client sends
-   * at once share a JSON-RPC batch, which answers when its slowest call does.
+   * A separate client for the immutable conduit's votes. Calls sent together through one client share a JSON-RPC batch,
+   * which only answers when its slowest call does.
    */
   v2Client: Client;
   broadcast: ReturnType<typeof broadcaster>;
@@ -145,11 +141,9 @@ export type Chain = {
   keeper: Address;
   voter: Address;
   ve: Address;
-  /** The immutable conduit the job also votes for, if any; see connectV2. */
   v2?: V2 | undefined;
 };
 
-/** The immutable conduit, the address that signs its votes, and the tokens it prices with Chainlink. */
 export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
 
 export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
@@ -188,10 +182,6 @@ type ReadOptions = {
   concurrency?: number;
 };
 
-/**
- * One eth_call per CHUNK calls, sent in parallel, so that a read comes from one block and public nodes see few
- * requests. Every call must succeed.
- */
 export async function readMany<T>(client: Client, calls: readonly Call[], options: ReadOptions = {}): Promise<T[]> {
   return (await multicall(client, calls, false, options)) as T[];
 }
@@ -211,8 +201,8 @@ export async function readEach<T>(
 }
 
 /**
- * Whether `call` itself reverted. When a node fails, every call in the multicall fails too, with what looks like a
- * revert, but of the multicall contract.
+ * When a node fails, every call in the multicall fails with what looks like a revert of the multicall contract. Only a
+ * revert of the call's own contract counts.
  */
 const reverted = (error: unknown, { address }: Call) =>
   error instanceof ContractFunctionExecutionError &&
@@ -220,23 +210,17 @@ const reverted = (error: unknown, { address }: Call) =>
   isAddressEqual(error.contractAddress, address) &&
   error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
 
-/** The latest block, or `pinned` while the node is behind it: such a node would not see a transaction in `pinned`. */
+/** A node behind `pinned` wouldn't see a transaction mined in `pinned`, so `pinned` is used until it catches up. */
 export async function blockAtLeast({ client }: Chain, pinned?: bigint): Promise<bigint> {
   const latest = await client.getBlockNumber({ cacheTime: 0 });
   return pinned !== undefined && latest < pinned ? pinned : latest;
 }
 
-/**
- * The number of the last block before `time` (s): estimated from the latest block, then checked with the block after
- * it. If the estimate is off, as when the block time changes, steps that double from it bracket the block, and halving
- * them finds it.
- */
 export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
   const head = await client.getBlock();
   if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
   const before = async (blockNumber: bigint) => (await client.getBlock({ blockNumber })).timestamp < time;
   const estimate = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
-  // `lo` is before `time`, and `hi` is not: the head is not.
   let lo = estimate < 0n ? 0n : estimate < head.number ? estimate : head.number - 1n;
   let hi = lo + 1n;
   const [loBefore, hiBefore] = await Promise.all([before(lo), before(hi)]);

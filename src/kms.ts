@@ -55,7 +55,7 @@ export function kmsAccount(keyVersion: string, address: Address, fetchFn: typeof
   });
 }
 
-/** DER SEQUENCE{INTEGER r, INTEGER s} -> low-s signature whose recovery id recovers `address`. */
+/** Converts a KMS DER signature to Ethereum's form: a low s, and the recovery id that gives back `address`. */
 export async function derToSignature(der: Uint8Array, hash: Hex, address: Address): Promise<Signature> {
   if (der[0] !== 0x30 || der[2] !== 0x02) throw new Error("KMS signature is not a DER sequence");
   const rLength = der[3]!;

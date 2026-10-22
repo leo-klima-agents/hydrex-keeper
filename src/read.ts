@@ -2,17 +2,15 @@ import { erc20Abi, type Address } from "viem";
 import { bribeAbi, veAbi } from "./abi.ts";
 import { call, lower, now, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
 
-/** A conduit's voting power at the start of the epoch, and when it last voted. */
 export type Votes = { power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
 
-/** The Klima conduit's votes, and the immutable conduit's if the job votes for it too. */
 export type Epoch = { start: bigint; flip: bigint; v2?: Votes | undefined } & Votes;
 
 type Reward = { token: Address; amount: bigint; decimals: number };
 
 export type PoolRewards = { pool: Address; rewards: Reward[] };
 
-/** Votes on each pool: the Klima conduit's own, everyone else's, and the immutable conduit's among them. */
+/** `otherVotes` is everyone's but the Klima conduit's, so it includes the immutable conduit's `v2Votes`. */
 export type State = {
   epoch: Epoch;
   pools: (PoolRewards & { otherVotes: bigint; ownVotes: bigint; v2Votes: bigint })[];
@@ -49,7 +47,10 @@ function toEpoch([start, lastVoted, power, v2LastVoted, v2Power]: bigint[]): Epo
   };
 }
 
-/** The Voter's epoch, and the conduit's power at the calendar epoch start, which `assertFresh` checks is the same. */
+/**
+ * Voting power is read at the start of the calendar week, and `assertFresh` checks that the Voter's epoch starts then
+ * too.
+ */
 export async function readEpoch(chain: Chain): Promise<Epoch> {
   return toEpoch(await readMany<bigint>(chain.client, epochCalls(chain, calendarEpoch())));
 }
@@ -104,7 +105,6 @@ export async function readRewardTokens<B extends { bribe: Address }>(
   });
 }
 
-/** Every pool of the Voter with a live gauge and rewards this epoch in `tokens`, with those rewards alone. */
 export async function readRewards(chain: Chain, tokens: Address[]): Promise<PoolRewards[]> {
   const read: Reader = <T>(calls: Call[]) => readMany<T>(chain.client, calls);
   const live = (await readBribes(chain, read)).filter((b) => b.alive);
@@ -125,9 +125,8 @@ export async function readRewards(chain: Chain, tokens: Address[]): Promise<Pool
 }
 
 /**
- * The epoch, as `readEpoch`, and the votes on `pools`: the conduits' this epoch, and everyone else's. For up to 331
- * pools, or 498 without the immutable conduit, all comes from one eth_call, and so from one block. `pending` reads the
- * block being built.
+ * Up to 331 pools, or 498 without the immutable conduit, fit in one eth_call, so every vote is read from the same
+ * block.
  */
 export async function readVotes(chain: Chain, pools: PoolRewards[], blockTag?: "pending"): Promise<State> {
   const { conduit, v2 } = chain;
@@ -146,7 +145,7 @@ export async function readVotes(chain: Chain, pools: PoolRewards[], blockTag?: "
     epoch,
     pools: pools.map((p, i) => {
       const [weight, own, v2Own] = results.slice(epochs.length + stride * i, epochs.length + stride * (i + 1));
-      // Voter.votes keeps last epoch's vote until the next vote resets it.
+      // Voter.votes still holds last epoch's vote until the conduit votes again.
       const ownVotes = epoch.votedThisEpoch ? own! : 0n;
       const v2Votes = epoch.v2?.votedThisEpoch ? v2Own! : 0n;
       return { ...p, otherVotes: weight! - ownVotes, ownVotes, v2Votes };

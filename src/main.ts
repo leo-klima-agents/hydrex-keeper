@@ -16,11 +16,11 @@ import { TOP_UP_MS, topUp } from "./topup.ts";
 import { klimaSender, v2Sender, VoteSent, type Sender } from "./vote.ts";
 import { parseWhitelist } from "./whitelist.ts";
 
-// Tried after BASE_RPC_URLS. Rate-limited: Base calls its own "not suitable for production apps".
+// Tried after BASE_RPC_URLS. They are rate-limited, so they are only a fallback.
 const PUBLIC_RPCS = ["https://mainnet.base.org", "https://base.drpc.org", "https://base-rpc.publicnode.com"];
 const ATTEMPTS = 3;
 const RETRY_DELAY_MS = 5_000;
-const LAST_MARGIN_MS = 2_000; // nothing is attempted this close to the flip
+const LAST_MARGIN_MS = 2_000; // no attempt starts this close to the flip
 
 async function main(): Promise<number> {
   const dryRun = process.argv.includes("--dry-run");
@@ -29,7 +29,7 @@ async function main(): Promise<number> {
   if (immediately && claimNow) throw new Error("--now and --claim exclude each other");
   const module = getAddress(required("MODULE"));
   const keyVersion = dryRun ? process.env.KMS_KEY_VERSION : required("KMS_KEY_VERSION");
-  // The immutable conduit's failures fail the execution, once the Klima conduit has voted or claimed without it.
+  // Immutable conduit problems fail the run, but only after the Klima conduit has voted or claimed.
   let failed = false;
   const unusable = (error: unknown) => {
     failed = true;
@@ -48,7 +48,7 @@ async function main(): Promise<number> {
   const configured = required("BASE_RPC_URLS").split(",");
   const rpcUrls = [...new Set([...configured, ...PUBLIC_RPCS].map((url) => url.trim()).filter(Boolean))];
   const chain = await connect(module, rpcUrls);
-  // Each key's nonces are tracked apart, and the two send votes and claims at once.
+  // The two keys send at the same time and their nonces are tracked separately, so they must differ.
   if (config && isAddressEqual(config.proposer, chain.keeper)) {
     unusable(new Error(`PROPOSER is the keeper, ${chain.keeper}: each needs nonces of its own`));
   } else if (config) chain.v2 = await reachV2(chain, config).catch(unusable);
@@ -78,7 +78,7 @@ async function main(): Promise<number> {
   const retry = Number(process.env.CLOUD_RUN_TASK_ATTEMPT ?? 0) > 0;
   const todo = task(epoch.flip, now(), { now: immediately, claim: claimNow, dryRun, retry });
   if (todo.what === undefined) {
-    // Whatever else is wrong, an unusable CONDUIT or a minter that has not started the epoch included; see `task`.
+    // This exit code wins over any other problem, such as an unusable CONDUIT or a stale epoch. See `task`.
     const message = "nothing due: the job votes a day before the flip and in its last blocks, and claims after it";
     (todo.exit ? log.error : log.warning)(message, { flip: epoch.flip, retry });
     return todo.exit;
@@ -89,13 +89,11 @@ async function main(): Promise<number> {
     const until = claimNow ? Date.now() + Number(HORIZON) * 1000 : Number(flip + HORIZON) * 1000;
     return (await claims(run, flip, until)) || failed ? 1 : 0;
   }
-  // First thing on the Tuesday run: the keys hold, for the week's votes and claims, what they hold after it. A top-up
-  // transaction whose outcome is unknown does not hold up the proposer's vote, which replaces it at its nonce, at a
-  // quarter more in fees: see prepareTx.
+  // The top-up runs first so that the week's votes and claims have the ETH they need. If a top-up transaction's outcome
+  // is unknown, the proposer's vote replaces it at the same nonce with higher fees, so the vote isn't blocked.
   const topUpFailures = what === "day before" ? await topUp(run, Date.now() + TOP_UP_MS) : 0;
   assertFresh(epoch);
   const { flip } = epoch;
-  // Each conduit votes if it has voting power this epoch, whatever becomes of the other.
   const klima = epoch.power > 0n;
   if (!klima) {
     failed = true;
@@ -111,13 +109,12 @@ async function main(): Promise<number> {
   if (!immediately) await sleep(Math.max(0, Number(flip - DAY) * 1000 - Date.now()));
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
-  // A retry of the schedule's vote does not vote again for a conduit whose vote of a day before is in, as the Voter
-  // shows it when that conduit's turn comes. The first execution votes whatever the conduits' last votes.
+  // A retry skips a conduit whose day-before vote is already on chain. The first attempt always votes.
   const voted = async (sender: Sender) => recheck && (await votedDayBefore(chain, sender, flip));
   const reads = perAttempt(() => readDayBefore(run, until));
-  // The immutable conduit votes once the Klima conduit's vote is in, or has failed, so that its check counts the votes
-  // that one moves, and is checked after it too, as it may still be pending. The two are retried apart, and either
-  // votes whatever becomes of the other.
+  // The immutable conduit votes after the Klima conduit's vote is in or has failed, so that its check counts the votes
+  // that one moved. It is also checked after that vote, which may still be pending. Each conduit retries on its own,
+  // and neither depends on the other.
   let klimaVote: Vote | undefined;
   const klimaPass = async (attempt: number) => {
     if (await voted(klimaSender(chain))) return;
@@ -132,7 +129,6 @@ async function main(): Promise<number> {
   return failed || topUpFailures > 0 || !klimaDone || !v2Done ? 1 : 0;
 }
 
-/** Runs `pass` up to ATTEMPTS times, while time is left before `until` (ms); returns whether it succeeded. */
 async function attempts(name: string, pass: (attempt: number) => Promise<void>, until: number): Promise<boolean> {
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
@@ -150,7 +146,7 @@ async function attempts(name: string, pass: (attempt: number) => Promise<void>, 
   }
 }
 
-/** connectV2, tried up to ATTEMPTS times: one failed read would leave out the immutable conduit until the flip. */
+/** Retried, because one failed read would leave the immutable conduit out until the flip. */
 async function reachV2(chain: Chain, config: Omit<V2, "priced">): Promise<V2> {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -163,10 +159,6 @@ async function reachV2(chain: Chain, config: Omit<V2, "priced">): Promise<V2> {
   }
 }
 
-/**
- * The immutable conduit the job also votes for, the address that signs its votes, and its key: CONDUIT, PROPOSER and
- * PROPOSER_KMS_KEY_VERSION, all or none. A dry run may leave out the key.
- */
 function immutableConduit(dryRun: boolean): (Omit<V2, "priced"> & { keyVersion: string | undefined }) | undefined {
   const { CONDUIT: conduit, PROPOSER: proposer, PROPOSER_KMS_KEY_VERSION: keyVersion } = process.env;
   if (!conduit && !proposer && !keyVersion) return undefined;
