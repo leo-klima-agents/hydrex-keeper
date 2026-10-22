@@ -1,11 +1,9 @@
 #!/bin/sh
-# gcloud stub for the golden tests: logs each call to $FAKE_GCLOUD_LOG and answers from the $FAKE_GCLOUD_SCENARIO state.
-# In the log, --source paths become <repo> and set-iam-policy files their canonical JSON.
 set -eu
 
 : "${FAKE_GCLOUD_LOG:?}" "${FAKE_GCLOUD_SCENARIO:?}"
 
-# Mirrors test/sh/config/keeper.env and the defaults in sh/lib.sh.
+# These must match test/sh/config/keeper.env and the defaults in sh/lib.sh.
 project=hydrex-keeper-test
 region=us-central1
 job=hydrex-keeper
@@ -13,7 +11,7 @@ keeper_sa=hydrex-keeper@$project.iam.gserviceaccount.com
 scheduler_sa=hydrex-keeper-scheduler@$project.iam.gserviceaccount.com
 key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1
 module=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
-# Mirrors test/sh/config/conduit.env.
+# These must match test/sh/config/conduit.env.
 conduit=0x692c323B425A9DfeebE302F56168a7798D93EAC5
 proposer=0x000000000000000000000000000000000000bEEF
 proposer_key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-proposer-v1/cryptoKeyVersions/1
@@ -21,8 +19,6 @@ email=hydrex-admin@example.com
 channel=projects/$project/notificationChannels/1234567890
 run_uri=https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/$job:run
 
-# What exists; drift bends the live state; list-fails denies listing scheduler jobs and alert policies; with-conduit
-# deployed the job with the immutable conduit.
 has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no list_fails=no
 with_conduit=no
 case "$FAKE_GCLOUD_SCENARIO" in
@@ -39,7 +35,7 @@ case "$FAKE_GCLOUD_SCENARIO" in
 esac
 
 job_json() {
-  if [ "$drift" = yes ]; then # deployed by an older version, which set VOTE_OFFSETS
+  if [ "$drift" = yes ]; then # an older version deployed this job and set VOTE_OFFSETS
     sa=123456789-compute@developer.gserviceaccount.com retries=0
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400"}'
   else
@@ -59,7 +55,7 @@ job_json() {
 scheduler_json() {
   cron='50 23 * * 2,3'
   if [ "$drift" = yes ]; then state=PAUSED; else state=ENABLED; fi
-  if [ "$drift" = yes ]; then # Cloud Scheduler's defaults: no retry
+  if [ "$drift" = yes ]; then # Cloud Scheduler's defaults, which never retry
     retry='{"maxBackoffDuration":"3600s","maxDoublings":5,"maxRetryDuration":"0s","minBackoffDuration":"5s"}'
   else
     retry='{"maxBackoffDuration":"60s","maxDoublings":2,"maxRetryDuration":"300s","minBackoffDuration":"15s","retryCount":3}'
@@ -108,14 +104,14 @@ alert_json() {
 
 start_alert_json() {
   filter="resource.type=\"cloud_scheduler_job\" AND resource.labels.job_id=\"$job\" AND jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\" AND (severity>=ERROR OR httpRequest.status>=400)"
-  [ "$drift" = no ] || filter='resource.type="cloud_scheduler_job"' # edited by hand
+  [ "$drift" = no ] || filter='resource.type="cloud_scheduler_job"'
   jq -nc --arg name "$job start failed" --arg filter "$filter" --arg channel "$channel" --arg project "$project" \
     '{displayName: $name, enabled: true, name: "projects/\($project)/alertPolicies/2", notificationChannels: [$channel], conditions: [{conditionMatchedLog: {filter: $filter}}]}'
 }
 
 log_call() { printf 'gcloud %s\n' "$*" >>"$FAKE_GCLOUD_LOG"; }
 
-# log_set_policy EXPECTED_ETAG ARGS...: checks the etag, then logs the policy file as canonical JSON.
+# log_set_policy EXPECTED_ETAG ARG... POLICY_FILE
 log_set_policy() {
   expected_etag=$1
   shift

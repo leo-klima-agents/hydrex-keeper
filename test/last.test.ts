@@ -27,9 +27,9 @@ const numberOf = (time: number) => 1_000_000 + (time - flip - 1000) / 2000;
 type Chain = { dead?: number; frozen?: number; past?: number };
 
 /**
- * Base: a block on each odd second, built over the two seconds before it in sub-blocks 155 ms apart, the last 450 ms
- * before its timestamp. Polls take 40 ms; from `dead` they hang, from `frozen` they answer as then, and from `past` the
- * block being built is past the flip.
+ * Fakes Base's timing: a block every odd second, built in sub-blocks 155 ms apart, the last one 450 ms before the
+ * block's timestamp. Polls take 40 ms. They hang from `dead`, stop advancing from `frozen`, and see a block after the
+ * flip from `past`.
  */
 function client({ dead = Infinity, frozen = Infinity, past = Infinity }: Chain): Client {
   const pending = (at: number) => {
@@ -50,7 +50,6 @@ function client({ dead = Infinity, frozen = Infinity, past = Infinity }: Chain):
   } as unknown as Client;
 }
 
-/** Plans that take 150 ms, or that hang or fail as `behave` says for the `n`th. */
 function planner(behave: (n: number) => "ok" | "hang" | "fail" = () => "ok") {
   let n = 0;
   return async (): Promise<Plan> => {
@@ -64,7 +63,6 @@ function planner(behave: (n: number) => "ok" | "hang" | "fail" = () => "ok") {
   };
 }
 
-/** Ticks the mocked clock until `promise` settles. */
 async function drive<T>(t: TestContext, promise: Promise<T>): Promise<T> {
   let done = false;
   const settled = promise.finally(() => (done = true));
@@ -81,11 +79,11 @@ type Options = {
   seedOnly?: boolean;
   raceAt?: number;
   behave?: Parameters<typeof planner>[0];
-  /** A second lane, planning apart, and how its plans behave. */
+  /** Adds a second lane whose plans behave this way. */
   other?: Parameters<typeof planner>[0];
 };
 
-/** The sends of a race over the last 40 s before the flip, as ms from the flip. */
+/** Runs a race over the last 40 s before the flip and returns its sends, timed in ms from the flip. */
 async function run(
   t: TestContext,
   { chain = {}, seedOnly, raceAt = start, behave, other }: Options = {},
@@ -118,7 +116,7 @@ async function run(
   return sent;
 }
 
-/** Sent at least 150 ms before the last sub-block of its block starts, and at most 850 ms before its timestamp. */
+/** Whether a send came between 850 ms before its block's timestamp and 150 ms before the block's last sub-block. */
 const inTime = ({ time, at }: { time: number; at: number }) => at >= time - 850 && at <= time - 605 - 150;
 
 const warmUp: Plan = { readAt: 0, time: 0, vote: null, note: "warm-up", summary: {} };
@@ -223,7 +221,6 @@ const [voteA, voteB] = [
   { pools: [addr(10)], weights: [1n] },
   { pools: [addr(11)], weights: [1n] },
 ];
-/** A plan for block 9 that came back at `readAt`, voting `vote` if prepared, after `rival` if any. */
 const planned = (readAt: number, vote: typeof voteA | null, rival?: typeof voteA, time = 9): Plan => ({
   readAt,
   time,
@@ -258,7 +255,7 @@ test("each conduit sends its freshest plan for the block when the immutable cond
 });
 
 test("the immutable conduit's vote goes only with a Klima conduit's vote it was checked after", () => {
-  // The Klima conduit's vote changed at 300, and no vote of the immutable conduit was checked after it yet.
+  // The Klima conduit switched to voteB at 300, and no immutable conduit plan has been checked after that vote yet.
   const klima = laneOf(planned(100, voteA), planned(300, voteB));
   const v2 = laneOf(planned(50, voteB), planned(350, voteB, voteA));
   assert.deepEqual(readAts(pick(9, klima, v2)), { klima: 100, v2: 350 }, "the freshest pair checked together");
@@ -269,8 +266,8 @@ test("the immutable conduit's vote goes only with a Klima conduit's vote it was 
 });
 
 test("alone, the Klima conduit sends its freshest plan that answered the immutable conduit's votes in force", () => {
-  // The immutable conduit's only vote for the block was checked after a Klima vote of an earlier block, so it is not
-  // sent. The Klima conduit's plan at 300 answered it; the one at 100 answered the votes in force, which stay.
+  // The immutable conduit's only plan was checked after a Klima vote from an earlier block, so it isn't sent. The Klima
+  // plan at 300 answered that plan, and the one at 100 answered the votes already in force.
   const v2 = laneOf(planned(250, voteB, voteB));
   const answering = { ...planned(300, voteA), answered: true };
   const picked = pick(9, laneOf({ ...planned(100, voteA), answered: false }, answering), v2);
@@ -384,13 +381,13 @@ test("an immutable conduit's vote is known to be in once the Voter shows its vot
   assert.deepEqual(landed(state([0n, 0n]), [{ ...klima, votes: undefined }]), [], "not the immutable conduit's");
 });
 
-// Base's blocks are two seconds apart, on odd seconds: block n at 1 + 2n, so the last before an even flip is at flip - 1.
+// Block n has timestamp 1 + 2n, so blocks fall on odd seconds and the last one before an even flip is at flip - 1.
 const FLIP = 1_790_812_800n;
 const LAST = (FLIP - 2n) / 2n;
 const timeOf = (n: bigint) => 1n + 2n * n;
 const [KLIMA, V2, POOL] = [addr(1), addr(2), addr(3)];
 
-/** Its latest block is before the flip for the first `behind` reads of it. */
+/** For the first `behind` reads, the latest block is still before the flip. */
 function outcomeChain(
   receipts: Record<Hex, { status: string; blockNumber: bigint }>,
   lastVoted: (conduit: string, block: bigint) => bigint,
@@ -403,7 +400,7 @@ function outcomeChain(
       return { ...receipt, transactionHash: hash };
     },
     getBlock: async (args?: { blockNumber?: bigint }) => {
-      const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 6n); // ten seconds after the flip
+      const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 6n); // 11 s after the flip
       return { number, timestamp: timeOf(number) };
     },
     multicall: async ({
@@ -445,7 +442,7 @@ test("each conduit's vote this epoch is read at the last block before the flip, 
   const [klimaHash, v2Hash]: [Hex, Hex] = ["0xaa", "0xbb"];
   const run = outcomeChain(
     { [klimaHash]: { status: "success", blockNumber: LAST }, [v2Hash]: { status: "reverted", blockNumber: LAST - 1n } },
-    // Someone voted for the immutable conduit first in our block, and again after the flip.
+    // Someone else voted for the immutable conduit earlier in our vote's block, and again after the flip.
     (conduit, block) => (conduit === V2 ? (block > LAST ? FLIP + 1n : timeOf(LAST - 1n)) : timeOf(LAST)),
   );
   const sent = [

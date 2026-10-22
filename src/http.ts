@@ -7,8 +7,8 @@ export const isObject = (body: unknown): body is Record<string, unknown> =>
   typeof body === "object" && body !== null && !Array.isArray(body);
 
 /**
- * Fetches JSON from `url`, retrying until `until` (ms). `valid` rejects a malformed answer, and an error that `final`
- * returns is thrown without retrying. Errors name the service, not the URL, which may hold an API key.
+ * Retries until `until` (ms). An error returned by `final` is thrown at once, without retrying. Errors name the service
+ * but never the URL, because some URLs contain an API key.
  */
 export async function getJson(
   name: string,

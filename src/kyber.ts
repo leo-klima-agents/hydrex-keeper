@@ -18,13 +18,11 @@ export type Swap = { router: Address; data: Hex; amountIn: bigint; amountOut: bi
 
 export type Swapper = (request: SwapRequest, until: number) => Promise<Swap>;
 
-/** KyberSwap refused, for example for lack of a route. Asking again would not help. */
+/** KyberSwap said no, for example because it found no route. Retrying won't help. */
 export class SwapRefused extends Error {}
 
-/** KyberSwap's answer is not the swap asked for. */
 export class BadSwap extends Error {}
 
-/** Gets a swap from KyberSwap, then decodes its calldata and checks that it is the swap asked for. */
 export function kyberswap(fetchFn: typeof fetch = fetch): Swapper {
   return async ({ tokenIn, tokenOut, amountIn, account, slippageBps }, until) => {
     const query = new URLSearchParams({ tokenIn, tokenOut, amountIn: String(amountIn) });

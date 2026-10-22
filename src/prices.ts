@@ -3,12 +3,12 @@ import { lower } from "./chain.ts";
 import { getJson, isObject } from "./http.ts";
 import { errorMessage, log } from "./log.ts";
 
-const REFRESH_BUDGET_MS = 20_000; // how close to `until` the last set is reused
-const SPREAD = 1.2; // quotes further apart than this ratio are logged
+const REFRESH_BUDGET_MS = 20_000; // this close to `until`, the last prices are reused
+const SPREAD = 1.2;
 
 export type Prices = Map<Address, number>;
 
-/** USD prices by lowercase address; unknown tokens are absent. `until` (ms) bounds retries and timeouts. */
+/** Prices in USD, keyed by lowercase address. Tokens without a price are left out. */
 export type PriceSource = { name: string; get: (tokens: Address[], until: number) => Promise<Prices> };
 
 const unique = (tokens: Address[]) => [...new Set(tokens.map(lower))];
@@ -19,7 +19,6 @@ const chunks = <T>(list: T[], size: number) =>
 const positive = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 
-/** DefiLlama, keyless, 50 tokens per request. */
 export function defillama(fetchFn: typeof fetch = fetch): PriceSource {
   type Body = { coins: Record<string, { price?: unknown }> };
   return {
@@ -46,7 +45,6 @@ export function defillama(fetchFn: typeof fetch = fetch): PriceSource {
   };
 }
 
-/** Alchemy's Prices API, 25 tokens per request. The key is in the URL. */
 export function alchemy(apiKey: string, fetchFn: typeof fetch = fetch): PriceSource {
   type Body = { data: { address: string; prices?: { currency: string; value: string }[] }[] };
   return {
@@ -74,7 +72,6 @@ export function alchemy(apiKey: string, fetchFn: typeof fetch = fetch): PriceSou
   };
 }
 
-/** CoinGecko's Demo API, 100 tokens per request. */
 export function coingecko(apiKey: string, fetchFn: typeof fetch = fetch): PriceSource {
   type Body = Record<string, { usd?: unknown }>;
   return {
@@ -98,8 +95,8 @@ export function coingecko(apiKey: string, fetchFn: typeof fetch = fetch): PriceS
 }
 
 /**
- * Asks every source for every token, in parallel. A price is the median of three quotes, the lower of two (overpricing
- * a bribe would draw votes to it), or the only one. Fails only if every source does.
+ * A price is the median of three quotes or the lower of two, because overpricing a bribe would draw votes to it. Fails
+ * only if every source fails.
  */
 export function combined(sources: PriceSource[]): PriceSource {
   return {
@@ -124,9 +121,8 @@ export function combined(sources: PriceSource[]): PriceSource {
 }
 
 /**
- * Fetches at every call; reuses the last set if it was fetched for every token asked for, near `until` or when the
- * fetch fails. A set fetched for other tokens would leave these unpriced, and count them as zero: the fetch's failure
- * is thrown instead.
+ * Fetches on every call. Near `until`, or when the fetch fails, it reuses the last prices, but only if they were
+ * fetched for every token asked for. Otherwise the missing tokens would count as zero.
  */
 export function priceFeed(source: PriceSource): (tokens: Address[], until?: number) => Promise<Prices> {
   let last: { at: number; requested: Set<Address>; map: Prices } | undefined;

@@ -51,7 +51,6 @@ test("a conduit's vote of a day before is in if the Voter shows one now, and for
   const [KLIMA, V2, PROPOSER, OTHER] = [addr(1), addr(2), addr(3), addr(4)];
   const lastVoted = new Map<Address, bigint>();
   let proposer = PROPOSER;
-  // Blocks 2 s apart, the latest two hours after the vote of a day before.
   const head = { number: 100_000n, timestamp: flip - DAY + 7_200n };
   const client = {
     multicall: async ({ contracts }: { contracts: { args: [Address] }[] }) =>

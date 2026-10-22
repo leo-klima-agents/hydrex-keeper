@@ -16,21 +16,19 @@ import {
   type Vote,
 } from "./select.ts";
 
-// The immutable conduit, version 2 of hydrex-conduit: anyone may propose its vote, and it takes one only if its own
-// score, in Chainlink-priced tokens, beats the vote in force by MIN_GAIN. The job values votes at its own prices, and
-// checks that score before sending.
-
+// The immutable conduit (hydrex-conduit version 2) lets anyone propose its vote. It only accepts a vote whose score,
+// counted in the tokens it prices with Chainlink, beats the vote in force by MIN_GAIN. The job picks votes at its own
+// prices and checks the conduit's score before sending.
 const MAX_V2_POOLS = 20; // the conduit's MAX_POOLS
-const MIN_GAIN = 1; // USD: the conduit's MIN_GAIN
-const MARGIN = 0.1; // USD aimed for above MIN_GAIN, for votes that move before ours lands
-const MAX_PRICED_TOKENS = 4; // the conduit's
-const VALUE_CHUNK = 25; // poolValue calls per eth_call: each can use 200k gas
-const VALUE_CONCURRENCY = 3; // such eth_calls at once: they are read again every block, from the RPCs votes need too
+const MIN_GAIN = 1; // USD, the conduit's MIN_GAIN
+const MARGIN = 0.1; // USD above MIN_GAIN, in case other votes move before ours lands
+const MAX_PRICED_TOKENS = 4; // the conduit's limit
+const VALUE_CHUNK = 25; // poolValue calls per eth_call, because each can use 200k gas
+const VALUE_CONCURRENCY = 3; // kept low because these reads repeat every block, on the RPCs the votes use
 
-/** The conduit's own values of pools, in USD, and its score of the vote in force. */
+/** `current` is the conduit's score of the vote in force, in USD. */
 export type Onchain = { values: Map<Address, number>; current: number };
 
-/** What the immutable conduit does: a vote, or none and why; and its votes on each pool once it is decided. */
 export type V2Decision = { vote: Vote | null; note: string; votes: bigint[]; summary: Record<string, unknown> };
 
 const v2Call = (conduit: Address, functionName: string, args?: readonly unknown[]) =>
@@ -38,10 +36,6 @@ const v2Call = (conduit: Address, functionName: string, args?: readonly unknown[
 
 const usd = (wad: bigint) => Number(wad) / 1e18;
 
-/**
- * The immutable conduit at `conduit`, checked against the Klima conduit's Voter and VotingEscrow, with the tokens it
- * prices. Fails, and the job then votes without it, if `conduit` is not such a conduit.
- */
 export async function connectV2(chain: Chain, { conduit, proposer }: Omit<V2, "priced">): Promise<V2> {
   const [voter, ve] = await readMany<Address>(chain.client, [v2Call(conduit, "voter"), v2Call(conduit, "veToken")]);
   if (!isAddressEqual(voter!, chain.voter) || !isAddressEqual(ve!, chain.ve)) {
@@ -54,16 +48,12 @@ export async function connectV2(chain: Chain, { conduit, proposer }: Omit<V2, "p
   return { conduit, proposer, priced };
 }
 
-/** The pools the conduit can value: those paid this epoch in a token it prices. Its fees in others need one too. */
 export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] {
   const tokens = new Set(priced.map(lower));
   return pools.filter((p) => p.rewards.some((r) => tokens.has(lower(r.token)))).map((p) => p.pool);
 }
 
-/**
- * The conduit's values of `pools`, in USD. They do not depend on votes, and barely move within a block. Fails while the
- * conduit cannot vote.
- */
+/** Fails while the conduit can't vote. */
 export async function readValues(
   { v2 }: Chain,
   client: Client,
@@ -79,13 +69,11 @@ export async function readValues(
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
 
-/** The conduit's score of its vote in force, in USD, which moves with every vote. */
 export async function readScore({ v2 }: Chain, client: Client, blockTag?: "pending"): Promise<number> {
   const [current] = await readMany<bigint>(client, [v2Call(v2!.conduit, "currentScore")], { blockTag });
   return usd(current!);
 }
 
-/** The immutable conduit's view of the pools: every vote but its own counts as another's. */
 export function v2Candidates(state: State, usdValues: number[]): Candidate[] {
   return state.pools.map((p, i) => ({
     pool: p.pool,
@@ -95,7 +83,6 @@ export function v2Candidates(state: State, usdValues: number[]): Candidate[] {
   }));
 }
 
-/** The votes `vote` puts on each candidate, as the Voter splits `power` by weight. */
 export function votesOf(candidates: { pool: Address }[], vote: Vote, power: bigint): bigint[] {
   const total = vote.weights.reduce((a, b) => a + b, 0n);
   const weights = new Map(vote.pools.map((pool, i) => [lower(pool), vote.weights[i]!]));
@@ -103,11 +90,10 @@ export function votesOf(candidates: { pool: Address }[], vote: Vote, power: bigi
 }
 
 /**
- * The immutable conduit's vote at our prices, against everyone else's votes, the Klima conduit's included: in
- * proportion to rewards a day before the flip, else the water-filling one if it gains over MIN_GAIN_USD. When it does
- * not score MIN_GAIN plus MARGIN over the vote in force at the conduit's own values, once rounded as it is sent, the
- * best vote that does, if that one gains over MIN_GAIN_USD on the vote in force. Without `onchain`, the simulation is
- * left to check.
+ * A day before the flip the vote is proportional to rewards; otherwise it is the water-filling vote, if that gains more
+ * than MIN_GAIN_USD. If it wouldn't beat the vote in force by MIN_GAIN plus MARGIN at the conduit's own values, the
+ * best vote that does replaces it, as long as that one still gains more than MIN_GAIN_USD. Without `onchain`, only the
+ * simulation checks the vote.
  */
 export function decideV2(
   state: State,
@@ -128,7 +114,7 @@ export function decideV2(
   let x: number[] | null;
   if (proportionally) x = proportional(usdValues, MAX_V2_POOLS);
   else {
-    // A vote that clears the check gains no more at our prices than our best, so that one is the cheap test.
+    // If our best vote doesn't gain enough at our prices, no vote that clears the check will.
     const best = select(candidates, power, MAX_V2_POOLS);
     if (best.fractions && !best.vote) return keep("keeping v2's vote", summarize(candidates, best.fractions, power));
     x = best.fractions;
@@ -139,8 +125,7 @@ export function decideV2(
     const values = candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
     const bar = onchain.current + MIN_GAIN + MARGIN;
     if (score(candidates, values, asVoted(x), power) < bar) {
-      // Unless proportionally, `x` is already our water-filling, which falls short. Whichever replaces it is no longer
-      // in proportion, so it must gain as much as a vote of the last blocks would.
+      // The replacement is no longer proportional, so it must gain as much as a last-block vote would.
       x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
       if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
       if (gain(candidates, x, power) <= MIN_GAIN_USD) {

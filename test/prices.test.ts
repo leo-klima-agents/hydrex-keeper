@@ -153,7 +153,6 @@ test("prices stops retrying when a retry cannot finish before the deadline", asy
   assert.equal(urls.length, 1);
 });
 
-/** A source answering from a table, or failing; records what it was asked. */
 function table(name: string, quotes: Record<string, number> | Error): PriceSource & { asked: Address[][] } {
   const asked: Address[][] = [];
   return {

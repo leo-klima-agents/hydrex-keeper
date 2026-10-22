@@ -8,9 +8,8 @@ import { score } from "../src/select.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [A, B, C, USDC, HYDX] = [addr(10), addr(11), addr(12), addr(13), addr(14)] as const;
-const E = 10n ** 18n; // votes have 18 decimals
+const E = 10n ** 18n;
 
-/** Pools A and B with 1,000 votes from others each; the Klima conduit's are on A, the immutable conduit's on B. */
 function state({ v2Power = 1000n * E, v2OnB = 0n } = {}): State {
   const reward = (token: Address) => [{ token, amount: 1n, decimals: 6 }];
   return {
@@ -69,7 +68,7 @@ test("our best vote is sent when it clears the conduit's check", () => {
 });
 
 test("when ours does not clear the check, the vote that does at the least cost at our prices", () => {
-  // We value A only, the conduit values B only, and the vote in force scores 10.
+  // Our prices value only A, the conduit's check values only B, and the vote in force scores 10.
   const decision = decideV2(state(), [100, 0], onchain(10, 0, 100));
   assert.ok(decision.vote);
   const x = decision.votes.map((v) => Number(v) / Number(1000n * E));
@@ -95,7 +94,8 @@ test("the last blocks re-vote only for a gain over a dollar; a day before, the v
 });
 
 test("a day before, a vote that clears the conduit's check only by losing at our prices keeps the vote in force", () => {
-  // The vote in force, all on B, is worth $50 at our prices. The conduit values A alone, and needs 40% on A.
+  // The vote in force is all on B and worth $50 at our prices. The conduit's check values only A, so clearing it
+  // takes 40% on A.
   const decision = decideV2(state({ v2OnB: 1000n * E }), [10, 100], onchain(20, 100, 0), true);
   assert.equal(decision.vote, null);
   assert.match(decision.note, /no vote that clears v2's check gains enough/);
@@ -111,7 +111,7 @@ test("without voting power, the immutable conduit does not vote", () => {
 });
 
 test("the vote clears the conduit's check as the Voter splits it, rounded to basis points", () => {
-  // Seeded cases where our best vote falls short of the bar, so the check decides the vote.
+  // In each random case, the vote in force scores a little more than our best vote, so the check decides the vote.
   let seed = 7;
   const rand = () => (seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31;
   const power = 176_730n * E;
@@ -145,7 +145,6 @@ test("the vote clears the conduit's check as the Voter splits it, rounded to bas
   assert.ok(checked >= 25, `${checked} cases voted`);
 });
 
-/** A client answering connectV2's reads for a conduit on `voter` and `ve`. */
 function conduitClient(voter: Address, ve: Address): Client {
   const answer = ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) =>
     functionName === "voter" ? voter : functionName === "veToken" ? ve : [addr(30 + Number(args![0])), addr(40), 0n];

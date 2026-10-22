@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compares the live project with config.env and policy/. Read-only; runs every check, exits 1 if any failed.
+# Read-only. Runs every check and exits 1 if any of them fails.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
@@ -16,11 +16,9 @@ fail() {
   failed=1
 }
 ok() { log "ok: $*"; }
-# expect LABEL ACTUAL EXPECTED
 expect() {
   if [ "$2" = "$3" ]; then ok "$1 is $3"; else fail "$1 is ${2:-unset}, expected $3"; fi
 }
-# expect_policy LABEL LIVE TEMPLATE
 expect_policy() {
   if policy_differs "$2" "$(render_policy "$3")"; then
     fail "$1 IAM policy differs from template"
@@ -30,7 +28,6 @@ expect_policy() {
   fi
 }
 
-# Job
 job=$(describe_job) || die "job $JOB not found; run deploy.sh"
 require_json "$job" "job $JOB"
 task='.spec.template.spec.template.spec'
@@ -48,7 +45,6 @@ expect "job secrets" "$secrets" "$SECRETS"
 job_policy=$(get_iam "$JOB" "--region=$REGION --project=$KEEPER_PROJECT" run jobs)
 expect_policy job "$job_policy" job.iam.json.tmpl
 
-# Schedule
 if scheduler=$(describe_scheduler "$JOB"); then
   require_json "$scheduler" "scheduler job $JOB"
   expect "schedule" "$(json_field "$scheduler" .schedule)" "$SCHEDULE"
@@ -66,14 +62,12 @@ fi
 stale=$(stale_schedulers)
 if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
-# Secrets
 for secret in $SECRET_NAMES; do
   if has_version "$secret"; then ok "$secret has an enabled version"; else fail "$secret has no enabled version"; fi
   secret_policy=$(get_iam "$secret" "--project=$KEEPER_PROJECT" secrets)
   expect_policy "$secret" "$secret_policy" secret.iam.json.tmpl
 done
 
-# Service accounts
 sa_keys=$(gcloud iam service-accounts keys list --iam-account="$KEEPER_SA" --managed-by=user --format=json) ||
   die "cannot list keys of $KEEPER_SA"
 require_json "$sa_keys" "key list of $KEEPER_SA"
@@ -88,7 +82,6 @@ for sa in "$KEEPER_SA" "$SCHEDULER_SA"; do
   if [ -z "$roles" ]; then ok "$sa has no project-level role"; else fail "$sa has project-level roles: $roles"; fi
 done
 
-# check_balance WHO ADDRESS MIN_WEI: fails if ADDRESS holds less than MIN_WEI.
 check_balance() {
   balance=$(rpc eth_getBalance "[\"$2\",\"latest\"]")
   balance=$(printf '%s' "${balance#0x}" | sed 's/^0*//')
@@ -101,16 +94,14 @@ check_balance() {
   fi
 }
 
-# Keeper balance: the module's KEEPER(), then its ETH. The proposer signs the immutable conduit's votes.
+# 0x862a179e calls the module's KEEPER().
 keeper=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
 keeper=0x$(printf '%s' "$keeper" | tail -c 40)
 check_balance keeper "$keeper" "$MIN_KEEPER_WEI"
 [ -z "$PROPOSER" ] || check_balance proposer "$PROPOSER" "$MIN_PROPOSER_WEI"
 
-# Alerts
 channel=$(find_channel "$KEEPER_PROJECT")
 [ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"
-# expect_alert PROJECT NAME FILTER
 expect_alert() {
   alert=$(find_alert "$1" "$2")
   if [ -z "$alert" ]; then

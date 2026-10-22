@@ -1,5 +1,4 @@
 #!/bin/sh
-# Creates the project resources that do not depend on the image. Idempotent.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh
@@ -15,7 +14,6 @@ log "== 1/4 APIs"
 gcloud services enable $SERVICES --project="$KEEPER_PROJECT"
 
 log "== 2/4 service accounts"
-# ensure_sa NAME EMAIL DESCRIPTION
 ensure_sa() {
   if gcloud iam service-accounts describe "$2" --project="$KEEPER_PROJECT" --format="value(email)" >/dev/null 2>&1; then
     log "exists: $2"
@@ -28,7 +26,6 @@ ensure_sa "$KEEPER_SA_NAME" "$KEEPER_SA" "runs the job and signs with the key"
 ensure_sa "$SCHEDULER_SA_NAME" "$SCHEDULER_SA" "starts the job on schedule"
 
 log "== 3/4 secrets"
-# ensure_secret NAME WHAT: NAME, readable by the job only; says how to add WHAT if it has no version.
 ensure_secret() {
   if gcloud secrets describe "$1" --project="$KEEPER_PROJECT" --format="value(name)" >/dev/null 2>&1; then
     log "exists: $1"
@@ -53,7 +50,6 @@ else
   channel=$(gcloud beta monitoring channels create --project="$KEEPER_PROJECT" --display-name="$JOB alerts" \
     --type=email --channel-labels="email_address=$ALERT_EMAIL" --format="value(name)")
 fi
-# ensure_alert PROJECT NAME FILE: creates the alert policy in FILE unless PROJECT has one named NAME.
 ensure_alert() {
   alert=$(find_alert "$1" "$2")
   if [ -n "$alert" ]; then
@@ -63,7 +59,6 @@ ensure_alert() {
     gcloud monitoring policies create --project="$1" --policy-from-file="$3" >/dev/null
   fi
 }
-# A single failed attempt in a five-minute window fires it.
 jq -n --arg name "$ALERT_NAME" --arg filter "$ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
   displayName: $name,
   combiner: "OR",
@@ -85,7 +80,7 @@ jq -n --arg name "$ALERT_NAME" --arg filter "$ALERT_FILTER" --arg channel "$chan
   }
 }' >"$TMP/alert.json"
 ensure_alert "$KEEPER_PROJECT" "$ALERT_NAME" "$TMP/alert.json"
-# A log-based condition needs a notification rate limit.
+# Cloud Monitoring requires a notification rate limit on log-based conditions.
 jq -n --arg name "$START_ALERT_NAME" --arg filter "$START_ALERT_FILTER" --arg channel "$channel" --arg job "$JOB" '{
   displayName: $name,
   combiner: "OR",

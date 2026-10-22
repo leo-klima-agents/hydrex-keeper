@@ -37,7 +37,7 @@ type Behaviour = {
   congested?: boolean;
   topTip?: bigint;
   reverts?: boolean;
-  /** "lost": the wait for it fails, so its outcome is unknown. */
+  /** With "lost", waiting for the receipt fails, so the outcome stays unknown. */
   receipt?: "success" | "reverted" | "timeout" | "lost";
   recorded?: Address;
   minedHash?: Hex;
@@ -45,13 +45,11 @@ type Behaviour = {
   sendFails?: boolean;
   balance?: bigint;
   revertsAfterRival?: boolean;
-  /** The conduit's `lastVoted` as of the receipt's block. */
   lastVoted?: bigint;
 };
 
-const MINED_AT = 1_790_812_801n; // the timestamp of block 42, the receipt's
+const MINED_AT = 1_790_812_801n; // timestamp of block 42, where the receipt lands
 
-/** A client that answers castVote's reads and records what it is asked to send. */
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
   const simulatedAt: bigint[] = [];
@@ -259,7 +257,7 @@ test("a nonce is taken once the keeper's nonce in the block being built is past 
 });
 
 test("before the last blocks, the keeper must be able to pay for a vote twice; in them, once", async () => {
-  const cost = 150_000n * 1_000n + 5_000n; // gas times max fee, plus the L1 fee
+  const cost = 150_000n * 1_000n + 5_000n; // gas limit times max fee, plus the L1 fee
   const target = { time: 1_790_812_799n, lastVoted: 0n };
   const short = fakeChain({ balance: 2n * cost - 1n });
   await assert.rejects(castVote(short.chain, signer, vote, false, far), /fund the keeper: .* needs 300010000:/);
@@ -459,7 +457,7 @@ test("another conduit's vote is checked after the keeper's while that one may st
 });
 
 test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer", async () => {
-  const VOTED = 1_790_812_000n; // the timestamp of block 100
+  const VOTED = 1_790_812_000n; // timestamp of block 100
   type Filter = {
     address: Address;
     eventName: string;

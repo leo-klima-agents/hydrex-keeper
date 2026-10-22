@@ -13,33 +13,26 @@ import { errorMessage, log } from "./log.ts";
 import type { Run } from "./pass.ts";
 import { broadcastTx, confirmTx, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
 
-// The keeper and the proposer pay for their votes and claims in ETH. First thing on the Tuesday run, before the week's
-// votes and claims spend it, the proposer draws the USDC that both lack from the immutable conduit's treasury, a Safe
-// that allows it a weekly amount through Safe's Allowance Module; swaps it to ETH through Uniswap's or Aero's router,
-// whichever pays more; and sends the keeper its share. The keeper's key only receives.
-
 /** Safe's Allowance Module, version 1.0.0. */
 export const ALLOWANCE_MODULE: Address = "0x691f59471Bfd2B7d639DCF74671a2d648ED1E331";
 export const USDC: Address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-// Uniswap's SwapRouter02 and QuoterV2, from its deployment docs. Its router holds what is swapped to ADDRESS_THIS.
+// Uniswap's SwapRouter02 and QuoterV2, from Uniswap's deployment docs. The router keeps swap output sent to
+// ADDRESS_THIS, so that it can unwrap it.
 export const UNISWAP_ROUTER: Address = "0x2626664c2603336E57B271c5C0b26F421741e481";
 const UNISWAP_QUOTER: Address = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a";
 const UNISWAP_SELF: Address = "0x0000000000000000000000000000000000000002";
-// Aero's Slipstream SwapRouter and Metaquoter, from its docs' security page. Its router holds what is swapped to zero.
+// Aero's Slipstream SwapRouter and Metaquoter, from Aero's security docs. The router keeps swap output sent to the zero
+// address.
 export const AERO_ROUTER: Address = "0x9Ee35Bf1bd69a03c6F0393582030fCe8Bb93D418";
 const AERO_QUOTER: Address = "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868";
-export const TARGET = parseEther("0.003"); // what each key is topped up to: check.sh fails below 0.002 ETH
-export const TOP_UP_MS = 5 * 60_000; // how long a top-up may take: the scheduled run starts 10 minutes before its vote
-export const MIN_SWAP = 1_000_000n; // 1 USDC: the proposer's USDC waits until it can swap this much
-export const MIN_SEND = parseEther("0.0001"); // less waits for a later week
-const MAX_LOSS = 0.02; // the most a swap may pay under the job's prices
-const QUOTE_MARGIN_BPS = 50n; // a swap's minimum is this far under its quote
-const DEADLINE_SLACK_MS = 60_000; // how long past the last send a swap may land
+export const TARGET = parseEther("0.003"); // above the 0.002 ETH that check.sh requires
+export const TOP_UP_MS = 5 * 60_000; // the scheduled run starts 10 minutes before its vote
+export const MIN_SWAP = 1_000_000n; // 1 USDC
+export const MIN_SEND = parseEther("0.0001");
+const MAX_LOSS = 0.02; // the most a swap may lose against the job's prices
+const QUOTE_MARGIN_BPS = 50n; // the swap's minimum output is this far under its quote
+const DEADLINE_SLACK_MS = 60_000;
 
-/**
- * A pool of USDC and WETH, and its router: `swap` is the router's call that sells USDC through the pool and unwraps the
- * WETH to `to`, and `quote` asks the router's quoter what that pays.
- */
 export type Venue = {
   name: string;
   router: Address;
@@ -50,7 +43,6 @@ export type Venue = {
 const unwrap = (abi: Abi, amountMinimum: bigint, to: Address) =>
   encodeFunctionData({ abi, functionName: "unwrapWETH9", args: [amountMinimum, to] });
 
-/** Uniswap v3's pool with the fee `fee`, in millionths. */
 const uniswap = (fee: number): Venue => ({
   name: `Uniswap ${fee}`,
   router: UNISWAP_ROUTER,
@@ -67,7 +59,6 @@ const uniswap = (fee: number): Venue => ({
   },
 });
 
-/** Aero's Slipstream pool at `pool`, with the tick spacing `tickSpacing`. */
 const aero = (tickSpacing: number, pool: Address): Venue => ({
   name: `Aero ${tickSpacing}`,
   router: AERO_ROUTER,
@@ -81,7 +72,6 @@ const aero = (tickSpacing: number, pool: Address): Venue => ({
   },
 });
 
-/** The deepest USDC-WETH pools of each: a swap goes through the one quoted most. */
 export const VENUES: Venue[] = [
   uniswap(500),
   aero(100, "0x2A430bEbD2082d8e05D56d64DEDE8944279bbC24"),
@@ -90,32 +80,28 @@ export const VENUES: Venue[] = [
 
 const ROUTERS = [...new Set(VENUES.map((venue) => venue.router))];
 
-/** What the top-up starts from, read at block `at`: amounts of ETH in wei, of USDC in its units. */
+/** ETH is in wei and USDC in its 6-decimal units. `left` is what remains of the weekly allowance. */
 type State = {
   at: bigint;
-  /** The proposer, which sends every transaction of the top-up. */
   sender: From;
   treasury: Address;
-  /** What the treasury allows the proposer each week, and what of it is left this week. */
   allowed: bigint;
   left: bigint;
   inTreasury: bigint;
-  /** The keeper's ETH, and the proposer's ETH and USDC, and the USDC each router may take from it. */
   keeper: bigint;
   proposer: bigint;
   usdc: bigint;
   approved: Map<Address, bigint>;
-  /** USD per ETH and per USDC. */
   ethUsd: number;
   usdcUsd: number;
 };
 
-/** A transaction of a top-up, what it is, for the logs and errors, and the least ETH it pays the proposer. */
+/** `gains` is the least ETH the step pays the proposer. */
 type Step = { what: string; call: TxCall; gains?: bigint };
 
 /**
- * Sends a top-up's steps, or simulates them: `send` returns once the step is in a block, `at` is the block to quote the
- * swap on, after the steps before it, and `balances` the keeper's and the proposer's ETH there.
+ * `send` returns once the step is in a block. `at` is the block to quote the swap on, and `balances` gives the keeper's
+ * and the proposer's ETH there.
  */
 type Executor = {
   send: (step: Step) => Promise<void>;
@@ -123,13 +109,7 @@ type Executor = {
   balances: () => Promise<readonly [bigint, bigint]>;
 };
 
-/**
- * Tops up the keeper and the proposer to TARGET, when the job votes for the immutable conduit: the proposer draws the
- * USDC that both lack from the conduit's treasury, as far as its allowance and the treasury allow, swaps it to ETH, and
- * sends the keeper its share. USDC the proposer holds counts, and is swapped too. When both cannot reach TARGET, they end
- * even. A dry run simulates the transactions, each after those before it, and sends nothing. `until` (ms) bounds the
- * sends. Returns the number of failures.
- */
+/** If there isn't enough USDC for both keys to reach TARGET, they end up even. Returns the number of failures. */
 export async function topUp(run: Run, until: number): Promise<number> {
   if (!run.chain.v2) return 0;
   let failures = 0;
@@ -169,7 +149,7 @@ async function readState({ chain, prices }: Run, until: number): Promise<State> 
   const ethUsd = priced.get(lower(WETH));
   const usdcUsd = priced.get(lower(USDC));
   if (ethUsd === undefined || usdcUsd === undefined) throw new Error("ETH or USDC has no price");
-  // The amount allowed each week, then what was spent of it since the last reset.
+  // getTokenAllowance returns the weekly amount first, then what was spent since the last reset.
   const [amount, spent] = allowance as readonly bigint[];
   const allowed = enabled ? amount! : 0n;
   return {
@@ -188,14 +168,12 @@ async function readState({ chain, prices }: Run, until: number): Promise<State> 
   };
 }
 
-/** USDC in wei of ETH, at the job's prices. */
 const toWei = ({ ethUsd, usdcUsd }: State, usdc: bigint) =>
   BigInt(Math.floor((Number(usdc) * 1e12 * usdcUsd) / ethUsd));
 
 /**
- * What the proposer draws: the USDC that takes both keys to TARGET, counting what it holds, as far as the allowance and
- * the treasury allow. The proposer's ETH beyond TARGET can go to the keeper, but not the keeper's to the proposer. A
- * treasury that holds too little is a failure.
+ * Enough USDC to take both keys to TARGET, counting what the proposer holds, within the allowance and the treasury's
+ * balance. The proposer's ETH above TARGET can go to the keeper, but not the other way around.
  */
 function allot(state: State): { draw: bigint; failures: number } {
   const { keeper, proposer, usdc, allowed, left, inTreasury, ethUsd, usdcUsd } = state;
@@ -223,7 +201,7 @@ function allot(state: State): { draw: bigint; failures: number } {
   return { draw: available, failures };
 }
 
-/** What the proposer sends the keeper: what takes it to TARGET, or, if both cannot be there, even with the proposer. */
+/** Enough to take the keeper to TARGET or, if both keys can't get there, to leave them even. */
 export function shareOf(keeper: bigint, proposer: bigint): bigint {
   const even = (keeper + proposer) / 2n;
   const goal = even < TARGET ? even : TARGET;
@@ -246,12 +224,12 @@ const approveCall = (router: Address, amount: bigint): TxCall => ({
 
 const minOut = (quoted: bigint) => (quoted * (10_000n - QUOTE_MARGIN_BPS)) / 10_000n;
 
-/** The swap's deadline: a little past `until`, so that a swap sent near it is not refused for it. */
+/** A minute past `until`, so that a swap sent just before `until` isn't refused. */
 const deadline = (until: number) => BigInt(Math.floor((until + DEADLINE_SLACK_MS) / 1000));
 
 /**
- * The venue among `venues` quoted most for `usdc` on block `at`, and the least its swap may pay: QUOTE_MARGIN_BPS under
- * its quote, and never more than MAX_LOSS under the job's prices. Fails if none pays that.
+ * The swap's minimum output is QUOTE_MARGIN_BPS under the best quote, but never more than MAX_LOSS under the job's
+ * prices. Fails if no venue pays that much.
  */
 async function bestVenue(
   chain: Chain,
@@ -278,9 +256,8 @@ async function bestVenue(
 }
 
 /**
- * The top-up's steps, each after those before it: the draw, the router's approval, the swap, and the transfer of the
- * keeper's share. The swap is quoted first, so that nothing is drawn unless a venue pays enough, and again on the block
- * of the steps before it, so that its minimum follows the price.
+ * Draws, approves the router, swaps, then sends the keeper its share. The swap is quoted before the draw, so that
+ * nothing is drawn unless a venue pays enough, and again before the swap, so that its minimum follows the price.
  */
 async function execute(chain: Chain, state: State, draw: bigint, until: number, exec: Executor): Promise<void> {
   const usdc = state.usdc + draw;
@@ -300,7 +277,6 @@ async function execute(chain: Chain, state: State, draw: bigint, until: number, 
   if (share >= MIN_SEND) await exec.send({ what: "transfer to the keeper", call: { to: chain.keeper, value: share } });
 }
 
-/** Sends each step once the one before it is in a block, and reads the balances on the block of the last. */
 function sender(run: Run, state: State, until: number): Executor {
   const { chain } = run;
   let pinned = state.at;
@@ -315,8 +291,8 @@ function sender(run: Run, state: State, until: number): Executor {
 }
 
 /**
- * Simulates each step after those before it, on the state's block, and checks it as `sendTx` would, on the balance the
- * steps before it leave the proposer: each costs what it is expected to, and the swap pays its minimum.
+ * Simulates each step after the ones before it, and checks it as sendTx does, against the proposer's balance after the
+ * earlier steps. Each step costs what it is expected to, and the swap pays its minimum.
  */
 function simulator({ chain }: Run, state: State): Executor {
   const done: TxCall[] = [];
@@ -339,8 +315,8 @@ function simulator({ chain }: Run, state: State): Executor {
 }
 
 /**
- * Fails unless the proposer can send `call`: it has no transaction pending, which may be a vote that a top-up must never
- * replace, and `balance` pays for the call's gas and value.
+ * Fails if the proposer has a transaction pending, because it may be a vote and a top-up must never replace one, or if
+ * `balance` can't pay for the call's gas and value.
  */
 function payable(
   { tx, cost, queued }: { tx: { nonce: number }; cost: bigint; queued: boolean },
@@ -353,7 +329,6 @@ function payable(
   if (balance < needed) throw new Error(`fund the proposer: ${from} has ${balance} wei, needs ${needed}`);
 }
 
-/** Prepares, signs and sends the proposer's transaction for `call` on block `at`, and waits for it; returns its block. */
 async function sendTx(
   { chain, proposer: signer }: Run,
   sender: From,

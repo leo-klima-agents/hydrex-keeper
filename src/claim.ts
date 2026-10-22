@@ -30,7 +30,7 @@ import {
   type Sender,
 } from "./vote.ts";
 
-/** Owners the job does not claim for through the Klima conduit, by lowercase address. */
+/** Only for the Klima conduit's claims. */
 export const EXCLUDED_OWNERS: ReadonlyMap<string, string> = new Map([
   ["0xa79cd47655156b299762dfe92a67980805ce5a31", "Klima Foundation"],
 ]);
@@ -41,28 +41,28 @@ const LOOKBACK = 12;
 const SLIPPAGE_BPS = 500;
 const MAX_SWAP_LOSS = 0.15;
 const RETIRE_PERCENT = 97n;
-const RESERVE = parseEther("0.001"); // left in the keeper, or the proposer, for the next votes
+const RESERVE = parseEther("0.001"); // kept in the keeper or the proposer for the next votes
 const MARGIN_MS = 60_000;
-// Rough gas costs, to plan a claim. The simulation has the final say.
+// Rough gas costs for planning a claim. The simulation has the final say.
 const BASE_GAS = 1_300_000n;
-const V2_BASE_GAS = 400_000n; // the immutable conduit swaps and retires nothing
+const V2_BASE_GAS = 400_000n;
 const SWAP_GAS = 800_000n;
 const PAIR_GAS = 300_000n;
 const GAS_BUDGET = 10_000_000n;
 const MAX_GAS_USED = 12_000_000n; // a claim can need a third more gas than it uses, and Base allows 16.8M
 const REPLANS = 4;
 const ROUNDS = 12;
-const EARNED_CHUNK = 25; // earned() goes through every epoch since the last claim, so 25 calls can use 15M gas
-const WINDOW = 50n; // earned() only looks at this many epochs after the last claim
+const EARNED_CHUNK = 25; // earned() loops over every epoch since the last claim, so 25 calls can use 15M gas
+const WINDOW = 50n; // earned() only looks this many epochs past the last claim
 const CONCURRENCY = 4;
 const MINTER_POLL_MS = 5_000;
-const READ_TRIES = 3; // of a conduit's reads before its claims
+const READ_TRIES = 3;
 const READ_RETRY_MS = 5_000;
 const TONNE = 10n ** 18n;
 
 /**
- * What one bribe contract owes a veNFT in one token, in USD. `later` is owed too, but beyond the epochs earned() looks
- * at: claiming the pair now makes it claimable next time.
+ * What one bribe contract owes a veNFT in one token, in USD. `later` is owed too, but lies past the epochs earned()
+ * looks at, and claiming the pair now makes it claimable next time.
  */
 export type Pair = { bribe: Address; fees: boolean; token: Address; usd: number; later?: number };
 
@@ -71,20 +71,13 @@ type Paying = Pick<Pair, "bribe" | "fees" | "token">;
 /** A claim asks every contract in `fees` and `bribes` for every token in `tokens`. */
 export type ClaimPlan = { tokens: Address[]; fees: Address[]; bribes: Address[]; usd: number; gas: bigint };
 
-/** A conduit the job claims through: who sends and signs its claims, and the owners it does not claim for. */
 type Conduit = { sender: Sender; signer: LocalAccount | undefined; excluded: ReadonlyMap<string, string> };
 
-/** The decimals and prices of the tokens of a conduit's claims, by lowercase address, and the gas price. */
 type Market = { decimals: Map<string, number>; priced: Prices; gasPrice: bigint };
 
-/**
- * The reads of the claims that do not depend on the conduit, shared by both (see `sharedRead`): the delegate of every
- * veNFT when the epoch that ended began, by id less one; every fee and bribe contract; and the market of the
- * whitelisted tokens and WETH.
- */
+/** `delegatees` is indexed by veNFT id minus one. */
 type Shared = { delegatees: () => Promise<Address[]>; bribes: () => Promise<Bribe[]>; market: () => Promise<Market> };
 
-/** How the Klima conduit pays out a claim: it swaps the rewards to kVCM, and retires carbon with a share of the kVCM. */
 type Klima = {
   kvcm: Address;
   /** Tokens the conduit pays out as they are, without a swap. */
@@ -101,12 +94,12 @@ type Nft = {
   owner: Address;
   pairs: Pair[];
   taken: Set<string>;
-  /** In USD: the most of a token a claim may take, since a larger swap of it lost too much. */
+  /** The most of a token, in USD, that a claim may take, because a larger swap of it lost too much. */
   caps: Map<Address, number>;
   unswapped: Set<string>;
-  /** Claims a dry run built but did not send. The next simulation runs them first. */
+  /** Claims a dry run built but didn't send. The next simulation runs them first. */
   prepared: ModuleCall[];
-  /** Pairs that only those claims asked for. The chain still shows them as owed. */
+  /** Pairs that only those claims took. The chain still shows them as owed. */
   simulated: Set<string>;
 };
 
@@ -132,18 +125,16 @@ type Built = {
   call: Extract<ModuleCall, { functionName: "claimSwapAndDistribute" | "claim" }>;
   usd: number;
   swaps: { token: Address; amountIn: bigint; quoted: bigint; minOut: bigint }[];
-  /** What the Klima conduit retires. */
   retirement?: { retireTonnes: bigint; maxKvcmIn: bigint };
 };
 
-/** Stops all the claims left, not just this veNFT's. */
+/** Stops all remaining claims, not just this veNFT's. */
 class Stop extends Error {}
 
 const pairKey = (bribe: Address, token: Address) => `${lower(bribe)}${lower(token)}`;
 
 const isPayout = ({ payouts }: Klima, token: Address) => payouts.some((payout) => isAddressEqual(payout, token));
 
-/** Whether a claim swaps `token`: the Klima conduit swaps all but its payouts, the immutable conduit nothing. */
 const swapped = ({ klima }: Context, token: Address) => klima !== undefined && !isPayout(klima, token);
 
 const veCall = ({ ve }: Chain, functionName: string, args?: readonly unknown[]) => call(ve, veAbi, functionName, args);
@@ -156,9 +147,9 @@ const worth = (p: Pair) => p.usd + (p.later ?? 0);
 export const worthClaiming = (usd: number, gasUsd: number) => usd >= MIN_CLAIM_USD && gasUsd <= usd * MAX_GAS_SHARE;
 
 /**
- * The most valuable claim that fits in `budget` gas, through a conduit whose claims cost `baseGas` before their swaps
- * and contracts. It tries the most valuable token, then the two most valuable, and so on, each with the contracts that
- * pay the most. A contract is left out if it does not pay for its gas, or if it would take a token past its cap.
+ * The most valuable claim that fits in `budget` gas, for a conduit whose claims cost `baseGas` before swaps and
+ * contracts. It tries the most valuable token, then the top two, and so on, each with the contracts that pay the most.
+ * A contract is left out if it doesn't pay for its gas or would take a token past its cap.
  */
 export function planClaim(
   pairs: Pair[],
@@ -174,7 +165,8 @@ export function planClaim(
     .filter(([, usd]) => usd > 0)
     .sort((a, b) => b[1] - a[1])
     .map(([token]) => token);
-  // Also try without the capped tokens: a contract left out for a cap may still be claimed for its other tokens.
+  // Also try without the capped tokens, because a contract left out for a cap may still be worth claiming for its other
+  // tokens.
   const rankings = caps.size ? [ranked, ranked.filter((token) => !caps.has(token))] : [ranked];
   let best: ClaimPlan | undefined;
   for (const order of rankings) {
@@ -188,7 +180,7 @@ export function planClaim(
         if (!tokens.includes(p.token)) continue;
         const contract = contracts.get(p.bribe) ?? { fees: p.fees, usd: 0, byToken: new Map<Address, number>() };
         contract.usd += worth(p);
-        // Caps limit what is swapped now, so `later` does not count here.
+        // Caps limit what is swapped now, so `later` doesn't count toward them.
         contract.byToken.set(p.token, (contract.byToken.get(p.token) ?? 0) + p.usd);
         contracts.set(p.bribe, contract);
       }
@@ -218,11 +210,7 @@ export function planClaim(
   return best;
 }
 
-/**
- * Once the minter starts the epoch at `flip` (s), claims until `until` (ms), through the Klima conduit and the immutable
- * conduit if the job votes for it. The two claim at once, each with its own key, and neither's failure stops the
- * other's. Returns the number of failures.
- */
+/** The two conduits claim at the same time, each with its own key, and one failing doesn't stop the other. */
 export async function claims(run: Run, flip: bigint, until: number, swapper: Swapper = kyberswap()): Promise<number> {
   const { chain, account, proposer } = run;
   let start: bigint;
@@ -253,14 +241,14 @@ export async function claims(run: Run, flip: bigint, until: number, swapper: Swa
 }
 
 /**
- * `read`, started at once, and shared by every call while it is pending or once it succeeded, so that the conduits
- * share it whenever each asks. A read that failed is read again by the next call, and that read is shared in turn.
+ * Starts `read` at once and shares it with every caller while it is pending or after it succeeds, so that both conduits
+ * use one read whenever each asks. After a failure, the next caller starts a new read, which is shared in turn.
  */
 function sharedRead<T>(read: () => Promise<T>): () => Promise<T> {
   let reading: Promise<T> | undefined;
   const start = () => {
     const current = read();
-    // Those who ask handle its failure, and a read nobody asks for fails unheard.
+    // Callers handle failures. This keeps a read that nobody asked for from becoming an unhandled rejection.
     current.catch(() => {
       if (reading === current) reading = undefined;
     });
@@ -270,7 +258,6 @@ function sharedRead<T>(read: () => Promise<T>): () => Promise<T> {
   return () => reading ?? start();
 }
 
-/** `read`, tried again READ_RETRY_MS after it fails, up to READ_TRIES times. */
 async function tried<T>(read: () => Promise<T>, what: string, conduit: Address): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -283,7 +270,6 @@ async function tried<T>(read: () => Promise<T>, what: string, conduit: Address):
   }
 }
 
-/** The whitelisted tokens and WETH, once each. */
 const marketTokens = (run: Run) => [...new Map([...tokensOf(run), WETH].map((t) => [lower(t), t])).values()];
 
 async function readMarket({ chain, prices }: Run, tokens: Address[], until: number): Promise<Market> {
@@ -295,7 +281,6 @@ async function readMarket({ chain, prices }: Run, tokens: Address[], until: numb
   return { decimals, priced, gasPrice };
 }
 
-/** The start of the epoch at `flip` (s), once the minter starts it. Fails if it has not by `until` (ms). */
 async function started(chain: Chain, flip: bigint, until: number): Promise<bigint> {
   for (;;) {
     const epoch = await readEpoch(chain).catch((error: unknown) => {
@@ -317,7 +302,8 @@ async function claimRewards(
   swapper: Swapper,
 ): Promise<number> {
   const { conduit: address } = conduit.sender;
-  // A read that fails would otherwise leave the claims for next week: a retry of the schedule's starts after the hour.
+  // Retried, because a failed read would otherwise push the claims to next week: a retry of the scheduled run starts
+  // after the claim hour.
   const read = () => readClaims(run, conduit, shared, start, until, swapper);
   const { ctx, nfts } = await tried(read, "the claims' reads", address);
   let sent = 0;
@@ -351,7 +337,6 @@ async function claimRewards(
   return failures + ctx.anomalies;
 }
 
-/** What the conduit's claims start from: their context, and the veNFTs it may claim for, most owed first. */
 async function readClaims(
   run: Run,
   conduit: Conduit,
@@ -377,7 +362,7 @@ async function readClaims(
     else return [newNft(id, owner)];
     return [];
   });
-  // The Klima conduit's claims need kVCM too, which the whitelist normally has.
+  // The Klima conduit's claims also need kVCM's price, which the whitelist normally includes.
   const tokens = marketTokens(run);
   const unlisted = klima && !tokens.some((token) => isAddressEqual(token, klima.kvcm));
   const [paying, { decimals, priced, gasPrice }] = await Promise.all([
@@ -457,7 +442,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
   let replans = 0;
   for (let round = 0; round < ROUNDS; round++) {
     const plan = nextPlan(ctx, nft, budget);
-    // With a smaller budget, no plan means the claim is too large, unless nothing worth claiming is left anyway.
+    // Under a reduced budget, no plan means the claim is too large, unless nothing worth claiming is left.
     if (!plan && budget < GAS_BUDGET && (nextPlan(ctx, nft)?.usd ?? 0) >= MIN_CLAIM_USD) {
       throw new Error(`no claim fits in ${MAX_GAS_USED} gas`);
     }
@@ -487,7 +472,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
         gasUsed: simulated.gasUsed,
         plan: plan.gas,
       });
-      // Shrink from the plan's gas, not the budget: a plan well under the budget would come back unchanged.
+      // Shrink from the plan's gas, not the budget, because a plan well under the budget would come back unchanged.
       budget = (plan.gas * MAX_GAS_USED * 9n) / (simulated.gasUsed * 10n);
       continue;
     }
@@ -616,8 +601,8 @@ async function buildClaim(ctx: Context, nft: Nft, plan: ClaimPlan, at: bigint): 
 }
 
 /**
- * The most tonnes the aggregator retires for `budget` kVCM or less. The price per tonne barely changes with the
- * amount, so a few rounds of guessing get close. If the guess is still over budget, it is cut back until it fits.
+ * The price per tonne barely changes with the amount, so a few rounds of guessing get close. A guess that is still over
+ * `budget` is cut back until it fits.
  */
 async function tonnesFor(chain: Chain, klima: Klima, budget: bigint, at: bigint): Promise<bigint> {
   const { aggregator, creditToken, creditTokenId, kvcm, carbonClass } = klima;
@@ -640,8 +625,8 @@ async function tonnesFor(chain: Chain, klima: Klima, budget: bigint, at: bigint)
 }
 
 /**
- * Checks that the simulated claim swaps all it takes of each token, except those paid out as they are, so that nothing
- * stays in the conduit. The immutable conduit pays out all it takes.
+ * Checks that the claim swaps everything it takes of each token, except payouts, so that nothing stays in the conduit.
+ * The immutable conduit pays out everything it takes.
  */
 function checkTaken({ klima, sender }: Context, logs: readonly Log[], { swaps }: Built): void {
   if (!klima) return;
@@ -660,7 +645,7 @@ function checkTaken({ klima, sender }: Context, logs: readonly Log[], { swaps }:
 }
 
 async function confirm({ chain, sender, klima }: Context, id: bigint, hash: Hex, nonce: number): Promise<bigint> {
-  // A claim whose outcome is unknown stops the claims: another could take what it may have taken.
+  // A claim whose outcome is unknown stops the claims, because another claim could take what it may have taken.
   const receipt = await confirmTx(chain, sender.from, hash, nonce, "claim").catch((error: unknown) => {
     throw error instanceof Unconfirmed ? new Stop(error.message) : error;
   });
@@ -668,7 +653,7 @@ async function confirm({ chain, sender, klima }: Context, id: bigint, hash: Hex,
   const fields = { conduit: sender.conduit, tokenId: id, hash, block: receipt.blockNumber };
   if (!klima) {
     const claimed = parseEventLogs({ abi: immutableAbi, logs: receipt.logs, eventName: "Claimed" }).find(ours)?.args;
-    // Named as the Klima conduit's event names them.
+    // Logged with the field names of the Klima conduit's event.
     log.info("claim confirmed", {
       ...fields,
       owner: claimed?.owner,
@@ -699,7 +684,7 @@ async function readKlima(chain: Chain): Promise<Klima> {
     bigint,
     Address,
   ];
-  // There is no length to read, so read entries until one reverts.
+  // There is no length to read, so entries are read until one reverts.
   const entries = await readEach<Address>(
     chain.bulk,
     Array.from({ length: 16 }, (_, i) => conduitCall(chain, "distributionTokens", [BigInt(i)])),
@@ -712,7 +697,7 @@ async function readKlima(chain: Chain): Promise<Klima> {
   return { kvcm, payouts, retireBps, aggregator, creditToken, creditTokenId, carbonClass };
 }
 
-/** The delegate of every veNFT at `at` (s), by id less one. */
+/** Indexed by veNFT id minus one. */
 async function readDelegatees(chain: Chain, at: bigint): Promise<Address[]> {
   const [minted] = await readMany<bigint>(chain.bulk, [veCall(chain, "totalNftsMinted")]);
   const ids = Array.from({ length: Number(minted) }, (_, i) => BigInt(i + 1));
@@ -723,7 +708,6 @@ async function readDelegatees(chain: Chain, at: bigint): Promise<Address[]> {
   );
 }
 
-/** The veNFTs whose delegate at `at` (s) was `conduit`, as `delegatees` gives them, with their owners. */
 async function readDelegators(chain: Chain, conduit: Address, at: bigint, delegatees: Address[]) {
   const { bulk } = chain;
   const mine = delegatees.flatMap((delegatee, i) => (isAddressEqual(delegatee, conduit) ? [BigInt(i + 1)] : []));
@@ -747,7 +731,7 @@ async function readDelegators(chain: Chain, conduit: Address, at: bigint, delega
   }));
 }
 
-/** Every fee and bribe contract once, including those of pools whose gauge was killed. */
+/** Every fee and bribe contract, including those of pools whose gauge was killed, which still pay. */
 async function readContracts(chain: Chain): Promise<Bribe[]> {
   const read: Reader = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
   const seen = new Set<string>();
@@ -758,7 +742,6 @@ async function readContracts(chain: Chain): Promise<Bribe[]> {
   });
 }
 
-/** The contracts of `bribes` and the tokens that may owe the conduit's delegators rewards. */
 async function readPayingPairs(
   chain: Chain,
   conduit: Address,
@@ -786,8 +769,8 @@ async function readPayingPairs(
 }
 
 /**
- * What each veNFT is owed beyond the 50 epochs earned() looks at. A claim moves those 50 epochs forward, so this is
- * what it makes claimable next time.
+ * What each veNFT is owed past the 50 epochs that earned() looks at. A claim moves that window forward, so this becomes
+ * claimable next time.
  */
 async function readHidden(chain: Chain, nfts: Nft[], paying: Paying[], start: bigint): Promise<Map<string, bigint>[]> {
   const read = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
@@ -795,7 +778,6 @@ async function readHidden(chain: Chain, nfts: Nft[], paying: Paying[], start: bi
   const stampCalls = nfts.flatMap(({ id }) =>
     paying.map(({ bribe, token }) => bribeCall(bribe, "tokenTimestamp", [id, token])),
   );
-  // When each paying contract's first bribe was paid, read in the same requests as the stamps.
   const [stamps, points] = await Promise.all([
     read<bigint>([...stampCalls, ...bribes.map((bribe) => bribeCall(bribe, "firstBribeTimestamp"))]),
     read<readonly [unknown, number]>(nfts.map(({ id }) => veCall(chain, "getFirstEscrowPoint", [id]))),
@@ -803,7 +785,7 @@ async function readHidden(chain: Chain, nfts: Nft[], paying: Paying[], start: bi
   const firstOf = new Map(bribes.map((bribe, i) => [bribe, stamps[stampCalls.length + i]!]));
   const past = nfts.flatMap(({ id }, n) =>
     paying.flatMap(({ bribe, token }, j) => {
-      // Where earned() starts, worked out as the bribe contract does.
+      // Where earned() starts, worked out the same way the bribe contract does.
       const first = firstOf.get(bribe)!;
       let from = stamps[n * paying.length + j]!;
       if (from < first) {

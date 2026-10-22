@@ -14,7 +14,6 @@ export type Run = {
   tokens: Whitelist;
   prices: ReturnType<typeof priceFeed>;
   account: LocalAccount | undefined;
-  /** Signs the immutable conduit's votes, if the job votes for it. */
   proposer?: LocalAccount | undefined;
   dryRun: boolean;
 };
@@ -23,7 +22,6 @@ type Pool = PoolRewards & { otherVotes?: bigint; ownVotes?: bigint; v2Votes?: bi
 
 export const tokensOf = ({ tokens }: Run) => tokens.map((t) => t.token);
 
-/** Each pool's rewards in USD; unpriced tokens count as zero. Logs each pool if `verbose`. */
 export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: boolean): number[] {
   if (priced.size === 0 && pools.length > 0) throw new Error("no whitelisted token could be priced");
   const unpriced = run.tokens.filter((t) => !priced.has(t.token.toLowerCase() as Address));
@@ -41,18 +39,16 @@ export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: b
   });
 }
 
-/** What both conduits' votes a day before the flip are made from. */
 export type DayBefore = { pools: PoolRewards[]; priced: Prices };
 
-/** The rewards and their prices, which both conduits' votes a day before the flip are made from. */
 export async function readDayBefore(run: Run, until: number): Promise<DayBefore> {
   const [pools, priced] = await Promise.all([readRewards(run.chain, tokensOf(run)), run.prices(tokensOf(run), until)]);
   return { pools, priced };
 }
 
 /**
- * `read` once for each round of attempts, which both conduits share, so that a retry reads again; a read that fails is
- * read again by the next call.
+ * Both conduits share one read per attempt, and a retry reads again. A failed read is forgotten, so the next call tries
+ * again.
  */
 export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Promise<T> {
   const reads = new Map<number, Promise<T>>();
@@ -67,10 +63,7 @@ export function perAttempt<T>(read: () => Promise<T>): (attempt: number) => Prom
   };
 }
 
-/**
- * Whether the sender's conduit has its vote of a day before `flip` in, as the Voter shows it now: a vote since an hour
- * before that time, and for an open conduit, which anyone may vote for, one the sender sent.
- */
+/** Anyone can vote for an open conduit, so for one of those, only a vote the sender sent counts. */
 export async function votedDayBefore(chain: Chain, sender: Sender, flip: bigint): Promise<boolean> {
   const { conduit } = sender;
   const [lastVoted] = await readMany<bigint>(chain.client, [voterCall(chain, "lastVoted", [conduit])]);
@@ -80,7 +73,6 @@ export async function votedDayBefore(chain: Chain, sender: Sender, flip: bigint)
   return true;
 }
 
-/** The Klima conduit's vote a day before the flip, in proportion to each pool's rewards. Returns it once cast. */
 export async function pass(run: Run, { pools, priced }: DayBefore, until: number): Promise<Vote | undefined> {
   const fractions = proportional(valueRewards(run, pools, priced, true));
   if (!fractions) {
@@ -93,10 +85,8 @@ export async function pass(run: Run, { pools, priced }: DayBefore, until: number
 }
 
 /**
- * The immutable conduit's vote a day before the flip, in proportion to each pool's rewards, if it clears its check,
- * after the Klima conduit's vote too while that one may still land: the vote the keeper sent last, while it is pending,
- * or in a dry run `klima`, the vote of the same pass it did not send. When the conduit's own values cannot be read, the
- * simulation checks it.
+ * While the Klima conduit's vote may still land, this vote must also pass the check after it. In a dry run, that vote
+ * is `klima`.
  */
 export async function passV2(run: Run, { pools, priced }: DayBefore, until: number, klima?: Vote): Promise<void> {
   const { chain } = run;

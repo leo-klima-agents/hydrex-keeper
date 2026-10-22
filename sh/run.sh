@@ -1,5 +1,4 @@
 #!/bin/sh
-# Executes the job and waits. --dry-run signs but does not send; --now votes at once; --claim claims at once.
 set -eu
 script_dir=$(dirname -- "$0")
 # shellcheck source=sh/lib.sh

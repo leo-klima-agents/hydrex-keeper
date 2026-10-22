@@ -20,7 +20,6 @@ import { errorMessage } from "../src/log.ts";
 
 type Answer = { delay?: number; hang?: boolean; status?: number; error?: { code: number; message: string } };
 
-/** A JSON-RPC server that answers every call with `result` after `delay` ms, or as told; records the params. */
 async function rpc(result: (params: unknown[]) => unknown, answer: () => Answer = () => ({})) {
   const received: unknown[][] = [];
   const server = createServer((req, res) => {
@@ -95,7 +94,6 @@ test("logs name an RPC by its host only: provider URLs carry their key", () => {
 
 const block = (n: number) => () => `0x${n.toString(16)}`;
 
-/** Asks the URLs for the block number `calls` times in a row, timing each call. */
 async function blockNumbers(nodes: { url: string }[], calls = 1) {
   const transport = hedged(nodes.map((n) => n.url))({ chain: base });
   const out: { result: unknown; ms: number }[] = [];
@@ -138,7 +136,8 @@ test("hedged: a hung primary costs the delay once, then is asked together with t
   assert.equal(first!.result, "0x2");
   assert.ok(first!.ms >= HEDGE_DELAY_MS, `${first!.ms} ms`);
   assert.ok(second!.ms < 100 && third!.ms < 100, `${second!.ms}, ${third!.ms} ms`);
-  for (let i = 0; i < 50 && nodes[0]!.received.length < 3; i++) await sleep(10); // the hung node may see it last
+  // The hung node can receive the last request after the call has already returned.
+  for (let i = 0; i < 50 && nodes[0]!.received.length < 3; i++) await sleep(10);
   assert.equal(nodes[0]!.received.length, 3, "still asked, in case it recovers");
 });
 
