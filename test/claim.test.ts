@@ -104,6 +104,12 @@ type World = {
    * never claimed from a contract whose first bribe was 60 epochs ago.
    */
   hidden?: Map<string, bigint>;
+  /** What the first claim from a contract makes claimable, by `key`, when it isn't what `hidden` says. */
+  reveals?: Map<string, bigint>;
+  /** A pair, by `key`, that earned() keeps showing but that claims never pay. */
+  sticky?: string;
+  /** Called as each claim is mined. */
+  onClaim?: () => void;
 };
 
 const key = (id: unknown, bribe: Address, token: Address) => `${id}${bribe}${token}`.toLowerCase();
@@ -176,7 +182,9 @@ function fakeChain(w: World = world()) {
     initial.set(w.partial, half);
     initial.set(`${w.partial}:later`, half);
   }
-  for (const [pair, amount] of w.hidden ?? []) initial.set(`${pair}:later`, (initial.get(pair) ?? 0n) + amount);
+  for (const [pair, amount] of w.reveals ?? w.hidden ?? []) {
+    initial.set(`${pair}:later`, (initial.get(`${pair}:later`) ?? 0n) + amount);
+  }
   const listed = new Map(w.pools.flatMap(([fees, other]) => [fees, other]));
   const sent: Hex[] = [];
   const earnedFor = new Set<string>();
@@ -209,6 +217,7 @@ function fakeChain(w: World = world()) {
     const amounts = tokens.map((token) =>
       asked.reduce((sum, bribe) => {
         const pair = key(id, bribe, token);
+        if (pair === w.sticky) return sum;
         const amount = next.get(pair) ?? 0n;
         next.delete(pair);
         const later = next.get(`${pair}:later`);
@@ -408,6 +417,7 @@ function fakeChain(w: World = world()) {
     waitForTransactionReceipt: async ({ hash, confirmations }: { hash: Hex; confirmations: number }) => {
       assert.equal(confirmations, 2, "a block past the claim's");
       const { ok, logs, owed } = claim(owedAt(head), inFlight.get(hash)!);
+      w.onClaim?.();
       head += 2n;
       history.push([head - 1n, owed]);
       return { transactionHash: hash, status: ok ? "success" : "reverted", blockNumber: head - 1n, logs };
@@ -750,6 +760,30 @@ test("rewards that a claim makes claimable are claimed right after it, but not i
   const account = { ...signer, signTransaction: (tx) => (signatures++, signer.signTransaction(tx)) } as LocalAccount;
   assert.equal(await claims(runOf(dry.chain, { dryRun: true, account }), START, until(), fakeSwapper().swapper), 0);
   assert.equal(signatures, 1, "nothing was unlocked on chain");
+});
+
+test("what a claim leaves owing is claimed once more, for what earned() then shows, not what was expected", async () => {
+  // The first claim was expected to unlock $40, but only $2 shows after it: not worth a claim of its own.
+  const hidden = new Map([[key(2, E2, ODD[0]!), 40n * E18]]);
+  const reveals = new Map([[key(2, E2, ODD[0]!), 2n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden, reveals }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  assert.equal(sent.length, 1);
+  // A contract that keeps showing USDC it never pays gets one more claim, not one per minute.
+  const sticky = fakeChain(world({ v2: true, sticky: key(7, E1, USDC) }));
+  assert.equal(await claims(runOf(sticky.chain), START, until(), fakeSwapper().swapper), 0);
+  const v2 = through(sticky.sent, true).map(decodeV2);
+  assert.equal(v2.length, 2);
+  assert.deepEqual([v2[1]!.bribes, v2[1]!.tokens], [[E1], [USDC]]);
+});
+
+test("running out of time after a claim fails nothing for what that claim made claimable", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Number(START) * 1000 + 10_000 });
+  // The claim takes 40 seconds to be mined, which leaves less than a minute for the next one.
+  const hidden = new Map([[key(2, E2, ODD[0]!), 40n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden, onClaim: () => t.mock.timers.tick(40_000) }));
+  assert.equal(await claims(runOf(chain), START, Date.now() + 90_000, fakeSwapper().swapper), 0);
+  assert.equal(sent.length, 1, "the $40 it unlocked waits for next week");
 });
 
 test("rewards that a claim makes claimable wait for next week if they are too little for a claim", async () => {

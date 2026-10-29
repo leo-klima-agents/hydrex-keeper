@@ -101,6 +101,8 @@ type Nft = {
   prepared: ModuleCall[];
   /** Pairs that only those claims took. The chain still shows them as owed. */
   simulated: Set<string>;
+  /** Pairs that still owed after a claim that asked for them, and are claimed once more. */
+  reopened: Set<string>;
 };
 
 type Context = Run &
@@ -308,12 +310,15 @@ async function claimRewards(
   const { ctx, nfts } = await tried(read, "the claims' reads", address);
   let sent = 0;
   let failures = 0;
-  // Each claim takes at least one pair that no earlier claim took, or uses up a pair's `later`, so a veNFT always runs
+  // Each claim takes at least one pair that no earlier claim took, or reopens one at most once, so a veNFT always runs
   // out of claims.
   claiming: for (const [i, nft] of nfts.entries()) {
     for (;;) {
       if (until - Date.now() < MARGIN_MS) {
-        const left = nfts.slice(i).filter((rest) => (nextPlan(ctx, rest)?.usd ?? 0) >= MIN_CLAIM_USD);
+        // What an earlier claim of this run left owing would have waited for next week without it, so it fails nothing.
+        const left = nfts
+          .slice(i)
+          .filter((rest) => (nextPlan(ctx, rest, GAS_BUDGET, false)?.usd ?? 0) >= MIN_CLAIM_USD);
         if (left.length) {
           failures++;
           log.error("out of time: claims left for the next ones", {
@@ -426,12 +431,19 @@ const newNft = (id: bigint, owner: Address): Nft => ({
   unswapped: new Set(),
   prepared: [],
   simulated: new Set(),
+  reopened: new Set(),
 });
 
 const untaken = (nft: Nft) => nft.pairs.filter((p) => !nft.taken.has(pairKey(p.bribe, p.token)));
 
-function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET): ClaimPlan | undefined {
-  const pairs = untaken(nft).filter((p) => !ctx.unswapped.has(lower(p.token)) && !nft.unswapped.has(lower(p.token)));
+/** `reopened` false leaves out what earlier claims of this run left owing. */
+function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET, reopened = true): ClaimPlan | undefined {
+  const pairs = untaken(nft).filter(
+    (p) =>
+      !ctx.unswapped.has(lower(p.token)) &&
+      !nft.unswapped.has(lower(p.token)) &&
+      (reopened || !nft.reopened.has(pairKey(p.bribe, p.token))),
+  );
   const baseGas = ctx.klima ? BASE_GAS : V2_BASE_GAS;
   return planClaim(pairs, budget, ctx.usdPerGas, (token) => swapped(ctx, token), nft.caps, baseGas);
 }
@@ -512,38 +524,59 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
     const prepared = await signTx(signer, tx, dryRun, sender.from);
     const { signed } = prepared;
     const pairs = asked.flatMap((bribe) => tokens.map((token) => pairKey(bribe, token)));
-    let reopened = new Set<string>();
     if (!signed || dryRun) {
       log.info(signed ? "dry run: signed, not sent" : "not signed, not sent", which);
       nft.prepared.push(built.call);
-      for (const pair of pairs) nft.simulated.add(pair);
+      for (const pair of pairs) (nft.simulated.add(pair), nft.taken.add(pair));
     } else {
       const hash = await broadcastTx(chain, { ...prepared, signed }, until).catch((error: unknown) => {
         throw new Stop(`claim not sent: ${errorMessage(error)}`);
       });
       log.info("claim sent", { ...which, hash });
       ctx.pinned = await confirm(ctx, nft.id, hash, tx.nonce);
-      reopened = reopen(nft, pairs);
+      await settle(ctx, nft, plan, ctx.pinned);
     }
-    for (const pair of pairs) if (!reopened.has(pair)) nft.taken.add(pair);
     return true;
   }
   throw new Error(`no claim fit: ${ROUNDS} plans`);
 }
 
 /**
- * A sent claim moves the epochs earned() reads past those it looked at, so what a pair owed past them is claimable at
- * once. Such a pair stays open for the next claim, with `later` as what it owes. Returns the pairs it reopens.
+ * Marks the pairs a sent claim asked for as taken, except those that still owe after it. A claim moves the epochs
+ * earned() reads past those it looked at, so what a pair owed past them, its `later`, is claimable at once. Such a pair
+ * is claimed once more, for what earned() now shows. Once only, so that a contract that keeps showing rewards it doesn't
+ * pay can't make the claims go on.
  */
-function reopen(nft: Nft, claimed: string[]): Set<string> {
-  const reopened = new Set<string>();
-  nft.pairs = nft.pairs.map((p) => {
-    const pair = pairKey(p.bribe, p.token);
-    if (!p.later || !claimed.includes(pair)) return p;
-    reopened.add(pair);
-    return { ...p, usd: p.later, later: 0 };
+async function settle(ctx: Context, nft: Nft, { fees, bribes, tokens }: ClaimPlan, at: bigint): Promise<void> {
+  const asked = [...fees, ...bribes].flatMap((bribe) => tokens.map((token) => ({ bribe, token })));
+  // The claim is done either way, so a failed read only leaves what it owes for next week.
+  const owed = await readMany<bigint>(
+    ctx.chain.bulk,
+    asked.map(({ bribe, token }) => bribeCall(bribe, "earned", [nft.id, token])),
+    { chunk: EARNED_CHUNK, concurrency: CONCURRENCY, blockNumber: at },
+  ).catch((error: unknown) => {
+    log.warning("not read after the claim: what it left owing waits", {
+      conduit: ctx.sender.conduit,
+      tokenId: nft.id,
+      error: errorMessage(error),
+    });
+    return asked.map(() => 0n);
   });
-  return reopened;
+  const left = new Map<string, Pair>();
+  asked.forEach(({ bribe, token }, i) => {
+    const pair = pairKey(bribe, token);
+    if (owed[i]! === 0n || nft.reopened.has(pair)) return void nft.taken.add(pair);
+    nft.reopened.add(pair);
+    left.set(pair, { bribe, fees: fees.includes(bribe), token, usd: valueOf(ctx, token, owed[i]!), later: 0 });
+  });
+  if (left.size === 0) return;
+  const kept = nft.pairs.filter((p) => !left.has(pairKey(p.bribe, p.token)));
+  nft.pairs = [...kept, ...left.values()];
+  log.info("claimable again after the claim", {
+    conduit: ctx.sender.conduit,
+    tokenId: nft.id,
+    usd: [...left.values()].reduce((sum, p) => sum + p.usd, 0),
+  });
 }
 
 function refuse(ctx: Context, nft: Nft, { token, why, reason, usd }: Refusal): void {
