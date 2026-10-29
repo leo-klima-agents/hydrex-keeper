@@ -100,8 +100,8 @@ type World = {
   /** A pair, by `key`, that one claim only half empties. This happens when more than 50 epochs are owed. */
   partial?: string;
   /**
-   * Rewards, by `key`, that earned() can't see yet. This happens when the veNFT never claimed from a contract whose
-   * first bribe was 60 epochs ago.
+   * Rewards, by `key`, that earned() can't see until the veNFT's first claim from the contract. This happens when it
+   * never claimed from a contract whose first bribe was 60 epochs ago.
    */
   hidden?: Map<string, bigint>;
 };
@@ -176,6 +176,7 @@ function fakeChain(w: World = world()) {
     initial.set(w.partial, half);
     initial.set(`${w.partial}:later`, half);
   }
+  for (const [pair, amount] of w.hidden ?? []) initial.set(`${pair}:later`, (initial.get(pair) ?? 0n) + amount);
   const listed = new Map(w.pools.flatMap(([fees, other]) => [fees, other]));
   const sent: Hex[] = [];
   const earnedFor = new Set<string>();
@@ -444,7 +445,11 @@ const prices = new Map<Address, number>([
   ...ODD.map((token) => [token.toLowerCase() as Address, 1] as const),
 ]);
 
-const rates: Record<string, [bigint, bigint]> = { [USDC]: [100n * 10n ** 12n, 3n], [HYDX]: [5n, 6n] };
+const rates: Record<string, [bigint, bigint]> = {
+  [USDC]: [100n * 10n ** 12n, 3n],
+  [HYDX]: [5n, 6n],
+  ...Object.fromEntries(ODD.map((token) => [token, [100n, 3n]])),
+};
 
 type Swaps = {
   refuse?: Address[] | ((token: Address, amountIn: bigint) => boolean);
@@ -729,6 +734,29 @@ test("a veNFT whose rewards are past the 50 epochs earned() reads gets the claim
   const claim = sent.map(decode).find(({ id }) => id === 4n);
   assert.ok(claim, "veNFT 4 is claimed for");
   assert.ok(claim.bribes.includes(E2) && claim.tokens.includes(ODD[0]!));
+});
+
+test("rewards that a claim makes claimable are claimed right after it, but not in a dry run", async () => {
+  // E2 owes veNFT 2 $40 of an unswapped token past the 50 epochs, and nothing earned() can see yet.
+  const hidden = new Map([[key(2, E2, ODD[0]!), 40n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  const [first, second, ...more] = sent.map(decode);
+  assert.ok(first!.bribes.includes(E2) && first!.tokens.includes(ODD[0]!), "the first claim makes them claimable");
+  assert.deepEqual([second!.id, second!.bribes, second!.tokens], [2n, [E2], [ODD[0]]], "the second takes them");
+  assert.equal(more.length, 0, "once");
+  const dry = fakeChain(world({ hidden }));
+  let signatures = 0;
+  const account = { ...signer, signTransaction: (tx) => (signatures++, signer.signTransaction(tx)) } as LocalAccount;
+  assert.equal(await claims(runOf(dry.chain, { dryRun: true, account }), START, until(), fakeSwapper().swapper), 0);
+  assert.equal(signatures, 1, "nothing was unlocked on chain");
+});
+
+test("rewards that a claim makes claimable wait for next week if they are too little for a claim", async () => {
+  const hidden = new Map([[key(2, E2, ODD[0]!), 4n * E18]]);
+  const { chain, sent } = fakeChain(world({ hidden }));
+  assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
+  assert.equal(sent.length, 1, "$4 is under the minimum claim");
 });
 
 test("a claim that would leave some of a token in the conduit is not sent, whether it swaps it or not", async () => {

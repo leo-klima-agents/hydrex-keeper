@@ -62,7 +62,7 @@ const TONNE = 10n ** 18n;
 
 /**
  * What one bribe contract owes a veNFT in one token, in USD. `later` is owed too, but lies past the epochs earned()
- * looks at, and claiming the pair now makes it claimable next time.
+ * looks at, and claiming the pair makes it claimable right after.
  */
 export type Pair = { bribe: Address; fees: boolean; token: Address; usd: number; later?: number };
 
@@ -308,7 +308,8 @@ async function claimRewards(
   const { ctx, nfts } = await tried(read, "the claims' reads", address);
   let sent = 0;
   let failures = 0;
-  // Each claim takes at least one pair that no earlier claim took, so a veNFT always runs out of claims.
+  // Each claim takes at least one pair that no earlier claim took, or uses up a pair's `later`, so a veNFT always runs
+  // out of claims.
   claiming: for (const [i, nft] of nfts.entries()) {
     for (;;) {
       if (until - Date.now() < MARGIN_MS) {
@@ -511,6 +512,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
     const prepared = await signTx(signer, tx, dryRun, sender.from);
     const { signed } = prepared;
     const pairs = asked.flatMap((bribe) => tokens.map((token) => pairKey(bribe, token)));
+    let reopened = new Set<string>();
     if (!signed || dryRun) {
       log.info(signed ? "dry run: signed, not sent" : "not signed, not sent", which);
       nft.prepared.push(built.call);
@@ -521,11 +523,27 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       });
       log.info("claim sent", { ...which, hash });
       ctx.pinned = await confirm(ctx, nft.id, hash, tx.nonce);
+      reopened = reopen(nft, pairs);
     }
-    for (const pair of pairs) nft.taken.add(pair);
+    for (const pair of pairs) if (!reopened.has(pair)) nft.taken.add(pair);
     return true;
   }
   throw new Error(`no claim fit: ${ROUNDS} plans`);
+}
+
+/**
+ * A sent claim moves the epochs earned() reads past those it looked at, so what a pair owed past them is claimable at
+ * once. Such a pair stays open for the next claim, with `later` as what it owes. Returns the pairs it reopens.
+ */
+function reopen(nft: Nft, claimed: string[]): Set<string> {
+  const reopened = new Set<string>();
+  nft.pairs = nft.pairs.map((p) => {
+    const pair = pairKey(p.bribe, p.token);
+    if (!p.later || !claimed.includes(pair)) return p;
+    reopened.add(pair);
+    return { ...p, usd: p.later, later: 0 };
+  });
+  return reopened;
 }
 
 function refuse(ctx: Context, nft: Nft, { token, why, reason, usd }: Refusal): void {
@@ -770,7 +788,7 @@ async function readPayingPairs(
 
 /**
  * What each veNFT is owed past the 50 epochs that earned() looks at. A claim moves that window forward, so this becomes
- * claimable next time.
+ * claimable right after.
  */
 async function readHidden(chain: Chain, nfts: Nft[], paying: Paying[], start: bigint): Promise<Map<string, bigint>[]> {
   const read = <T>(calls: Call[]) => readMany<T>(chain.bulk, calls, { concurrency: CONCURRENCY });
