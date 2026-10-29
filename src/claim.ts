@@ -101,7 +101,7 @@ type Nft = {
   prepared: ModuleCall[];
   /** Pairs that only those claims took. The chain still shows them as owed. */
   simulated: Set<string>;
-  /** Pairs that still owed after a claim that asked for them, and are claimed once more. */
+  /** Pairs a claim left owing, which are claimed once more. */
   reopened: Set<string>;
 };
 
@@ -315,7 +315,7 @@ async function claimRewards(
   claiming: for (const [i, nft] of nfts.entries()) {
     for (;;) {
       if (until - Date.now() < MARGIN_MS) {
-        // What an earlier claim of this run left owing would have waited for next week without it, so it fails nothing.
+        // What a claim of this run unlocked would otherwise have waited a week, so it fails nothing.
         const left = nfts
           .slice(i)
           .filter((rest) => (nextPlan(ctx, rest, GAS_BUDGET, false)?.usd ?? 0) >= MIN_CLAIM_USD);
@@ -436,7 +436,6 @@ const newNft = (id: bigint, owner: Address): Nft => ({
 
 const untaken = (nft: Nft) => nft.pairs.filter((p) => !nft.taken.has(pairKey(p.bribe, p.token)));
 
-/** `reopened` false leaves out what earlier claims of this run left owing. */
 function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET, reopened = true): ClaimPlan | undefined {
   const pairs = untaken(nft).filter(
     (p) =>
@@ -542,14 +541,11 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
 }
 
 /**
- * Marks the pairs a sent claim asked for as taken, except those that still owe after it. A claim moves the epochs
- * earned() reads past those it looked at, so what a pair owed past them, its `later`, is claimable at once. Such a pair
- * is claimed once more, for what earned() now shows. Once only, so that a contract that keeps showing rewards it doesn't
- * pay can't make the claims go on.
+ * A claim moves the epochs earned() reads, so a pair can still owe after it. Such a pair is claimed once more, and only
+ * once, in case its contract never pays.
  */
 async function settle(ctx: Context, nft: Nft, { fees, bribes, tokens }: ClaimPlan, at: bigint): Promise<void> {
   const asked = [...fees, ...bribes].flatMap((bribe) => tokens.map((token) => ({ bribe, token })));
-  // The claim is done either way, so a failed read only leaves what it owes for next week.
   const owed = await readMany<bigint>(
     ctx.chain.bulk,
     asked.map(({ bribe, token }) => bribeCall(bribe, "earned", [nft.id, token])),

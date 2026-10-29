@@ -747,7 +747,7 @@ test("a veNFT whose rewards are past the 50 epochs earned() reads gets the claim
 });
 
 test("rewards that a claim makes claimable are claimed right after it, but not in a dry run", async () => {
-  // E2 owes veNFT 2 $40 of an unswapped token past the 50 epochs, and nothing earned() can see yet.
+  // E2 owes veNFT 2 $40 past the 50 epochs earned() reads, and nothing it can see yet.
   const hidden = new Map([[key(2, E2, ODD[0]!), 40n * E18]]);
   const { chain, sent } = fakeChain(world({ hidden }));
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
@@ -769,7 +769,7 @@ test("what a claim leaves owing is claimed once more, for what earned() then sho
   const { chain, sent } = fakeChain(world({ hidden, reveals }));
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
   assert.equal(sent.length, 1);
-  // A contract that keeps showing USDC it never pays gets one more claim, not one per minute.
+  // A contract that keeps showing USDC it never pays gets one more claim only.
   const sticky = fakeChain(world({ v2: true, sticky: key(7, E1, USDC) }));
   assert.equal(await claims(runOf(sticky.chain), START, until(), fakeSwapper().swapper), 0);
   const v2 = through(sticky.sent, true).map(decodeV2);
