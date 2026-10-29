@@ -172,7 +172,7 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
 
 ## Development
 
-You need Node 26. Run `npm ci`, then `npm run typecheck`, `npm test` and `npm run format` before committing.
+You need Node 26 LTS. Run `npm ci`, then `npm run typecheck`, `npm test` and `npm run format` before committing.
 
 `MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URLS=… npm run dry-run` runs the Tuesday run against Base
 without KMS, and sends nothing. `npm run dry-run-claim` does the same for the claims. Set `CONDUIT` and `PROPOSER` too
