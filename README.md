@@ -161,9 +161,10 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
   the last blocks needs twice its maximum cost, and a claim needs its cost plus 0.001 ETH.
 - **Claims:** claims that fail or don't finish within the hour fail the run. The next week's claims, or
   `sh/run.sh --claim`, take what is left.
-- **Top-ups:** a top-up that fails, for example on `fund the proposer`, on a treasury with too little USDC, or on a swap
-  quoted more than 2% under the prices, fails the run after the vote, and the retry tops up again. An allowance that is
-  used up or missing only logs a warning.
+- **Top-ups:** a top-up that fails, for example on `fund the proposer` or on a swap quoted more than 2% under the
+  prices, fails the run after the vote, and the retry tops up again. A treasury with too little USDC, or an allowance
+  that is used up or missing, only logs a warning, unless a key ends with less than 0.002 ETH: then the run fails with
+  the error `sh/check.sh` gives, such as `keeper 0x… holds 0.0015 ETH; fund it`.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job doesn't vote, and the claims wait for the minter
   until an hour after the flip.
 - **Klima conduit:** without voting power, it gets no vote and the run fails. The immutable conduit still votes.

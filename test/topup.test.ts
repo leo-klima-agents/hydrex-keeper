@@ -384,16 +384,21 @@ function swapOf(sent: Sent[]): { amountIn: bigint; minimum: bigint; deadline: bi
   return { amountIn: params.amountIn, minimum: params.amountOutMinimum, deadline };
 }
 
-async function errorsOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<string[]> {
+type Line = { severity: string; message: string; error?: string };
+
+async function linesOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<Line[]> {
   const write = t.mock.method(process.stdout, "write", () => true);
   try {
     await body();
   } finally {
     write.mock.restore();
   }
-  return write.mock.calls
-    .map((call) => JSON.parse(String(call.arguments[0])) as { severity: string; error?: string })
-    .flatMap((line) => (line.severity === "ERROR" && line.error ? [line.error] : []));
+  return write.mock.calls.map((call) => JSON.parse(String(call.arguments[0])) as Line);
+}
+
+async function errorsOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<string[]> {
+  const lines = await linesOf(t, body);
+  return lines.flatMap((line) => (line.severity === "ERROR" && line.error ? [line.error] : []));
 }
 
 test("tops up both keys: the proposer draws what both lack, swaps it where it is paid most, and sends the keeper its share", async () => {
@@ -496,19 +501,42 @@ test("the keeper's ETH beyond the target does not count for the proposer", async
   near(ethOf(w, PROPOSER), TARGET, "topped up");
 });
 
-test("a treasury that holds too little fails the top-up, once the proposer drew what it holds", async () => {
-  const w = world({ usdc: { [low(TREASURY)]: usdc(6) } });
+test("a treasury that holds too little only warns, once the proposer drew what it holds, if both keys keep 0.002 ETH", async (t) => {
+  const w = world({ usdc: { [low(TREASURY)]: usdc(8) } });
   const { chain, sent } = fakeChain(w);
-  assert.equal(await topUp(runOf(chain), until()), 1);
-  assert.equal(drawn(sent), usdc(6));
+  let failures = -1;
+  const lines = await linesOf(t, async () => (failures = await topUp(runOf(chain), until())));
+  assert.equal(failures, 0);
+  assert.deepEqual(
+    lines.filter((l) => l.severity !== "INFO").map((l) => [l.severity, l.message]),
+    [["WARNING", "the treasury holds too little USDC to top up the keys: fund it"]],
+  );
+  assert.equal(drawn(sent), usdc(8));
   near(ethOf(w, KEEPER), ethOf(w, PROPOSER), "both even");
 });
 
-test("a treasury that lets the proposer draw nothing tops up nothing, and does not fail", async () => {
+test("a key left under 0.002 ETH fails the top-up with check.sh's message, however little was drawn", async (t) => {
+  const w = world({ usdc: { [low(TREASURY)]: usdc(6) } });
+  const { chain, sent } = fakeChain(w);
+  let failures = -1;
+  const lines = await linesOf(t, async () => (failures = await topUp(runOf(chain), until())));
+  assert.equal(failures, 2, "one for each key");
+  assert.equal(drawn(sent), usdc(6), "after drawing all the treasury holds");
+  const errors = lines.filter((l) => l.severity === "ERROR").map((l) => l.message);
+  assert.equal(errors.length, 2);
+  assert.match(errors[0]!, /^keeper 0x[0-9a-fA-F]{40} holds 0\.\d{4} ETH; fund it$/);
+  assert.match(errors[1]!, /^proposer 0x[0-9a-fA-F]{40} holds 0\.\d{4} ETH; fund it$/);
+});
+
+test("a treasury that lets the proposer draw nothing tops up nothing, and fails only for a key under 0.002 ETH", async () => {
   for (const more of [{ enabled: false }, { allowed: 0n }, { spent: usdc(20) }]) {
-    const { chain, sent } = fakeChain(world(more));
+    const enough = { [low(KEEPER)]: eth(0.0025), [low(PROPOSER)]: eth(0.0025) };
+    const { chain, sent } = fakeChain(world({ ...more, eth: enough }));
     assert.equal(await topUp(runOf(chain), until()), 0);
     assert.equal(sent.length, 0, "and the proposer has no ETH to spare for the keeper");
+    const short = fakeChain(world(more));
+    assert.equal(await topUp(runOf(short.chain), until()), 2, "keys at 0.0014 and 0.0005 ETH");
+    assert.equal(short.sent.length, 0);
   }
 });
 
