@@ -14,7 +14,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { publicActionsL2 } from "viem/op-stack";
-import { conduitAbi, moduleAbi, voterAbi } from "./abi.ts";
+import { conduitAbi, immutableAbi, moduleAbi, voterAbi } from "./abi.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
@@ -22,6 +22,7 @@ export const CHUNK = 1_000; // calls per eth_call. publicnode accepts 1,132 and 
 export const HEDGE_DELAY_MS = 250; // a healthy node answers a read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
+const LOOKUP_TIMEOUT_MS = 2_000;
 export const BLOCK_MS = 200; // Base's block time
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
@@ -127,6 +128,35 @@ export function broadcaster(rpcUrls: string[]) {
   };
 }
 
+/**
+ * Whether a node has any of the transactions, pending or in a block, asking every URL. A node keeps each transaction it
+ * forwarded to the sequencer until the transaction lands or is dropped, and transactions are sent to every URL, so when
+ * the nodes that answer have none, none can land. Undefined when no node answered.
+ */
+export function finder(rpcUrls: string[]) {
+  const nodes = rpcUrls.map((url) => http(url));
+  return async (hashes: readonly Hex[]): Promise<boolean | undefined> => {
+    if (hashes.length === 0) return false;
+    const asks = nodes.flatMap((transport) => {
+      const node = transport({ chain: base, retryCount: 0, timeout: LOOKUP_TIMEOUT_MS });
+      return hashes.map((hash) => node.request({ method: "eth_getTransactionByHash", params: [hash] }));
+    });
+    return new Promise((resolve) => {
+      let settled = 0;
+      let answered = false;
+      for (const ask of asks) {
+        ask
+          .then((tx) => {
+            answered = true;
+            if (tx !== null) resolve(true);
+          })
+          .catch(() => undefined)
+          .finally(() => ++settled === asks.length && resolve(answered ? false : undefined));
+      }
+    });
+  };
+}
+
 function makeClient(transport: Transport) {
   const client = createPublicClient({ chain: base, transport, pollingInterval: 1_000 });
   return client.extend(publicActionsL2());
@@ -148,32 +178,72 @@ export type Chain = {
    * A separate client for the immutable conduit's votes. Calls sent together through one client share a JSON-RPC batch,
    * which only answers when its slowest call does.
    */
-  v2Client: Client;
+  proposerClient: Client;
   broadcast: ReturnType<typeof broadcaster>;
+  known: ReturnType<typeof finder>;
   module: Address;
   conduit: Address;
   keeper: Address;
   voter: Address;
   ve: Address;
-  v2: V2;
+  immutable: ImmutableConduit;
 };
 
-export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
+/** The immutable conduit, the key that proposes its votes, and the tokens it prices with. */
+export type ImmutableConduit = { conduit: Address; proposer: Address; priced: Address[] };
 
-/** The chain without the immutable conduit, which `connectV2` adds. */
-export async function connect(module: Address, rpcUrls: string[]): Promise<Omit<Chain, "v2">> {
+const MAX_PRICED_TOKENS = 4; // the immutable conduit's limit
+
+export async function connect(
+  module: Address,
+  rpcUrls: string[],
+  immutable: Omit<ImmutableConduit, "priced">,
+): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));
+  const addresses = await readAddresses(client, module, immutable);
+  return {
+    client,
+    bulk: makeClient(bulkTransport(rpcUrls)),
+    proposerClient: makeClient(hedged(rpcUrls)),
+    broadcast: broadcaster(rpcUrls),
+    known: finder(rpcUrls),
+    module,
+    ...addresses,
+  };
+}
+
+/**
+ * The Klima conduit and its keeper, from the module, and the immutable conduit's priced tokens. Both conduits must use
+ * the same Voter and VotingEscrow, and the proposer must not be the keeper: the two keys send at the same time, and
+ * their nonces are tracked separately.
+ */
+export async function readAddresses(client: Client, module: Address, immutable: Omit<ImmutableConduit, "priced">) {
   const [conduit, keeper] = (await readMany<Address>(client, [
     call(module, moduleAbi, "CONDUIT"),
     call(module, moduleAbi, "KEEPER"),
   ])) as [Address, Address];
-  const [voter, ve] = (await readMany<Address>(client, [
-    call(conduit, conduitAbi, "voter"),
-    call(conduit, conduitAbi, "veToken"),
-  ])) as [Address, Address];
-  const bulk = makeClient(bulkTransport(rpcUrls));
-  const v2Client = makeClient(hedged(rpcUrls));
-  return { client, bulk, v2Client, broadcast: broadcaster(rpcUrls), module, conduit, keeper, voter, ve };
+  if (isAddressEqual(immutable.proposer, keeper)) {
+    throw new Error(`PROPOSER is the keeper, ${keeper}: each needs nonces of its own`);
+  }
+  const usedBy = (address: Address, abi: readonly unknown[]) => [
+    call(address, abi, "voter"),
+    call(address, abi, "veToken"),
+  ];
+  const pricedCalls = Array.from({ length: MAX_PRICED_TOKENS }, (_, i) =>
+    call(immutable.conduit, immutableAbi, "pricedTokens", [BigInt(i)]),
+  );
+  const [[voter, ve, immutableVoter, immutableVe], entries] = await Promise.all([
+    readMany<Address>(client, [...usedBy(conduit, conduitAbi), ...usedBy(immutable.conduit, immutableAbi)]),
+    readEach<readonly [Address, ...unknown[]]>(client, pricedCalls),
+  ]);
+  if (!isAddressEqual(immutableVoter!, voter!) || !isAddressEqual(immutableVe!, ve!)) {
+    throw new Error(
+      `${immutable.conduit} uses Voter ${immutableVoter} and VotingEscrow ${immutableVe}, not ${voter} and ${ve}`,
+    );
+  }
+  const priced = entries.flatMap((entry) => (entry ? [entry[0]] : []));
+  if (priced.length === 0) throw new Error(`${immutable.conduit} prices no token`);
+  return { conduit, keeper, voter: voter!, ve: ve!, immutable: { ...immutable, priced } };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

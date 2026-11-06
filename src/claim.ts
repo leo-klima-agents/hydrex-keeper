@@ -25,7 +25,7 @@ import {
   prepareCall,
   signTx,
   Unconfirmed,
-  v2Sender,
+  immutableSender,
   type ModuleCall,
   type Sender,
 } from "./vote.ts";
@@ -45,7 +45,7 @@ const RESERVE = parseEther("0.001"); // kept in the keeper or the proposer for t
 const MARGIN_MS = 60_000;
 // Rough gas costs for planning a claim. The simulation has the final say.
 const BASE_GAS = 1_300_000n;
-const V2_BASE_GAS = 400_000n;
+const IMMUTABLE_BASE_GAS = 400_000n;
 const SWAP_GAS = 800_000n;
 const PAIR_GAS = 300_000n;
 const GAS_BUDGET = 10_000_000n;
@@ -224,7 +224,7 @@ export async function claims(run: Run, flip: bigint, until: number, swapper: Swa
   }
   const conduits: Conduit[] = [
     { sender: klimaSender(chain), signer: account, excluded: EXCLUDED_OWNERS },
-    { sender: v2Sender(chain), signer: proposer, excluded: new Map() },
+    { sender: immutableSender(chain), signer: proposer, excluded: new Map() },
   ];
   const shared: Shared = {
     delegatees: sharedRead(() => readDelegatees(chain, start - WEEK)),
@@ -443,7 +443,7 @@ function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET, reopened = true):
       !nft.unswapped.has(lower(p.token)) &&
       (reopened || !nft.reopened.has(pairKey(p.bribe, p.token))),
   );
-  const baseGas = ctx.klima ? BASE_GAS : V2_BASE_GAS;
+  const baseGas = ctx.klima ? BASE_GAS : IMMUTABLE_BASE_GAS;
   return planClaim(pairs, budget, ctx.usdPerGas, (token) => swapped(ctx, token), nft.caps, baseGas);
 }
 
@@ -473,6 +473,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       before: nft.prepared,
       at,
       sender,
+      checkQueued: true,
     });
     // A transaction this run sent at this nonce may still land and may be a vote, and a claim must never replace one.
     if (queued) throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);

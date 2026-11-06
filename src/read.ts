@@ -1,19 +1,23 @@
 import { erc20Abi, type Address } from "viem";
-import { bribeAbi, veAbi } from "./abi.ts";
-import { call, lower, now, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
+import { bribeAbi, immutableAbi, veAbi } from "./abi.ts";
+import { call, lower, now, readEach, readMany, voterCall, WEEK, type Call, type Chain, type Client } from "./chain.ts";
 
 export type Votes = { power: bigint; lastVoted: bigint; votedThisEpoch: boolean };
 
-export type Epoch = { start: bigint; flip: bigint; v2: Votes } & Votes;
+export type Epoch = { start: bigint; flip: bigint; immutable: Votes } & Votes;
 
 type Reward = { token: Address; amount: bigint; decimals: number };
 
 export type PoolRewards = { pool: Address; rewards: Reward[] };
 
-/** `otherVotes` is everyone's but the Klima conduit's, so it includes the immutable conduit's `v2Votes`. */
+/**
+ * `otherVotes` is everyone's but the Klima conduit's, so it includes the immutable conduit's `immutableVotes`. `score` is
+ * the immutable conduit's score of its vote in force, in wei of USD, unless it can't score.
+ */
 export type State = {
   epoch: Epoch;
-  pools: (PoolRewards & { otherVotes: bigint; ownVotes: bigint; v2Votes: bigint })[];
+  pools: (PoolRewards & { otherVotes: bigint; ownVotes: bigint; immutableVotes: bigint })[];
+  score?: bigint | undefined;
 };
 
 const calendarEpoch = () => (now() / WEEK) * WEEK;
@@ -29,21 +33,21 @@ export async function readDecimals(client: Client, tokens: Address[]): Promise<M
 }
 
 function epochCalls(chain: Chain, calendar: bigint): Call[] {
-  const { ve, conduit, v2 } = chain;
+  const { ve, conduit, immutable } = chain;
   const votesOf = (voter: Address): Call[] => [
     voterCall(chain, "lastVoted", [voter]),
     call(ve, veAbi, "getPastVotes", [voter, calendar]),
   ];
-  return [voterCall(chain, "_epochTimestamp"), ...votesOf(conduit), ...votesOf(v2.conduit)];
+  return [voterCall(chain, "_epochTimestamp"), ...votesOf(conduit), ...votesOf(immutable.conduit)];
 }
 
-function toEpoch([start, lastVoted, power, v2LastVoted, v2Power]: bigint[]): Epoch {
+function toEpoch([start, lastVoted, power, immutableLastVoted, immutablePower]: bigint[]): Epoch {
   const votes = (last: bigint, power: bigint) => ({ power, lastVoted: last, votedThisEpoch: last >= start! });
   return {
     start: start!,
     flip: start! + WEEK,
     ...votes(lastVoted!, power!),
-    v2: votes(v2LastVoted!, v2Power!),
+    immutable: votes(immutableLastVoted!, immutablePower!),
   };
 }
 
@@ -124,25 +128,36 @@ export async function readRewards(chain: Chain, tokens: Address[]): Promise<Pool
   return [...rewards].map(([pool, list]) => ({ pool, rewards: list }));
 }
 
-/** Up to 331 pools fit in one eth_call, so every vote is read from the same block. */
+/**
+ * Up to 331 pools fit in one eth_call, so every vote, and the immutable conduit's score, is read from the same block.
+ * Only the score may revert.
+ */
 export async function readVotes(chain: Chain, pools: PoolRewards[]): Promise<State> {
-  const { conduit, v2 } = chain;
+  const { conduit, immutable } = chain;
   const epochs = epochCalls(chain, calendarEpoch());
   const perPool = (pool: Address) => [
     voterCall(chain, "weights", [pool]),
     voterCall(chain, "votes", [conduit, pool]),
-    voterCall(chain, "votes", [v2.conduit, pool]),
+    voterCall(chain, "votes", [immutable.conduit, pool]),
   ];
-  const results = await readMany<bigint>(chain.client, [...epochs, ...pools.flatMap(({ pool }) => perPool(pool))]);
-  const epoch = toEpoch(results.slice(0, epochs.length));
+  const calls = [...epochs, ...pools.flatMap(({ pool }) => perPool(pool))];
+  const results = await readEach<bigint>(chain.client, [
+    ...calls,
+    call(immutable.conduit, immutableAbi, "currentScore"),
+  ]);
+  const score = results.pop();
+  const reverted = results.findIndex((result) => result === undefined);
+  if (reverted >= 0) throw new Error(`${calls[reverted]!.functionName} reverted`);
+  const epoch = toEpoch(results.slice(0, epochs.length) as bigint[]);
   return {
     epoch,
     pools: pools.map((p, i) => {
-      const [weight, own, v2Own] = results.slice(epochs.length + 3 * i, epochs.length + 3 * (i + 1));
+      const [weight, own, immutableOwn] = results.slice(epochs.length + 3 * i, epochs.length + 3 * (i + 1));
       // Voter.votes still holds last epoch's vote until the conduit votes again.
       const ownVotes = epoch.votedThisEpoch ? own! : 0n;
-      const v2Votes = epoch.v2.votedThisEpoch ? v2Own! : 0n;
-      return { ...p, otherVotes: weight! - ownVotes, ownVotes, v2Votes };
+      const immutableVotes = epoch.immutable.votedThisEpoch ? immutableOwn! : 0n;
+      return { ...p, otherVotes: weight! - ownVotes, ownVotes, immutableVotes };
     }),
+    score,
   };
 }

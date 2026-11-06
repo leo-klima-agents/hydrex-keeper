@@ -42,8 +42,9 @@ That score counts WETH, cbBTC, USDC and EURC at Chainlink prices, plus some trad
 prices, then checks the conduit's score before sending, aiming for $1.10. If its best vote falls short, it sends the
 best vote that clears the bar, as long as that still earns at least $1 more than the vote in force.
 
-The two conduits vote independently, and a failure of one doesn't stop the other. The immutable conduit's vote is
-checked after the Klima conduit's vote too, so that it passes whichever lands first. Voting for both costs the Klima
+The two conduits vote independently, and a failure of one doesn't stop the other. In the last blocks, both votes come
+from the same read of the votes: the Klima conduit's vote counts the immutable conduit's, and the immutable conduit's
+vote is checked after the Klima conduit's, so that it passes whichever lands first. Voting for both costs the Klima
 conduit about 1–2% of its rewards, as any well-run conduit voting for the same pools would.
 
 ### Claims
@@ -92,7 +93,7 @@ or 0.0001 ETH wait for a later week.
 - **`MODULE`:** [`0x750973E0CB728C3112561Bc8E9b235afA9B17E81`][module], `KlimaVeTokenConduitExecutor`.
 - **`KEEPER`:** [`0x625CF6663d9D090535FBd57680bFFE6fA0262434`][keeper], the Cloud KMS HSM key `hydrex-keeper-v1`,
   version 1.
-- **`CONDUIT`:** [`0x692c323B425A9DfeebE302F56168a7798D93EAC5`][immutable], `ImmutableVeTokenConduit`, version 2.
+- **`CONDUIT`:** [`0x692c323B425A9DfeebE302F56168a7798D93EAC5`][immutable], `ImmutableVeTokenConduit`.
 - **`PROPOSER`:** [`0x52c139f60452B93e1211F116BD43B28d7AfC2bCa`][proposer], the Cloud KMS HSM key `hydrex-proposer-v1`,
   version 1.
 - **Treasury:** [`0x450c72de8c0079B49AcedF294a13011bd09D125B`][treasury], a 2-of-3 Safe. Its Allowance Module,
@@ -142,9 +143,10 @@ allowance, and keep some USDC in the Safe.
 keeper or the proposer holds less than 0.002 ETH.
 
 The `check` workflow runs it every Friday and on demand. It signs in through Workload Identity Federation as the service
-account named by the `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT` repository variables, and builds `config.env` from the
-repository variables named in `config.env.example`. Set at least `KEEPER_PROJECT`, `KMS_KEY_VERSION`, `CONDUIT`,
-`PROPOSER`, `PROPOSER_KMS_KEY_VERSION` and `ALERT_EMAIL`.
+account named by the `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT` repository variables. It takes its config from
+`config.env.example`, with the repository variables named there in place of its values. Set at least `KEEPER_PROJECT`,
+`KMS_KEY_VERSION`, `PROPOSER_KMS_KEY_VERSION` and `ALERT_EMAIL`, which have no value there. A missing one fails the run
+with "… is not set in ./repository-variables.env".
 
 Two things are outside the scripts. Enforce `iam.managed.disableServiceAccountKeyCreation` on the keeper project,
 because `check.sh` only detects keys. And change `tokens.json` through a pull request, then redeploy.

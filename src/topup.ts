@@ -124,7 +124,7 @@ export async function topUp(run: Run, until: number): Promise<number> {
     log.info(run.dryRun ? "dry run: would top up to" : "topped up", { keeper, proposer });
     const keys = [
       ["keeper", run.chain.keeper, keeper],
-      ["proposer", run.chain.v2.proposer, proposer],
+      ["proposer", run.chain.immutable.proposer, proposer],
     ] as const;
     const low = keys.filter(([, , eth]) => eth < MIN_ETH);
     for (const [name, address, eth] of low) {
@@ -138,7 +138,7 @@ export async function topUp(run: Run, until: number): Promise<number> {
 }
 
 async function readState({ chain, prices }: Run, until: number): Promise<State> {
-  const { conduit, proposer } = chain.v2;
+  const { conduit, proposer } = chain.immutable;
   const at = await blockAtLeast(chain);
   const read = <T>(calls: Call[]) => readMany<T>(chain.client, calls, { blockNumber: at });
   const balance = (address: Address) => chain.client.getBalance({ address, blockNumber: at });
@@ -163,7 +163,7 @@ async function readState({ chain, prices }: Run, until: number): Promise<State> 
   const allowed = enabled ? amount! : 0n;
   return {
     at,
-    sender: { from: proposer, client: chain.v2Client },
+    sender: { from: proposer, client: chain.proposerClient },
     treasury: treasury!,
     allowed,
     left: allowed > spent! ? allowed - spent! : 0n,
@@ -305,7 +305,7 @@ function simulator({ chain }: Run, state: State): Executor {
   let [keeper, proposer] = [state.keeper, state.proposer];
   return {
     send: async ({ what, call, gains = 0n }) => {
-      const options = { what: `the ${what}`, before: done, blockNumber: state.at };
+      const options = { what: `the ${what}`, before: done, blockNumber: state.at, checkQueued: true };
       const prepared = await prepareTx(chain, state.sender, call, options);
       payable(prepared, call, state.sender.from, proposer);
       done.push(call);
@@ -344,7 +344,7 @@ async function sendTx(
   until: number,
 ): Promise<bigint> {
   const { from } = sender;
-  const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at });
+  const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at, checkQueued: true });
   payable(prepared, call, from, prepared.balance);
   const { tx } = prepared;
   const { signed, ...ready } = await signTx(signer, tx, false, from);

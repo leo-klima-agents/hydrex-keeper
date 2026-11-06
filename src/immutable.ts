@@ -1,6 +1,6 @@
-import { isAddressEqual, type Address } from "viem";
+import type { Address } from "viem";
 import { immutableAbi } from "./abi.ts";
-import { call, lower, readEach, readMany, type Chain, type Client, type V2 } from "./chain.ts";
+import { call, lower, readMany, type Chain, type Client } from "./chain.ts";
 import type { PoolRewards, State } from "./read.ts";
 import {
   asVoted,
@@ -16,37 +16,24 @@ import {
   type Vote,
 } from "./select.ts";
 
-// The immutable conduit (hydrex-conduit version 2) lets anyone propose its vote. It only accepts a vote whose score,
+// The immutable conduit lets anyone propose its vote. It only accepts a vote whose score,
 // counted in the tokens it prices with Chainlink, beats the vote in force by MIN_GAIN. The job picks votes at its own
 // prices and checks the conduit's score before sending.
-const MAX_V2_POOLS = 20; // the conduit's MAX_POOLS
+const MAX_IMMUTABLE_POOLS = 20; // the conduit's MAX_POOLS
 const MIN_GAIN = 1; // USD, the conduit's MIN_GAIN
 const MARGIN = 0.1; // USD above MIN_GAIN, in case other votes move before ours lands
-const MAX_PRICED_TOKENS = 4; // the conduit's limit
 const VALUE_CHUNK = 25; // poolValue calls per eth_call, because each can use 200k gas
 const VALUE_CONCURRENCY = 3; // kept low because these reads repeat every block, on the RPCs the votes use
 
 /** `current` is the conduit's score of the vote in force, in USD. */
 export type Onchain = { values: Map<Address, number>; current: number };
 
-export type V2Decision = { vote: Vote | null; note: string; votes: bigint[]; summary: Record<string, unknown> };
+export type ImmutableDecision = { vote: Vote | null; note: string; votes: bigint[]; summary: Record<string, unknown> };
 
-const v2Call = (conduit: Address, functionName: string, args?: readonly unknown[]) =>
+const immutableCall = (conduit: Address, functionName: string, args?: readonly unknown[]) =>
   call(conduit, immutableAbi, functionName, args);
 
 const usd = (wad: bigint) => Number(wad) / 1e18;
-
-export async function connectV2(chain: Omit<Chain, "v2">, { conduit, proposer }: Omit<V2, "priced">): Promise<Chain> {
-  const [voter, ve] = await readMany<Address>(chain.client, [v2Call(conduit, "voter"), v2Call(conduit, "veToken")]);
-  if (!isAddressEqual(voter!, chain.voter) || !isAddressEqual(ve!, chain.ve)) {
-    throw new Error(`${conduit} uses Voter ${voter} and VotingEscrow ${ve}, not ${chain.voter} and ${chain.ve}`);
-  }
-  const calls = Array.from({ length: MAX_PRICED_TOKENS }, (_, i) => v2Call(conduit, "pricedTokens", [BigInt(i)]));
-  const entries = await readEach<readonly [Address, ...unknown[]]>(chain.client, calls);
-  const priced = entries.flatMap((entry) => (entry ? [entry[0]] : []));
-  if (priced.length === 0) throw new Error(`${conduit} prices no token`);
-  return { ...chain, v2: { conduit, proposer, priced } };
-}
 
 export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] {
   const tokens = new Set(priced.map(lower));
@@ -54,23 +41,27 @@ export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] 
 }
 
 /** Fails while the conduit can't vote. */
-export async function readValues({ v2 }: Chain, client: Client, pools: Address[]): Promise<Map<Address, number>> {
-  const calls = pools.map((pool) => v2Call(v2.conduit, "poolValue", [pool]));
+export async function readValues(
+  { immutable }: Chain,
+  client: Client,
+  pools: Address[],
+): Promise<Map<Address, number>> {
+  const calls = pools.map((pool) => immutableCall(immutable.conduit, "poolValue", [pool]));
   const values = await readMany<bigint>(client, calls, { chunk: VALUE_CHUNK, concurrency: VALUE_CONCURRENCY });
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
 
-export async function readScore({ v2 }: Chain, client: Client): Promise<number> {
-  const [current] = await readMany<bigint>(client, [v2Call(v2.conduit, "currentScore")]);
-  return usd(current!);
+/** The conduit's checks at `values`, with its score of the vote in force as read with the votes, if it could score. */
+export function onchainOf(state: State, values: Map<Address, number> | undefined): Onchain | undefined {
+  return values && state.score !== undefined ? { values, current: usd(state.score) } : undefined;
 }
 
-export function v2Candidates(state: State, usdValues: number[]): Candidate[] {
+export function immutableCandidates(state: State, usdValues: number[]): Candidate[] {
   return state.pools.map((p, i) => ({
     pool: p.pool,
     rewardsUsd: usdValues[i]!,
-    otherVotes: p.otherVotes + p.ownVotes - p.v2Votes,
-    ownVotes: p.v2Votes,
+    otherVotes: p.otherVotes + p.ownVotes - p.immutableVotes,
+    ownVotes: p.immutableVotes,
   }));
 }
 
@@ -86,41 +77,41 @@ export function votesOf(candidates: { pool: Address }[], vote: Vote, power: bigi
  * best vote that does replaces it, as long as that one still gains more than MIN_GAIN_USD. Without `onchain`, only the
  * simulation checks the vote.
  */
-export function decideV2(
+export function decideImmutable(
   state: State,
   usdValues: number[],
   onchain: Onchain | undefined,
   proportionally = false,
-): V2Decision {
-  const candidates = v2Candidates(state, usdValues);
-  const v2 = state.epoch.v2;
-  const keep = (note: string, summary: Record<string, unknown> = {}): V2Decision => ({
+): ImmutableDecision {
+  const candidates = immutableCandidates(state, usdValues);
+  const { power } = state.epoch.immutable;
+  const keep = (note: string, summary: Record<string, unknown> = {}): ImmutableDecision => ({
     vote: null,
     note,
     votes: candidates.map((c) => c.ownVotes),
     summary,
   });
-  if (v2.power === 0n) return keep("v2 has no voting power this epoch");
-  const { power } = v2;
+  if (power === 0n) return keep("the immutable conduit has no voting power this epoch");
   let x: number[] | null;
-  if (proportionally) x = proportional(usdValues, MAX_V2_POOLS);
+  if (proportionally) x = proportional(usdValues, MAX_IMMUTABLE_POOLS);
   else {
     // If our best vote doesn't gain enough at our prices, no vote that clears the check will.
-    const best = select(candidates, power, MAX_V2_POOLS);
-    if (best.fractions && !best.vote) return keep("keeping v2's vote", summarize(candidates, best.fractions, power));
+    const best = select(candidates, power, MAX_IMMUTABLE_POOLS);
+    if (best.fractions && !best.vote)
+      return keep("keeping the immutable conduit's vote", summarize(candidates, best.fractions, power));
     x = best.fractions;
   }
-  if (!x) return keep("no pool pays anything; keeping v2's vote");
+  if (!x) return keep("no pool pays anything; keeping the immutable conduit's vote");
   let checked: { bar: number; score: number } | undefined;
   if (onchain) {
     const values = candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
     const bar = onchain.current + MIN_GAIN + MARGIN;
     if (score(candidates, values, asVoted(x), power) < bar) {
       // Unlike a proportional vote, the replacement must gain as much as a last-block vote would.
-      x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
-      if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
+      x = waterFillAbove(candidates, power, values, bar, MAX_IMMUTABLE_POOLS, proportionally ? undefined : x);
+      if (!x) return keep("no vote clears the immutable conduit's check; keeping its vote", { bar });
       if (gain(candidates, x, power) <= MIN_GAIN_USD) {
-        return keep("no vote that clears v2's check gains enough; keeping its vote", { bar });
+        return keep("no vote that clears the immutable conduit's check gains enough; keeping its vote", { bar });
       }
     }
     checked = { bar, score: score(candidates, values, asVoted(x), power) };

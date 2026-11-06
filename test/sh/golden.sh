@@ -38,7 +38,11 @@ golden_case() {
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   {
     printf 'exit=%s\n--- output ---\n' "$rc"
-    sed "s|$root|<repo>|g" "$tmp/$name.out"
+    # The checkout's path, taken literally rather than as a pattern.
+    ROOT=$root awk '{
+      while ((i = index($0, ENVIRON["ROOT"])) > 0) $0 = substr($0, 1, i - 1) "<repo>" substr($0, i + length(ENVIRON["ROOT"]))
+      print
+    }' "$tmp/$name.out"
   } >>"$log"
   golden=$root/test/sh/golden/$name.txt
   if grep -Eq '^exit=12[67]$' "$log"; then # the shell couldn't run a command

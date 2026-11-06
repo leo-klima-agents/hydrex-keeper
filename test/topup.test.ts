@@ -30,10 +30,11 @@ import {
   USDC,
   VENUES,
 } from "../src/topup.ts";
-import { broadcastTx, pendingVote, prepareVote, v2Sender } from "../src/vote.ts";
+import { immutableSender, pendingVote, prepareVote } from "../src/vote.ts";
+import { logged, sentNotMined } from "./helpers.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
-const [MODULE, CONDUIT, VOTER, VE, V2, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
+const [MODULE, CONDUIT, VOTER, VE, IMMUTABLE, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
 const keeper = privateKeyToAccount(generatePrivateKey());
 const proposer = privateKeyToAccount(generatePrivateKey());
 const [KEEPER, PROPOSER] = [keeper.address, proposer.address];
@@ -183,7 +184,7 @@ function apply(w: World, { from, to, functionName, args, value }: Sent): void {
     case `${low(KEEPER)}.transfer`:
       take(w.eth, from, value, "insufficient funds");
       return add(w.eth, to, value);
-    case `${low(V2)}.vote`:
+    case `${low(IMMUTABLE)}.vote`:
       return;
   }
   throw new Error(`unexpected ${functionName} on ${to}`);
@@ -202,7 +203,7 @@ function read(w: World, c: Call): unknown {
   const [a, b] = args as [Address, Address];
   switch (functionName) {
     case "TREASURY":
-      assert.equal(address, V2);
+      assert.equal(address, IMMUTABLE);
       return TREASURY;
     case "isModuleEnabled":
       assert.deepEqual([address, a], [TREASURY, ALLOWANCE_MODULE]);
@@ -331,14 +332,15 @@ function fakeChain(w: World) {
   const chain: Chain = {
     client,
     bulk: client,
-    v2Client: client,
+    proposerClient: client,
     broadcast,
+    known: async () => false,
     module: MODULE,
     conduit: CONDUIT,
     keeper: KEEPER,
     voter: VOTER,
     ve: VE,
-    v2: { conduit: V2, proposer: PROPOSER, priced: [USDC] },
+    immutable: { conduit: IMMUTABLE, proposer: PROPOSER, priced: [USDC] },
   };
   return { chain, sent, simulated, txs };
 }
@@ -384,20 +386,8 @@ function swapOf(sent: Sent[]): { amountIn: bigint; minimum: bigint; deadline: bi
   return { amountIn: params.amountIn, minimum: params.amountOutMinimum, deadline };
 }
 
-type Line = { severity: string; message: string; error?: string };
-
-async function linesOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<Line[]> {
-  const write = t.mock.method(process.stdout, "write", () => true);
-  try {
-    await body();
-  } finally {
-    write.mock.restore();
-  }
-  return write.mock.calls.map((call) => JSON.parse(String(call.arguments[0])) as Line);
-}
-
 async function errorsOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<string[]> {
-  const lines = await linesOf(t, body);
+  const lines = await logged(t, body);
   return lines.flatMap((line) => (line.severity === "ERROR" && line.error ? [line.error] : []));
 }
 
@@ -499,7 +489,7 @@ test("a treasury that holds too little only warns, once the proposer drew what i
   const w = world({ usdc: { [low(TREASURY)]: usdc(8) } });
   const { chain, sent } = fakeChain(w);
   let failures = -1;
-  const lines = await linesOf(t, async () => (failures = await topUp(runOf(chain), until())));
+  const lines = await logged(t, async () => (failures = await topUp(runOf(chain), until())));
   assert.equal(failures, 0);
   assert.deepEqual(
     lines.filter((l) => l.severity !== "INFO").map((l) => [l.severity, l.message]),
@@ -513,7 +503,7 @@ test("a key left under 0.002 ETH fails the top-up with check.sh's message, howev
   const w = world({ usdc: { [low(TREASURY)]: usdc(6) } });
   const { chain, sent } = fakeChain(w);
   let failures = -1;
-  const lines = await linesOf(t, async () => (failures = await topUp(runOf(chain), until())));
+  const lines = await logged(t, async () => (failures = await topUp(runOf(chain), until())));
   assert.equal(failures, 2, "one for each key");
   assert.equal(drawn(sent), usdc(6), "after drawing all the treasury holds");
   const errors = lines.filter((l) => l.severity === "ERROR").map((l) => l.message);
@@ -591,30 +581,18 @@ test("everything goes through the proposer: one that cannot pay tops up neither 
   assert.equal(ethOf(w, KEEPER), eth(0.0014));
 });
 
-/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight is. */
-async function sentNotMined(chain: Chain, from: Address, nonce: number): Promise<void> {
-  const { broadcast } = chain;
-  chain.broadcast = (async () => {
-    throw new Error("no RPC accepted the transaction");
-  }) as never;
-  const tx = {
-    chainId: 8453,
-    to: from,
-    data: "0x" as Hex,
-    gas: 21_000n,
-    maxFeePerGas: 1n,
-    maxPriorityFeePerGas: 1n,
-    nonce,
-  };
-  await broadcastTx(chain, { tx, from, signed: "0x01" }, Number.MAX_SAFE_INTEGER).catch(() => undefined);
-  chain.broadcast = broadcast;
-}
-
 test("a top-up never replaces a transaction this run sent from the proposer that may still land, which may be a vote", async () => {
   const { chain, sent } = fakeChain(world());
   await sentNotMined(chain, PROPOSER, 0);
   assert.equal(await topUp(runOf(chain), until()), 1);
   assert.equal(sent.length, 0);
+});
+
+test("a top-up replaces a transaction this run sent from the proposer that no node holds any more", async () => {
+  const { chain, txs } = fakeChain(world());
+  await sentNotMined(chain, PROPOSER, 0, false);
+  assert.equal(await topUp(runOf(chain), until()), 0);
+  assert.equal(txs[0]?.nonce, 0, "at the nonce the dropped one held");
 });
 
 test("a transaction that would revert is not sent, and the proposer's USDC waits for the next top-up", async () => {
@@ -628,10 +606,10 @@ test("a transaction that would revert is not sent, and the proposer's USDC waits
 test("a top-up transaction whose outcome is unknown does not hold up the proposer's vote: it replaces it", async () => {
   const { chain, txs } = fakeChain(world({ lost: "transfer" }));
   assert.equal(await topUp(runOf(chain), until()), 1);
-  assert.equal(await pendingVote(chain, v2Sender(chain)), undefined, "a transfer to the keeper is no vote");
+  assert.equal(await pendingVote(chain, immutableSender(chain)), undefined, "a transfer to the keeper is no vote");
   const lost = txs.at(-1)!;
   const vote = { pools: [addr(20)], weights: [1n] };
-  const { tx } = await prepareVote(chain, proposer, vote, false, undefined, v2Sender(chain));
+  const { tx } = await prepareVote(chain, proposer, vote, false, undefined, immutableSender(chain));
   assert.equal(tx.nonce, lost.nonce, "at its nonce");
   assert.ok(tx.maxFeePerGas * 4n >= lost.maxFeePerGas! * 5n, "a quarter more in fees");
   assert.ok(tx.maxPriorityFeePerGas * 4n >= lost.maxPriorityFeePerGas! * 5n, "and in tip");
