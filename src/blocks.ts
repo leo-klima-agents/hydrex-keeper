@@ -90,14 +90,11 @@ function timingOf(seen: Map<bigint, Seen>): Timing {
 
 /** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on the grid of `anchor`. */
 function targets(flip: number, anchor: number, gap: number): number[] {
-  const times: number[] = [];
-  for (let end = flip - (SECONDS - 1) * 1000; end <= flip; end += 1000) {
+  return Array.from({ length: SECONDS }, (_, i) => {
+    const end = flip - (SECONDS - 1 - i) * 1000;
     const last = anchor + Math.floor((end - 1 - anchor) / gap) * gap;
-    const start = end - 1000;
-    if (last < start) continue; // a second without a block
-    times.push(Math.max(last - SLACK * gap, last - Math.floor((last - start) / gap) * gap));
-  }
-  return times;
+    return last - SLACK * gap;
+  });
 }
 
 export async function watch(client: Client, blocks: Blocks, stop: () => boolean): Promise<void> {

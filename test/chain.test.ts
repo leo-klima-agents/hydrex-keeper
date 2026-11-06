@@ -204,49 +204,33 @@ test("readMany can send smaller chunks, a few at a time, and still keeps their o
   );
 });
 
-test("the last block before a time is found whatever the block time, near the head or an hour back", async () => {
+/** A chain whose block n came `gap` ms after block n - 1, with block 40,000,000 the latest. */
+function blocksOf(gap: bigint, stamped = true) {
   const head = 40_000_000n;
-  for (const seconds of [1n, 2n, 5n]) {
-    const timeOf = (n: bigint) => 1_790_812_800n - seconds * (head - n);
-    const client = {
-      getBlock: async (args?: { blockNumber?: bigint }) => {
-        const number = args?.blockNumber ?? head;
-        assert.ok(number <= head, "no block past the latest");
-        return { number, timestamp: timeOf(number) };
-      },
-    } as unknown as Client;
-    for (const back of [0n, 1n, 9n, 3_600n, 3_601n]) {
-      const time = timeOf(head) - back;
-      const found = await lastBlockBefore(client, time);
-      assert.ok(timeOf(found) < time && timeOf(found + 1n) >= time, `${seconds} s blocks, ${back} s back: ${found}`);
-    }
-  }
-});
-
-test("since Denim's 200 ms blocks, the last block before a time is worked out in three reads; before them, searched", async () => {
-  // Two-second blocks until block `denim`, then five a second, as on Base.
-  const [head, denim] = [40_000_000n, 39_000_000n];
-  const denimMs = 1_790_000_000_000n;
-  const msOf = (n: bigint) => (n >= denim ? denimMs + (n - denim) * 200n : denimMs - (denim - n) * 2_000n);
-  let reads = 0;
+  const msOf = (n: bigint) => 1_790_812_800_400n - (head - n) * gap;
+  const counter = { reads: 0 };
   const client = {
     getBlock: async (args?: { blockNumber?: bigint }) => {
-      reads++;
+      counter.reads++;
       const number = args?.blockNumber ?? head;
       assert.ok(number <= head, "no block past the latest");
       const ms = msOf(number);
-      return { number, timestamp: ms / 1000n, ...(number >= denim ? { timestampMs: `0x${ms.toString(16)}` } : {}) };
+      return { number, timestamp: ms / 1000n, ...(stamped ? { timestampMs: `0x${ms.toString(16)}` } : {}) };
     },
   } as unknown as Client;
-  const timeOf = (n: bigint) => msOf(n) / 1000n;
-  for (const back of [0n, 1n, 9n, 3_600n, 200_000n, 200_001n, 300_000n]) {
+  return { client, counter, head, timeOf: (n: bigint) => msOf(n) / 1000n };
+}
+
+test("the last block before a time is worked out from the latest one's time, and checked against the blocks around it", async () => {
+  const { client, counter, head, timeOf } = blocksOf(200n);
+  for (const back of [0n, 1n, 9n, 3_600n, 86_400n]) {
     const time = timeOf(head) - back;
-    reads = 0;
+    counter.reads = 0;
     const found = await lastBlockBefore(client, time);
     assert.ok(timeOf(found) < time && timeOf(found + 1n) >= time, `${back} s back: ${found}`);
-    if (time * 1000n > denimMs) assert.equal(reads, 3, `${back} s back, after Denim`);
+    assert.equal(counter.reads, 3, "the latest block, the one found and the one after it");
   }
-  reads = 0;
+  counter.reads = 0;
   const second = timeOf(head) - 60n;
   const [first, last] = await blocksBetween(client, second, second + 1n);
   assert.deepEqual(
@@ -254,5 +238,12 @@ test("since Denim's 200 ms blocks, the last block before a time is worked out in
     [second - 1n, second, second, second + 1n],
   );
   assert.equal(last - first, 4n, "five blocks in a second");
-  assert.equal(reads, 5, "one read of the latest block for both ends");
+  assert.equal(counter.reads, 5, "one read of the latest block for both ends");
+});
+
+test("without timestampMs, or with blocks not 200 ms apart, the lookup fails rather than give another block", async () => {
+  const unstamped = blocksOf(200n, false);
+  await assert.rejects(lastBlockBefore(unstamped.client, unstamped.timeOf(unstamped.head) - 10n), /has no timestampMs/);
+  const slower = blocksOf(2_000n);
+  await assert.rejects(lastBlockBefore(slower.client, slower.timeOf(slower.head) - 10n), /are not either side of/);
 });

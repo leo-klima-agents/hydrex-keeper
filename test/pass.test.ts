@@ -51,19 +51,31 @@ test("a conduit's vote of a day before is in if the Voter shows one now, and for
   const [KLIMA, V2, PROPOSER, OTHER] = [addr(1), addr(2), addr(3), addr(4)];
   const lastVoted = new Map<Address, bigint>();
   let proposer = PROPOSER;
-  const head = { number: 100_000n, timestamp: flip - DAY + 7_200n };
+  // Blocks 200 ms apart, as on Base.
+  const head = { number: 100_000n, ms: (flip - DAY + 7_200n) * 1000n };
+  const msOf = (n: bigint) => head.ms - 200n * (head.number - n);
   const client = {
     multicall: async ({ contracts }: { contracts: { args: [Address] }[] }) =>
       contracts.map(({ args }) => lastVoted.get(args[0]) ?? 0n),
     getBlock: async (args?: { blockNumber?: bigint }) => {
       const number = args?.blockNumber ?? head.number;
-      return { number, timestamp: head.timestamp - 2n * (head.number - number) };
+      const ms = msOf(number);
+      return { number, timestamp: ms / 1000n, timestampMs: `0x${ms.toString(16)}` };
     },
-    getContractEvents: async ({ args, fromBlock }: { args: { proposer: Address }; fromBlock: bigint }) => {
-      assert.equal(
-        head.timestamp - 2n * (head.number - fromBlock),
-        lastVoted.get(V2),
-        "the block of the vote in force",
+    getContractEvents: async ({
+      args,
+      fromBlock,
+      toBlock,
+    }: {
+      args: { proposer: Address };
+      fromBlock: bigint;
+      toBlock: bigint;
+    }) => {
+      const voted = lastVoted.get(V2)!;
+      assert.deepEqual(
+        [msOf(fromBlock - 1n) / 1000n, msOf(fromBlock) / 1000n, msOf(toBlock) / 1000n, msOf(toBlock + 1n) / 1000n],
+        [voted - 1n, voted, voted, voted + 1n],
+        "every block of the second of the vote in force",
       );
       return args.proposer === proposer ? [{}] : [];
     },

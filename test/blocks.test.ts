@@ -51,13 +51,6 @@ test("blocks seen late, from a lagging RPC or a sequencer behind its schedule, n
   assert.deepEqual(blocks.timing, { gap: 200, seal: 0, lead: 400 });
 });
 
-test("with blocks a second apart or more, a second gets its only block, and a second without one none", () => {
-  const blocks = new Blocks();
-  const now = feed(blocks, every(flip - 61_000, 2_000, 10));
-  assert.equal(blocks.timing.gap, 2_000);
-  assert.deepEqual(targets(blocks, now), [-1_000]);
-});
-
 test("when polls stop, the block being built is extrapolated; before any poll, nothing is known", () => {
   const blocks = new Blocks();
   assert.equal(blocks.building(flip), undefined);

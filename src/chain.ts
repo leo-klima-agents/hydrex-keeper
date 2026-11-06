@@ -241,36 +241,26 @@ export async function blocksBetween(client: Client, from: bigint, to: bigint): P
   return [before + 1n, last];
 }
 
+/**
+ * The last block before `time` (s), worked out from the latest block's time, since blocks come every BLOCK_MS. The
+ * blocks either side of `time` are read to confirm it, and the lookup fails rather than give another block.
+ */
 export async function lastBlockBefore(client: Client, time: bigint, latest?: Head): Promise<bigint> {
   const head = latest ?? (await client.getBlock());
   if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
-  const before = async (blockNumber: bigint) => (await client.getBlock({ blockNumber })).timestamp < time;
-  // Exact when every block since `time` came 200 ms after its parent, as Base's blocks do since Denim. Otherwise, the
-  // search below corrects it.
-  const estimate = head.number - (BigInt(msAt(head)) - time * 1000n) / BigInt(BLOCK_MS) - 1n;
-  let lo = estimate < 0n ? 0n : estimate < head.number ? estimate : head.number - 1n;
-  let hi = lo + 1n;
-  const [loBefore, hiBefore] = await Promise.all([before(lo), before(hi)]);
-  if (!loBefore) {
-    for (let step = 1n; ; step *= 2n) {
-      hi = lo;
-      lo = hi > step ? hi - step : 0n;
-      if (await before(lo)) break;
-      if (lo === 0n) throw new Error(`no block before ${time}`);
-    }
-  } else if (hiBefore) {
-    for (let step = 1n; ; step *= 2n) {
-      lo = hi;
-      hi = lo + step < head.number ? lo + step : head.number;
-      if (!(await before(hi))) break;
-    }
+  const ms = msOf(head);
+  if (ms === undefined) throw new Error(`block ${head.number} has no timestampMs`);
+  const found = head.number - (BigInt(ms) - time * 1000n) / BigInt(BLOCK_MS) - 1n;
+  const [block, next] = await Promise.all([
+    client.getBlock({ blockNumber: found }),
+    client.getBlock({ blockNumber: found + 1n }),
+  ]);
+  if (block.timestamp >= time || next.timestamp < time) {
+    throw new Error(
+      `blocks ${found} and ${found + 1n}, at ${block.timestamp} and ${next.timestamp}, are not either side of ${time}`,
+    );
   }
-  while (hi - lo > 1n) {
-    const mid = (lo + hi) / 2n;
-    if (await before(mid)) lo = mid;
-    else hi = mid;
-  }
-  return lo;
+  return found;
 }
 
 async function multicall(
