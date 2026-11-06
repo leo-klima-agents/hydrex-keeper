@@ -33,8 +33,3 @@ if [ "$verb" = update ] && [ "$(json_field "$scheduler" .state)" = PAUSED ]; the
   log "resuming the schedule"
   gcloud scheduler jobs resume "$JOB" --location="$REGION" --project="$KEEPER_PROJECT"
 fi
-stale=$(stale_schedulers)
-for name in $stale; do
-  log "deleting stale scheduler job $name"
-  gcloud scheduler jobs delete "$name" --location="$REGION" --project="$KEEPER_PROJECT" --quiet
-done

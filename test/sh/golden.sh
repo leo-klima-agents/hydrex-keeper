@@ -63,8 +63,7 @@ golden_case setup-list-fails list-fails keeper setup.sh
 golden_case deploy-no-secret fresh keeper deploy.sh
 golden_case deploy-first first-deploy keeper deploy.sh
 golden_case deploy-existing existing keeper deploy.sh
-golden_case deploy-stale drift keeper deploy.sh
-golden_case deploy-list-fails list-fails keeper deploy.sh
+golden_case deploy-drift drift keeper deploy.sh
 golden_case deploy-coingecko existing coingecko deploy.sh
 golden_case run-dry existing keeper run.sh --dry-run --now
 golden_case run-claim existing keeper run.sh --dry-run --claim

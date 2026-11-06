@@ -59,8 +59,6 @@ if scheduler=$(describe_scheduler "$JOB"); then
 else
   fail "scheduler job $JOB not found; run deploy.sh"
 fi
-stale=$(stale_schedulers)
-if [ -z "$stale" ]; then ok "no stale scheduler job"; else fail "stale scheduler jobs: $stale"; fi
 
 for secret in $SECRET_NAMES; do
   if has_version "$secret"; then ok "$secret has an enabled version"; else fail "$secret has no enabled version"; fi

@@ -236,19 +236,8 @@ case "$*" in
     [ "$has_scheduler" = yes ] || missing "$4"
     scheduler_json "$4"
     ;;
-  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs resume "* | "scheduler jobs delete "*)
+  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs resume "*)
     log_call "$@"
-    ;;
-  "scheduler jobs list "*)
-    log_call "$@"
-    [ "$list_fails" = no ] || {
-      printf 'ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED\n' >&2
-      exit 1
-    }
-    names=''
-    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job\""
-    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/other-job\""
-    printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
     ;;
   "projects get-iam-policy "*)
     log_call "$@"
