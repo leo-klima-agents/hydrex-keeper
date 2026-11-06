@@ -173,12 +173,12 @@ test("with the immutable conduit, readVotes also reads its votes and power, in o
   }
 });
 
-test("asked for the block being built, readVotes reads it", async () => {
+test("readVotes reads the latest block, as Base has had no pending block since Denim", async () => {
   const chain = fakeChain(table);
   const rewards = await readRewards(chain, [TOK_1]);
   blockTags.length = 0;
-  await readVotes(chain, rewards, "pending");
-  assert.deepEqual(blockTags, ["pending"]);
+  await readVotes(chain, rewards);
+  assert.deepEqual(blockTags, [undefined]);
 });
 
 test("readEpoch reads the epoch and the power at the calendar epoch in one round trip", async (t) => {

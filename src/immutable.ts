@@ -54,23 +54,14 @@ export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] 
 }
 
 /** Fails while the conduit can't vote. */
-export async function readValues(
-  { v2 }: Chain,
-  client: Client,
-  pools: Address[],
-  blockTag?: "pending",
-): Promise<Map<Address, number>> {
+export async function readValues({ v2 }: Chain, client: Client, pools: Address[]): Promise<Map<Address, number>> {
   const calls = pools.map((pool) => v2Call(v2!.conduit, "poolValue", [pool]));
-  const values = await readMany<bigint>(client, calls, {
-    blockTag,
-    chunk: VALUE_CHUNK,
-    concurrency: VALUE_CONCURRENCY,
-  });
+  const values = await readMany<bigint>(client, calls, { chunk: VALUE_CHUNK, concurrency: VALUE_CONCURRENCY });
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
 
-export async function readScore({ v2 }: Chain, client: Client, blockTag?: "pending"): Promise<number> {
-  const [current] = await readMany<bigint>(client, [v2Call(v2!.conduit, "currentScore")], { blockTag });
+export async function readScore({ v2 }: Chain, client: Client): Promise<number> {
+  const [current] = await readMany<bigint>(client, [v2Call(v2!.conduit, "currentScore")]);
   return usd(current!);
 }
 

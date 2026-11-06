@@ -128,7 +128,7 @@ export async function readRewards(chain: Chain, tokens: Address[]): Promise<Pool
  * Up to 331 pools, or 498 without the immutable conduit, fit in one eth_call, so every vote is read from the same
  * block.
  */
-export async function readVotes(chain: Chain, pools: PoolRewards[], blockTag?: "pending"): Promise<State> {
+export async function readVotes(chain: Chain, pools: PoolRewards[]): Promise<State> {
   const { conduit, v2 } = chain;
   const epochs = epochCalls(chain, calendarEpoch());
   const perPool = (pool: Address) => [
@@ -137,9 +137,7 @@ export async function readVotes(chain: Chain, pools: PoolRewards[], blockTag?: "
     ...(v2 ? [voterCall(chain, "votes", [v2.conduit, pool])] : []),
   ];
   const stride = v2 ? 3 : 2;
-  const results = await readMany<bigint>(chain.client, [...epochs, ...pools.flatMap(({ pool }) => perPool(pool))], {
-    blockTag,
-  });
+  const results = await readMany<bigint>(chain.client, [...epochs, ...pools.flatMap(({ pool }) => perPool(pool))]);
   const epoch = toEpoch(results.slice(0, epochs.length));
   return {
     epoch,

@@ -221,3 +221,28 @@ test("the last block before a time is found whatever the block time, near the he
     }
   }
 });
+
+test("since Denim's 200 ms blocks, the last block before a time is worked out in three reads; before them, searched", async () => {
+  // Two-second blocks until block `denim`, then five a second, as on Base.
+  const [head, denim] = [40_000_000n, 39_000_000n];
+  const denimMs = 1_790_000_000_000n;
+  const msOf = (n: bigint) => (n >= denim ? denimMs + (n - denim) * 200n : denimMs - (denim - n) * 2_000n);
+  let reads = 0;
+  const client = {
+    getBlock: async (args?: { blockNumber?: bigint }) => {
+      reads++;
+      const number = args?.blockNumber ?? head;
+      assert.ok(number <= head, "no block past the latest");
+      const ms = msOf(number);
+      return { number, timestamp: ms / 1000n, ...(number >= denim ? { timestampMs: `0x${ms.toString(16)}` } : {}) };
+    },
+  } as unknown as Client;
+  const timeOf = (n: bigint) => msOf(n) / 1000n;
+  for (const back of [0n, 1n, 9n, 3_600n, 200_000n, 200_001n, 300_000n]) {
+    const time = timeOf(head) - back;
+    reads = 0;
+    const found = await lastBlockBefore(client, time);
+    assert.ok(timeOf(found) < time && timeOf(found + 1n) >= time, `${back} s back: ${found}`);
+    if (time * 1000n > denimMs) assert.equal(reads, 3, `${back} s back, after Denim`);
+  }
+});

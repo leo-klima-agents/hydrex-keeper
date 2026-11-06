@@ -391,7 +391,7 @@ test("the immutable conduit's votes are prepared through a client of their own, 
   );
 });
 
-test("an immutable conduit's vote that another vote beat to its block is decided again, not reported as sent", async () => {
+test("an immutable conduit's vote that another vote beat to its second is decided again, not reported as sent", async () => {
   const beatenTo = (lastVoted?: bigint) => {
     const { chain } = fakeChain({ receipt: "reverted", ...(lastVoted ? { lastVoted } : {}) });
     chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
@@ -400,7 +400,7 @@ test("an immutable conduit's vote that another vote beat to its block is decided
   const beaten = beatenTo(MINED_AT);
   await assert.rejects(
     castVote(beaten, proposer, vote, false, far, v2Sender(beaten)),
-    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its block/.test(e.message),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its second/.test(e.message),
   );
   const next = await prepareVote(beaten, proposer, vote, false, undefined, v2Sender(beaten));
   assert.equal(next.tx.nonce, 8, "past the one the reverted vote took");
@@ -456,8 +456,8 @@ test("another conduit's vote is checked after the keeper's while that one may st
   assert.equal(await pendingAfter({ nonce: 3, pending: 4, reverts: true }), undefined, "it was never sent");
 });
 
-test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer", async () => {
-  const VOTED = 1_790_812_000n; // timestamp of block 100
+test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer in that second", async () => {
+  const VOTED = 1_790_812_000n; // timestamp of blocks 100 to 104, 200 ms apart as on Base since Denim
   type Filter = {
     address: Address;
     eventName: string;
@@ -469,10 +469,11 @@ test("the immutable conduit's vote in force is the proposer's only if the condui
     const client = {
       getBlock: async (args?: { blockNumber?: bigint }) => {
         const number = args?.blockNumber ?? 130n;
-        return { number, timestamp: VOTED + (number - 100n) * 2n };
+        const ms = VOTED * 1000n + (number - 100n) * 200n;
+        return { number, timestamp: ms / 1000n, timestampMs: `0x${ms.toString(16)}` };
       },
       getContractEvents: async ({ address, eventName, args, fromBlock, toBlock }: Filter) => {
-        assert.deepEqual([address, eventName, fromBlock, toBlock], [V2, "VoteAccepted", 100n, 100n]);
+        assert.deepEqual([address, eventName, fromBlock, toBlock], [V2, "VoteAccepted", 100n, 104n]);
         return proposers.filter((p) => p === args.proposer).map(() => ({}));
       },
     } as unknown as Client;

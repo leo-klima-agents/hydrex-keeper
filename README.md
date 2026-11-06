@@ -17,10 +17,12 @@ Wednesdays at 23:50 UTC.
 
 - **Tuesday:** the job tops up its keys, then votes a day before the flip. That vote splits the votes in proportion to
   each pool's rewards, and stays in place if anything goes wrong later.
-- **Wednesday:** the job votes again in the last two blocks before the flip, for the largest expected reward. `x` votes
-  on a pool that has `V` votes from others and `usd` of rewards earn `usd × x / (V + x)`. It reads the votes in the
-  block being built and sends each vote about 0.8 s before that block's timestamp. It only replaces the vote in force
-  when the new one earns at least $1 more. After the flip, it checks that its votes landed, then claims.
+- **Wednesday:** the job votes again in the last two seconds before the flip, for the largest expected reward. `x` votes
+  on a pool that has `V` votes from others and `usd` of rewards earn `usd × x / (V + x)`. Base makes five blocks a
+  second, but the Voter takes one vote per conduit per second. So the job votes in each of the last two seconds, in the
+  block before that second's last, so that a vote that lands a block late still counts. It reads the votes in the latest
+  block, and sends each vote about 0.4 s before its block's time. It only replaces the vote in force when the new one
+  earns at least $1 more. After the flip, it checks that its votes landed, then claims.
 
 Rewards are this epoch's bribes and fees in pools with a live gauge, counted only in the tokens of `tokens.json` and
 priced in USD. A vote leaves out pools that would get under 0.1% of the votes, and keeps at most 40 pools, because each
@@ -183,15 +185,15 @@ to include the immutable conduit and the top-up.
 
 ## Limitations
 
-- The expected reward assumes the other votes stay where they are. The last-block vote misses votes sent in the last 2
-  seconds or so.
+- The expected reward assumes the other votes stay where they are. The last-block vote misses votes that land in the
+  last second or so.
 - A claim takes everything the chosen pools owe a veNFT, including what it earned before delegating to the conduit.
   Rewards that never add up to $5 are never claimed.
 - Swaps lose more as they grow, about 4.5% for $1,000 of USDC. Each swap also raises kVCM's price for the next claims,
   so the smallest claims, which go last, get slightly less kVCM.
-- Anyone can vote for the immutable conduit, and the Voter takes one of its votes per block. Someone who votes for it in
-  every block near the flip can keep the job's vote out, though each of their votes must beat the last by $1. The job
-  doesn't bid against them yet.
+- Anyone can vote for the immutable conduit, and the Voter takes one of its votes per second. Someone who votes for it
+  early in every second near the flip can keep the job's vote out, though each of their votes must beat the last by $1.
+  The job doesn't bid against them yet.
 
 ## License
 

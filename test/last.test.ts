@@ -22,28 +22,30 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 
 const flip = 1_790_812_800_000;
 const start = flip - 40_000;
-const numberOf = (time: number) => 1_000_000 + (time - flip - 1000) / 2000;
+const numberOf = (time: number) => 1_000_000 + (time - flip) / 200;
 
-type Chain = { dead?: number; frozen?: number; past?: number };
+type Chain = { dead?: number; frozen?: number; past?: number; seal?: number };
 
 /**
- * Fakes Base's timing: a block every odd second, built in sub-blocks 155 ms apart, the last one 450 ms before the
- * block's timestamp. Polls take 40 ms. They hang from `dead`, stop advancing from `frozen`, and see a block after the
- * flip from `past`.
+ * Fakes Base's timing since Denim: a block every 200 ms, first seen `seal` ms after its time. Polls take 40 ms. They
+ * hang from `dead`, stop advancing from `frozen`, and see a block after the flip from `past`.
  */
-function client({ dead = Infinity, frozen = Infinity, past = Infinity }: Chain): Client {
-  const pending = (at: number) => {
-    const time =
-      at >= past ? flip + 1000 : flip + 1000 + 2000 * (Math.floor((Math.min(at, frozen) - flip - 1000) / 2000) + 1);
-    const txs = 1 + Math.max(0, Math.min(10, Math.floor((Math.min(at, frozen) - time + 2000) / 155)));
+function client({ dead = Infinity, frozen = Infinity, past = Infinity, seal = 0 }: Chain): Client {
+  const latest = (at: number) => {
+    const time = at >= past ? flip + 200 : 200 * Math.floor((Math.min(at, frozen) - seal) / 200);
     const hex = (n: number) => `0x${n.toString(16)}`;
-    return { number: hex(numberOf(time)), timestamp: hex(time / 1000), transactions: Array<string>(txs).fill("0x") };
+    return {
+      number: hex(numberOf(time)),
+      timestamp: hex(Math.floor(time / 1000)),
+      timestampMs: hex(time),
+      transactions: [],
+    };
   };
   return {
     request: async () => {
       if (Date.now() >= dead) return new Promise(() => {});
       await sleep(20);
-      const block = pending(Date.now());
+      const block = latest(Date.now());
       await sleep(20);
       return block;
     },
@@ -93,7 +95,7 @@ async function run(
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: start });
   const blocks = new Blocks();
   const seed = flip - 41_000;
-  blocks.observe({ number: BigInt(numberOf(seed)), timestamp: BigInt(seed / 1000), txs: 0 }, start);
+  blocks.observe({ number: BigInt(numberOf(seed)), time: seed }, start);
   let watching = !seedOnly;
   const watcher = watching ? watch(client(chain), blocks, () => !watching) : Promise.resolve();
   const sent: { time: number; at: number; plan: Plan | undefined; other?: Plan | undefined }[] = [];
@@ -116,18 +118,18 @@ async function run(
   return sent;
 }
 
-/** Whether a send came between 850 ms before its block's timestamp and 150 ms before the block's last sub-block. */
-const inTime = ({ time, at }: { time: number; at: number }) => at >= time - 850 && at <= time - 605 - 150;
+/** Whether a send came at its deadline, 400 ms before its block's time. */
+const inTime = ({ time, at }: { time: number; at: number }) => at >= time - 400 && at <= time - 380;
 
 const warmUp: Plan = { readAt: 0, time: 0, vote: null, note: "warm-up", summary: {} };
 
-test("votes in the last two blocks, each just before its last sub-block starts, with a fresh plan", async (t) => {
+test("votes once in each of the last two seconds, in the block before each second's last, with a fresh plan", async (t) => {
   const sent = await run(t);
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-3000, -1000],
+    [-1400, -400],
   );
-  for (const s of sent) assert.ok(inTime(s), `sent ${s.at - s.time} ms from the timestamp`);
+  for (const s of sent) assert.ok(inTime(s), `sent ${s.at - s.time} ms from its block's time`);
   for (const s of sent) assert.ok(s.at - (s.plan!.readAt - flip) < 300, "a fresh plan");
 });
 
@@ -136,37 +138,52 @@ test("polls that hang or freeze leave the timing learned before to place the vot
     const sent = await run(t, { chain });
     assert.deepEqual(
       sent.map((s) => s.time),
-      [-3000, -1000],
+      [-1400, -400],
     );
     assert.ok(sent.every(inTime));
   }
 });
 
-test("with only the block seen at the start, votes half a gap before each of the last two blocks", async (t) => {
+test("blocks seen before their time get votes sent earlier, and blocks seen late none later", async (t) => {
+  const early = await run(t, { chain: { seal: -100 } });
+  assert.deepEqual(
+    early.map((s) => s.time),
+    [-1400, -400],
+  );
+  for (const s of early) assert.ok(s.at >= s.time - 500 && s.at < s.time - 400, `sent ${s.at - s.time} ms before`);
+  const late = await run(t, { chain: { seal: 300 } });
+  assert.ok(late.length === 2 && late.every(inTime));
+});
+
+test("with only the block seen at the start, votes at Base's block time", async (t) => {
   const sent = await run(t, { seedOnly: true });
   assert.deepEqual(
     sent.map((s) => [s.time, s.at]),
     [
-      [-3000, -4000],
-      [-1000, -2000],
+      [-1400, -1800],
+      [-400, -800],
     ],
   );
 });
 
 test("a chain seen past the flip gets no more votes", async (t) => {
-  const sent = await run(t, { chain: { past: flip - 2_500 } });
+  const sent = await run(t, { chain: { past: flip - 1_500 } });
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-3000],
+    [-1400],
   );
 });
 
-test("started late, votes at once in the block still being built, and not in a sealed one", async (t) => {
-  const sent = await run(t, { raceAt: flip - 1_500 });
+test("started late, votes at once in a block still open, and never in a sealed one", async (t) => {
+  const late = await run(t, { raceAt: flip - 1_500 });
   assert.deepEqual(
-    sent.map((s) => [s.time, s.at]),
-    [[-1000, -1500]],
+    late.map((s) => [s.time, s.at]),
+    [
+      [-1400, -1500],
+      [-400, -800],
+    ],
   );
+  assert.deepEqual(await run(t, { raceAt: flip - 350 }), [], "the last second's block is sealed");
 });
 
 test("a plan that hangs is overtaken; when all hang or fail, the last that came back, or the warm-up's, is sent", async (t) => {
@@ -189,7 +206,7 @@ test("lanes plan apart: one that only fails holds back no plan of the other", as
   const sent = await run(t, { behave: () => "fail", other: () => "ok" });
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-3000, -1000],
+    [-1400, -400],
   );
   for (const s of sent) {
     assert.equal(s.plan, undefined, "the failing lane has nothing to send");
@@ -277,7 +294,7 @@ test("alone, the Klima conduit sends its freshest plan that answered the immutab
   assert.deepEqual(readAts(allAnswering), { klima: 300, v2: undefined, unchecked: true }, "else its freshest");
 });
 
-test("the immutable conduit's values: the last read, read again in the background once per block", async (t) => {
+test("the immutable conduit's values: the last read, read again in the background once per key", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 0 });
   let reads = 0;
   let fails = false;
@@ -297,8 +314,8 @@ test("the immutable conduit's values: the last read, read again in the backgroun
   await answer();
   assert.deepEqual(await first, { value: 1, version: 1 }, "the first call waits");
   assert.deepEqual(await values(1), { value: 1, version: 1 });
-  assert.equal(reads, 1, "once per block");
-  assert.deepEqual(await values(3), { value: 1, version: 1 }, "the last values while the next block's are read");
+  assert.equal(reads, 1, "once per key");
+  assert.deepEqual(await values(3), { value: 1, version: 1 }, "the last values while new ones are read");
   await values(5);
   assert.equal(reads, 2, "one read at a time");
   await answer();
@@ -381,11 +398,13 @@ test("an immutable conduit's vote is known to be in once the Voter shows its vot
   assert.deepEqual(landed(state([0n, 0n]), [{ ...klima, votes: undefined }]), [], "not the immutable conduit's");
 });
 
-// Block n has timestamp 1 + 2n, so blocks fall on odd seconds and the last one before an even flip is at flip - 1.
+// As on Base since Denim, block n comes at 200n ms, so five blocks share each second and the last one before the flip
+// is 200 ms before it.
 const FLIP = 1_790_812_800n;
-const LAST = (FLIP - 2n) / 2n;
-const timeOf = (n: bigint) => 1n + 2n * n;
+const LAST = FLIP * 5n - 1n;
+const timeOf = (n: bigint) => n / 5n;
 const [KLIMA, V2, POOL] = [addr(1), addr(2), addr(3)];
+let blockReads = 0;
 
 /** For the first `behind` reads, the latest block is still before the flip. */
 function outcomeChain(
@@ -400,8 +419,9 @@ function outcomeChain(
       return { ...receipt, transactionHash: hash };
     },
     getBlock: async (args?: { blockNumber?: bigint }) => {
-      const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 6n); // 11 s after the flip
-      return { number, timestamp: timeOf(number) };
+      blockReads++;
+      const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 56n); // 11 s after the flip
+      return { number, timestamp: timeOf(number), timestampMs: `0x${(200n * number).toString(16)}` };
     },
     multicall: async ({
       contracts,
@@ -431,19 +451,21 @@ function outcomeChain(
   return { chain, dryRun: false } as unknown as Run;
 }
 
-test("the last block before a time is found from the latest one", async () => {
+test("the last block before a time is worked out from the latest one's time in ms, then checked", async () => {
   const run = outcomeChain({}, () => 0n);
+  blockReads = 0;
   assert.equal(await lastBlockBefore(run.chain.client, FLIP), LAST);
-  assert.equal(await lastBlockBefore(run.chain.client, FLIP - 1n), LAST - 1n, "strictly before");
+  assert.equal(blockReads, 3, "the latest block, then the one found and the one after it");
+  assert.equal(await lastBlockBefore(run.chain.client, FLIP - 1n), LAST - 5n, "strictly before");
 });
 
-test("each conduit's vote this epoch is read at the last block before the flip, and an open conduit's lost block is no failure", async () => {
+test("each conduit's vote this epoch is read at the last block before the flip, and an open conduit's lost second is no failure", async () => {
   const vote = { pools: [POOL], weights: [1n] };
   const [klimaHash, v2Hash]: [Hex, Hex] = ["0xaa", "0xbb"];
   const run = outcomeChain(
     { [klimaHash]: { status: "success", blockNumber: LAST }, [v2Hash]: { status: "reverted", blockNumber: LAST - 1n } },
-    // Someone else voted for the immutable conduit earlier in our vote's block, and again after the flip.
-    (conduit, block) => (conduit === V2 ? (block > LAST ? FLIP + 1n : timeOf(LAST - 1n)) : timeOf(LAST)),
+    // Someone else voted for the immutable conduit two blocks before ours, in the same second, and again after the flip.
+    (conduit, block) => (conduit === V2 ? (block > LAST ? FLIP + 1n : timeOf(LAST - 3n)) : timeOf(LAST)),
   );
   const sent = [
     { hash: klimaHash, vote, nonce: 1, sender: klimaSender(run.chain) },

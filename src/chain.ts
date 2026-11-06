@@ -22,11 +22,25 @@ export const CHUNK = 1_000; // calls per eth_call. publicnode accepts 1,132 and 
 export const HEDGE_DELAY_MS = 250; // a healthy node answers a read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
-const BLOCK_SECONDS = 2n;
+const BLOCK_MS = 200n; // Base's block time since its Denim upgrade
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
+
+/**
+ * A block's time in ms. Since Base's Denim upgrade, five blocks share each second of `timestamp`, and RPCs add the full
+ * time as `timestampMs`, which viem passes on as it came.
+ */
+export function msOf(block: object): number | undefined {
+  const { timestampMs } = block as { timestampMs?: unknown };
+  if (typeof timestampMs !== "string") return undefined;
+  try {
+    return Number(BigInt(timestampMs));
+  } catch {
+    return undefined;
+  }
+}
 
 export const lower = (address: Address) => address.toLowerCase() as Address;
 
@@ -177,7 +191,6 @@ export const voterCall = ({ voter }: Chain, functionName: string, args?: readonl
 
 type ReadOptions = {
   blockNumber?: bigint;
-  blockTag?: "pending" | undefined;
   chunk?: number;
   concurrency?: number;
 };
@@ -220,7 +233,10 @@ export async function lastBlockBefore(client: Client, time: bigint): Promise<big
   const head = await client.getBlock();
   if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
   const before = async (blockNumber: bigint) => (await client.getBlock({ blockNumber })).timestamp < time;
-  const estimate = head.number - (head.timestamp - time) / BLOCK_SECONDS - 1n;
+  // Exact when every block since `time` came 200 ms after its parent, as Base's blocks do since Denim. Otherwise, the
+  // search below corrects it.
+  const headMs = BigInt(msOf(head) ?? Number(head.timestamp) * 1000);
+  const estimate = head.number - (headMs - time * 1000n) / BLOCK_MS - 1n;
   let lo = estimate < 0n ? 0n : estimate < head.number ? estimate : head.number - 1n;
   let hi = lo + 1n;
   const [loBefore, hiBefore] = await Promise.all([before(lo), before(hi)]);
@@ -250,9 +266,9 @@ async function multicall(
   client: Client,
   calls: readonly Call[],
   allowFailure: boolean,
-  { blockNumber, blockTag, chunk = CHUNK, concurrency = Infinity }: ReadOptions,
+  { blockNumber, chunk = CHUNK, concurrency = Infinity }: ReadOptions,
 ): Promise<unknown[]> {
-  const at = blockNumber !== undefined ? { blockNumber } : blockTag ? { blockTag } : {};
+  const at = blockNumber !== undefined ? { blockNumber } : {};
   const chunks = Array.from({ length: Math.ceil(calls.length / chunk) }, (_, i) =>
     calls.slice(i * chunk, (i + 1) * chunk),
   );

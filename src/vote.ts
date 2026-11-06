@@ -135,9 +135,9 @@ export async function prepareCall(
   { target, before = [], at, sender = klimaSender(chain), rival }: CallOptions = {},
 ) {
   // Votes are simulated just after the latest block, at a time kept inside the epoch. The latest block may already be
-  // the one a last-block vote is for, that block is one second before the flip, and the immutable conduit refuses votes
-  // from the next epoch. Votes without a target also name the latest block by number, because a node further ahead
-  // would refuse a time before its own latest block. Claims need no time.
+  // in the second a last-block vote is for, the last one before the flip, and the immutable conduit refuses votes from
+  // the next epoch. Nodes accept the latest block's own second. Votes without a target also name the latest block by
+  // number, because a node further ahead would refuse a time before its own latest block. Claims need no time.
   const head = call.functionName === "vote" && !target ? await sender.client.getBlock() : undefined;
   const time = target?.time ?? head?.timestamp;
   // For a conduit only the sender votes for, a `lastVoted` newer than the one our last vote was decided on means that
@@ -206,8 +206,9 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: from, blockTag: "latest" }),
+    // Base no longer has a pending block, but a node may still count the transactions in its mempool here.
     client.getTransactionCount({ address: from, blockTag: "pending" }),
-    client.getBalance({ address: from, blockTag: "pending" }),
+    client.getBalance({ address: from }),
     client.estimateL1Fee({ account: from, to, data, ...(value ? { value } : {}) }),
   ]);
   const simulated = block!.calls.at(-1)!;
@@ -316,8 +317,8 @@ export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: n
 }
 
 /**
- * Whether `nonce` is already used in the pending block. A vote decided before the one it replaces landed would reuse
- * that nonce, and nodes refuse it.
+ * Whether `nonce` is already used, in a block or, if the node counts it, in its mempool. A vote decided before the one
+ * it replaces landed would reuse that nonce, and nodes refuse it.
  */
 export async function nonceTaken({ client, keeper }: Chain, nonce: number, from: Address = keeper): Promise<boolean> {
   return client.getTransactionCount({ address: from, blockTag: "pending" }).then(
@@ -361,10 +362,10 @@ export async function castVote(
   }
   markMined(chain, prepared.tx.nonce, sender.from);
   if (receipt.status !== "success") {
-    // The Voter takes one vote per block for a conduit, and anyone can vote for an open one. When another vote took the
-    // block, the pass decides again against that vote.
-    const taken = sender.open && (await tookBlock(chain, conduit, receipt.blockNumber).catch(() => false));
-    if (taken) throw new Error(`vote ${hash} reverted: another vote for ${conduit} was first in its block; again`);
+    // The Voter takes one vote per second for a conduit, and anyone can vote for an open one. When another vote took
+    // the second, the pass decides again against that vote.
+    const taken = sender.open && (await tookSecond(chain, conduit, receipt.blockNumber).catch(() => false));
+    if (taken) throw new Error(`vote ${hash} reverted: another vote for ${conduit} was first in its second; again`);
     throw new VoteSent(`vote ${hash} reverted`);
   }
   await verifyVote(chain, vote, hash, receipt.blockNumber, sender.conduit);
@@ -375,7 +376,7 @@ export async function lastVotedAt(chain: Chain, conduit: Address, blockNumber: b
   return lastVoted!;
 }
 
-async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): Promise<boolean> {
+async function tookSecond(chain: Chain, conduit: Address, blockNumber: bigint): Promise<boolean> {
   const [{ timestamp }, lastVoted] = await Promise.all([
     chain.client.getBlock({ blockNumber }),
     lastVotedAt(chain, conduit, blockNumber),
@@ -385,17 +386,20 @@ async function tookBlock(chain: Chain, conduit: Address, blockNumber: bigint): P
 
 /**
  * Whether the immutable conduit's vote recorded at `lastVoted` (s) is the sender's. The Voter takes one vote per
- * conduit per block, so it is if the conduit accepted a vote the sender proposed in that block.
+ * conduit per second, so it is if the conduit accepted a vote the sender proposed in one of that second's blocks.
  */
 export async function votedAt({ client }: Chain, { from, conduit }: Sender, lastVoted: bigint): Promise<boolean> {
-  const block = await lastBlockBefore(client, lastVoted + 1n);
+  const [before, last] = await Promise.all([
+    lastBlockBefore(client, lastVoted),
+    lastBlockBefore(client, lastVoted + 1n),
+  ]);
   const accepted = await client.getContractEvents({
     address: conduit,
     abi: immutableAbi,
     eventName: "VoteAccepted",
     args: { proposer: from },
-    fromBlock: block,
-    toBlock: block,
+    fromBlock: before + 1n,
+    toBlock: last,
   });
   return accepted.length > 0;
 }

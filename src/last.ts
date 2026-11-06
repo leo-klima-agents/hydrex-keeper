@@ -7,7 +7,7 @@ import {
   type LocalAccount,
 } from "viem";
 import { Blocks, sleep, watch } from "./blocks.ts";
-import { lastBlockBefore, lower, readMany, voterCall, WEEK, type Chain } from "./chain.ts";
+import { lastBlockBefore, lower, msOf, readMany, voterCall, WEEK, type Chain } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
@@ -31,6 +31,7 @@ import {
 const WARMUP_MS = 60_000; // starts this long before the flip to learn the block timing
 const PRICES_BY_MS = 5_000; // before the flip
 const TICK_MS = 50;
+const PLAN_AHEAD_MS = 4_000; // before the first deadline
 const PLAN_EVERY_MS = 100;
 const MAX_PLANS = 3; // in flight per lane
 const RECENT = 30; // plans kept per lane, more than come back for one block
@@ -117,9 +118,8 @@ export async function race<P extends { readAt: number }>(
       await sleep(TICK_MS);
       continue;
     }
-    const { gap, lead } = blocks.timing;
-    const deadline = time - lead;
-    if (!planned && now >= deadline - 2 * gap) {
+    const deadline = time - blocks.timing.lead;
+    if (!planned && now >= deadline - PLAN_AHEAD_MS) {
       planned = true;
       log.info("planning", { block: time / 1000, secondsToDeadline: (deadline - now) / 1000, ...blocks.timing });
       for (const lane of lanes) void planning(lane);
@@ -211,24 +211,24 @@ export function pick(
 }
 
 /**
- * Gives the last value `read` returned. It reads again in the background once per block, on the first call with that
- * block's `time`, and REREAD_MS after a failed read, one read at a time. Only calls made before there is any value wait
- * for one, and for at most `wait` ms, so a hung read holds back no plan.
+ * Gives the last value `read` returned. It reads again in the background on the first call with a new `key`, and
+ * REREAD_MS after a failed read, one read at a time. Only calls made before there is any value wait for one, and for at
+ * most `wait` ms, so a hung read holds back no plan.
  */
 export function refreshed<T>(
   read: () => Promise<T>,
   unread: (error: unknown) => void,
   wait = FIRST_READ_WAIT_MS,
-): (time: number) => Promise<{ value: T; version: number } | undefined> {
+): (key: number) => Promise<{ value: T; version: number } | undefined> {
   let last: { value: T; version: number } | undefined;
-  let reading: { time: number; done: Promise<void>; settled: boolean; failedAt?: number } | undefined;
-  return async (time) => {
+  let reading: { key: number; done: Promise<void>; settled: boolean; failedAt?: number } | undefined;
+  return async (key) => {
     const failedAt = reading?.failedAt;
     const due =
       !reading ||
-      (reading.settled && (failedAt !== undefined ? Date.now() - failedAt >= REREAD_MS : reading.time !== time));
+      (reading.settled && (failedAt !== undefined ? Date.now() - failedAt >= REREAD_MS : reading.key !== key));
     if (due) {
-      const entry: NonNullable<typeof reading> = { time, done: Promise.resolve(), settled: false };
+      const entry: NonNullable<typeof reading> = { key, done: Promise.resolve(), settled: false };
       entry.done = read().then(
         (value) => {
           last = { value, version: (last?.version ?? 0) + 1 };
@@ -296,9 +296,11 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   ): Promise<Plan> => {
     const { readAt, time, vote } = base;
     if (!vote) return base;
-    if (Number(lastVoted) * 1000 >= time) return { ...base, note: "already voted in this block" };
+    // The Voter takes one vote per conduit per second, and five blocks share a second.
+    const second = BigInt(Math.floor(time / 1000));
+    if (lastVoted >= second) return { ...base, note: "already voted in this second" };
     if (reusable(best, base, lastVoted, rival?.vote)) return { ...best!, readAt, answered: base.answered };
-    const target = { time: BigInt(Math.floor(time / 1000)), lastVoted };
+    const target = { time: second, lastVoted };
     const prepared = await prepareVote(chain, signer, vote, dryRun, target, sender, rival);
     return { ...base, prepared, rival: rival?.vote };
   };
@@ -306,22 +308,22 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   // Two signatures of the same transaction differ, so copies are matched by the unsigned hash.
   const sent = new Map<Hex, Sent>();
 
-  // The pending block's votes, read once for the lanes that plan at about the same time. A plan is for the block that
-  // was being built when its read started.
+  // The latest block's votes, read once for the lanes that plan at about the same time. A plan is for the block of the
+  // next vote as of when its read started.
   let votes: { readAt: number; time: number; state: Promise<State> } | undefined;
   const votesNow = () => {
     const now = Date.now();
     if (!votes || now - votes.readAt >= SHARED_READ_MS) {
-      votes = { readAt: now, time: blocks.building(now) ?? now, state: readVotes(chain, rewards, "pending") };
+      votes = { readAt: now, time: blocks.upcoming(flipMs, now) ?? now, state: readVotes(chain, rewards) };
     }
     return votes;
   };
 
   // The immutable conduit's pool values barely move and are slow to read, so plans use the last ones, refreshed in the
-  // background once per block. Until the first values come, plans go without them, and the simulation checks their
+  // background once per second. Until the first values come, plans go without them, and the simulation checks their
   // votes. Its score of the vote in force changes with every vote, so it is read with each plan.
   const valuesNow = refreshed(
-    () => readValues(chain, chain.bulk, valued, "pending"),
+    () => readValues(chain, chain.bulk, valued),
     warnOnce("v2's values unread; its simulation checks the vote"),
   );
   const scoreUnread = warnOnce("v2's score unread; its simulation checks the vote");
@@ -342,8 +344,8 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       let decision = decidedV2(key, () => decideV2(state, usd, undefined));
       if (decision.vote) {
         const [values, current] = await Promise.all([
-          valuesNow(time),
-          readScore(chain, chain.v2Client, "pending").catch(scoreUnread),
+          valuesNow(Math.floor(readAt / 1000)),
+          readScore(chain, chain.v2Client).catch(scoreUnread),
         ]);
         if (values && current !== undefined) {
           const onchain = { values: values.value, current };
@@ -381,8 +383,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
 
   for (;;) {
     try {
-      const { number, timestamp } = await chain.client.getBlock();
-      blocks.observe({ number, timestamp, txs: 0 }, Date.now());
+      const head = await chain.client.getBlock();
+      const time = msOf(head);
+      if (time !== undefined) blocks.observe({ number: head.number, time }, Date.now());
       rewards = await readRewards(chain, tokensOf(run));
       priced = await run.prices(tokensOf(run), flipMs - PRICES_BY_MS);
       // Prices that value no reward fail here, and are fetched again.
@@ -501,9 +504,9 @@ export async function outcome(
       const { timestamp } = await chain.client.getBlock({ blockNumber: block });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);
       else if (receipt.status !== "success") {
-        // The Voter takes one vote per block for a conduit, and anyone can vote for an open one.
+        // The Voter takes one vote per second for a conduit, and anyone can vote for an open one.
         if (sender.open && (await lastVotedAt(chain, conduit, block)) === timestamp) {
-          log.warning("vote reverted: another vote for the conduit was first in its block", fields);
+          log.warning("vote reverted: another vote for the conduit was first in its second", fields);
         } else {
           failures++;
           log.error("vote reverted", fields);
