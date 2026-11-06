@@ -22,7 +22,7 @@ export const CHUNK = 1_000; // calls per eth_call. publicnode accepts 1,132 and 
 export const HEDGE_DELAY_MS = 250; // a healthy node answers a read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
-const BLOCK_MS = 200n; // Base's block time since its Denim upgrade
+export const BLOCK_MS = 200; // Base's block time since its Denim upgrade
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 
@@ -41,6 +41,9 @@ export function msOf(block: object): number | undefined {
     return undefined;
   }
 }
+
+/** A block's time in ms, or its second's when it has no `timestampMs`. */
+export const msAt = (block: { timestamp: bigint }) => msOf(block) ?? Number(block.timestamp) * 1000;
 
 export const lower = (address: Address) => address.toLowerCase() as Address;
 
@@ -229,14 +232,22 @@ export async function blockAtLeast({ client }: Chain, pinned?: bigint): Promise<
   return pinned !== undefined && latest < pinned ? pinned : latest;
 }
 
-export async function lastBlockBefore(client: Client, time: bigint): Promise<bigint> {
+type Head = { number: bigint; timestamp: bigint };
+
+/** The first and last blocks whose timestamps lie in [`from`, `to`), both found from one read of the latest block. */
+export async function blocksBetween(client: Client, from: bigint, to: bigint): Promise<[bigint, bigint]> {
   const head = await client.getBlock();
+  const [before, last] = await Promise.all([lastBlockBefore(client, from, head), lastBlockBefore(client, to, head)]);
+  return [before + 1n, last];
+}
+
+export async function lastBlockBefore(client: Client, time: bigint, latest?: Head): Promise<bigint> {
+  const head = latest ?? (await client.getBlock());
   if (head.timestamp < time) throw new Error(`the latest block, at ${head.timestamp}, is not past ${time} yet`);
   const before = async (blockNumber: bigint) => (await client.getBlock({ blockNumber })).timestamp < time;
   // Exact when every block since `time` came 200 ms after its parent, as Base's blocks do since Denim. Otherwise, the
   // search below corrects it.
-  const headMs = BigInt(msOf(head) ?? Number(head.timestamp) * 1000);
-  const estimate = head.number - (headMs - time * 1000n) / BLOCK_MS - 1n;
+  const estimate = head.number - (BigInt(msAt(head)) - time * 1000n) / BigInt(BLOCK_MS) - 1n;
   let lo = estimate < 0n ? 0n : estimate < head.number ? estimate : head.number - 1n;
   let hi = lo + 1n;
   const [loBefore, hiBefore] = await Promise.all([before(lo), before(hi)]);

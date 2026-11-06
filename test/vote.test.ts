@@ -5,7 +5,6 @@ import {
   decodeErrorResult,
   encodeFunctionData,
   encodeAbiParameters,
-  parseGwei,
   parseTransaction,
   toFunctionSelector,
   WaitForTransactionReceiptTimeoutError,
@@ -34,7 +33,6 @@ const signer = privateKeyToAccount(generatePrivateKey());
 
 type Behaviour = {
   nonce?: number;
-  pending?: number;
   congested?: boolean;
   topTip?: bigint;
   reverts?: boolean;
@@ -80,8 +78,7 @@ function fakeChain(b: Behaviour = {}) {
       gasUsedRatio: [b.congested ? 0.95 : 0.2, 0.3],
       reward: [[b.topTip ?? 400n], [300n]],
     }),
-    getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
-      blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
+    getTransactionCount: async () => b.nonce ?? 7,
     getBlock: async (args?: { blockNumber?: bigint }) => {
       if (args?.blockNumber === 42n) return { number: 42n, timestamp: MINED_AT };
       assert.equal(args, undefined, "the latest block");
@@ -132,8 +129,6 @@ function fakeChain(b: Behaviour = {}) {
 }
 
 const vote = { pools: [POOL], weights: [100n] };
-// The max fee of a vote in the last blocks: twice the base fee plus its tip floor.
-const LAST_FEE = 2n * 450n + parseGwei("0.02");
 const far = Date.now() + 3_600_000;
 
 test("signs with the confirmed nonce and twice the next base fee plus the tip, then verifies at the receipt block", async () => {
@@ -155,15 +150,6 @@ test("after a congested block, the tip rises to what the top of it paid, up to 0
   const capped = fakeChain({ congested: true, topTip: 10n ** 18n });
   await castVote(capped.chain, signer, vote, false, far);
   assert.equal(parseTransaction(capped.sent[0]!).maxPriorityFeePerGas, 100_000_000n);
-});
-
-test("a vote in the last blocks tips at least 0.02 gwei, and more after a congested block", async () => {
-  const target = { time: 1_790_812_799n, lastVoted: 0n };
-  const calm = await prepareVote(fakeChain().chain, signer, vote, false, target);
-  assert.equal(calm.tx.maxPriorityFeePerGas, parseGwei("0.02"));
-  assert.equal(calm.tx.maxFeePerGas, 2n * 450n + parseGwei("0.02"));
-  const crowded = fakeChain({ congested: true, topTip: parseGwei("0.05") }).chain;
-  assert.equal((await prepareVote(crowded, signer, vote, false, target)).tx.maxPriorityFeePerGas, parseGwei("0.05"));
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {
@@ -210,29 +196,14 @@ test("a dry run signs but never sends", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a pending vote of unknown fees is replaced at twice the fees; one this process sent at a quarter more", async () => {
-  const unknown = fakeChain({ nonce: 3, pending: 4 });
-  await castVote(unknown.chain, signer, vote, false, far);
-  const replacing = parseTransaction(unknown.sent[0]!);
-  assert.deepEqual([replacing.nonce, replacing.maxFeePerGas], [3, 2_000n], "replaced, not queued behind");
-  const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
-  await castVote(own.chain, signer, vote, false, far);
-  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
-  await castVote(own.chain, signer, vote, false, far);
-  const tx = parseTransaction(own.sent[1]!);
-  assert.equal(tx.nonce, 3);
-  assert.equal(tx.maxFeePerGas, 1_250n);
-});
-
 test("once the Voter shows a later vote than the sent one was decided on, the nonce moves past it", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
   const first = await prepareVote(chain, signer, vote, false, { time: 1_790_812_797n, lastVoted: 100n });
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const next = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 1_790_812_797n });
-  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, LAST_FEE], "next nonce, no bump: the node lags");
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, 1_000n], "next nonce, no bump: the node lags");
   const still = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 100n });
-  assert.deepEqual([still.tx.nonce, still.tx.maxFeePerGas], [3, (LAST_FEE * 5n) / 4n], "not yet in a block: replaced");
+  assert.deepEqual([still.tx.nonce, still.tx.maxFeePerGas], [3, 1_250n], "not yet in a block: replaced");
   assert.equal(sent.length, 1);
 });
 
@@ -251,15 +222,13 @@ test("once the receipt of the transaction sent last was seen, the nonce moves pa
 test("a send that fails still counts as this process's vote: it may have reached a node", async () => {
   const { chain, sent } = fakeChain({ nonce: 3, sendFails: true });
   await assert.rejects(castVote(chain, signer, vote, false, far), /no RPC accepted/);
-  chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
   await assert.rejects(castVote(chain, signer, vote, false, far));
   const tx = parseTransaction(sent[1]!);
   assert.deepEqual([tx.nonce, tx.maxFeePerGas], [3, 1_250n], "a quarter more than the recorded fees");
 });
 
-test("a nonce is taken once the keeper's nonce in the block being built is past it", async () => {
-  const { chain } = fakeChain({ nonce: 3, pending: 4 });
+test("a nonce is taken once the keeper's nonce in the latest block is past it", async () => {
+  const { chain } = fakeChain({ nonce: 4 });
   assert.equal(await nonceTaken(chain, 3), true);
   assert.equal(await nonceTaken(chain, 4), false);
   chain.client.getTransactionCount = (async () => {
@@ -270,14 +239,14 @@ test("a nonce is taken once the keeper's nonce in the block being built is past 
 
 test("before the last blocks, the keeper must be able to pay for a vote twice; in them, once", async () => {
   const cost = 150_000n * 1_000n + 5_000n; // gas limit times max fee, plus the L1 fee
-  const lastCost = 150_000n * LAST_FEE + 5_000n; // a vote in the last blocks tips more
   const target = { time: 1_790_812_799n, lastVoted: 0n };
   const short = fakeChain({ balance: 2n * cost - 1n });
   await assert.rejects(castVote(short.chain, signer, vote, false, far), /fund the keeper: .* needs 300010000:/);
   assert.equal(short.sent.length, 0);
-  await prepareVote(fakeChain({ balance: lastCost }).chain, signer, vote, false, target);
+  await prepareVote(short.chain, signer, vote, false, target);
+  await prepareVote(fakeChain({ balance: cost }).chain, signer, vote, false, target);
   await assert.rejects(
-    prepareVote(fakeChain({ balance: lastCost - 1n }).chain, signer, vote, false, target),
+    prepareVote(fakeChain({ balance: cost - 1n }).chain, signer, vote, false, target),
     /fund the keeper/,
   );
 });
@@ -374,7 +343,7 @@ test("anyone may vote for the immutable conduit, so a later vote of it does not 
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const target = { time: 1_790_812_799n, lastVoted: 1_790_812_797n };
   const next = await prepareVote(chain, proposer, vote, false, target, sender);
-  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [3, (LAST_FEE * 5n) / 4n], "replaced, not queued behind");
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [3, 1_250n], "replaced, not queued behind");
   markMined(chain, 3, proposer.address);
   const after = await prepareVote(chain, proposer, vote, false, target, sender);
   assert.equal(after.tx.nonce, 4, "its receipt still counts");
@@ -392,7 +361,7 @@ test("the immutable conduit's votes are prepared through a client of their own, 
   const next = await prepareVote(chain, proposer, vote, false, { ...target, time: 1_790_812_799n }, v2Sender(chain));
   assert.deepEqual(
     [next.tx.nonce, next.tx.maxFeePerGas],
-    [3, (LAST_FEE * 5n) / 4n],
+    [3, 1_250n],
     "the vote it sent is replaced, not queued behind",
   );
   await prepareVote(chain, signer, vote, false, target);
@@ -459,13 +428,19 @@ test("another conduit's vote is checked after the keeper's while that one may st
     await castVote(chain, signer, vote, false, far).catch(() => undefined);
     return pendingVote(chain, klimaSender(chain));
   };
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "lost" }), vote, "its outcome unknown");
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "timeout" }), vote, "not in a block yet");
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, sendFails: true }), vote, "a node has it after all");
-  assert.equal(await pendingAfter({ nonce: 3, sendFails: true }), undefined, "no node has it");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4, receipt: "reverted" }), undefined, "it reverted");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4 }), undefined, "it is in force");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4, reverts: true }), undefined, "it was never sent");
+  assert.deepEqual(await pendingAfter({ nonce: 3, receipt: "lost" }), vote, "its outcome unknown");
+  assert.deepEqual(await pendingAfter({ nonce: 3, receipt: "timeout" }), vote, "not in a block yet");
+  assert.deepEqual(await pendingAfter({ nonce: 3, sendFails: true }), vote, "a failed send may have reached a node");
+  assert.equal(await pendingAfter({ nonce: 3, receipt: "reverted" }), undefined, "it reverted");
+  assert.equal(await pendingAfter({ nonce: 3 }), undefined, "it is in force");
+  assert.equal(await pendingAfter({ nonce: 3, reverts: true }), undefined, "it was never sent");
+  const used = async () => {
+    const { chain } = fakeChain({ nonce: 3, receipt: "timeout" });
+    await castVote(chain, signer, vote, false, far);
+    chain.client.getTransactionCount = (async () => 4) as never;
+    return pendingVote(chain, klimaSender(chain));
+  };
+  assert.equal(await used(), undefined, "a block holds a transaction at its nonce");
 });
 
 test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer in that second", async () => {

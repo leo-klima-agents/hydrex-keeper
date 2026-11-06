@@ -30,7 +30,7 @@ import {
   USDC,
   VENUES,
 } from "../src/topup.ts";
-import { pendingVote, prepareVote, v2Sender } from "../src/vote.ts";
+import { broadcastTx, pendingVote, prepareVote, v2Sender } from "../src/vote.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
 const [MODULE, CONDUIT, VOTER, VE, V2, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
@@ -64,7 +64,6 @@ type World = {
   venues: (number | undefined)[];
   /** The payouts that replace `venues` once an approval is mined. */
   afterApproval?: (number | undefined)[];
-  pending?: boolean;
   reverts?: string;
   lost?: string;
 };
@@ -291,11 +290,8 @@ function fakeChain(w: World, { v2 = true } = {}) {
     },
     estimateMaxPriorityFeePerGas: async () => 1_000_000n,
     getFeeHistory: async () => ({ baseFeePerGas: [5_000_000n, 5_000_000n], gasUsedRatio: [0.2, 0.3], reward: [] }),
-    // "latest" counts mined transactions, and "pending" also counts sent ones. A lost transaction stays pending.
-    getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag: string }) =>
-      blockTag === "latest"
-        ? mined.filter((s) => s.from === address).length
-        : sent.filter((s) => s.from === address).length + (w.pending ? 1 : 0),
+    // Counts mined transactions only: a lost one never is.
+    getTransactionCount: async ({ address }: { address: Address }) => mined.filter((s) => s.from === address).length,
     estimateL1Fee: async () => 5_000n,
     waitForTransactionReceipt: async ({ hash }: { hash: Hex }) => {
       const tx = inFlight.get(hash)!;
@@ -573,8 +569,28 @@ test("everything goes through the proposer: one that cannot pay tops up neither 
   assert.equal(ethOf(w, KEEPER), eth(0.0014));
 });
 
-test("a top-up never replaces a transaction pending at the proposer's nonce, which may be a vote", async () => {
-  const { chain, sent } = fakeChain(world({ pending: true }));
+/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight would be. */
+async function sentNotMined(chain: Chain, from: Address, nonce: number): Promise<void> {
+  const { broadcast } = chain;
+  chain.broadcast = (async () => {
+    throw new Error("no RPC accepted the transaction");
+  }) as never;
+  const tx = {
+    chainId: 8453,
+    to: from,
+    data: "0x" as Hex,
+    gas: 21_000n,
+    maxFeePerGas: 1n,
+    maxPriorityFeePerGas: 1n,
+    nonce,
+  };
+  await broadcastTx(chain, { tx, from, signed: "0x01" }, Number.MAX_SAFE_INTEGER).catch(() => undefined);
+  chain.broadcast = broadcast;
+}
+
+test("a top-up never replaces a transaction this run sent from the proposer that may still land, which may be a vote", async () => {
+  const { chain, sent } = fakeChain(world());
+  await sentNotMined(chain, PROPOSER, 0);
   assert.equal(await topUp(runOf(chain), until()), 1);
   assert.equal(sent.length, 0);
 });
@@ -614,8 +630,9 @@ test("a dry run whose transactions would revert fails", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a dry run fails as the run would, on a transaction pending at the proposer's nonce or a proposer that cannot pay", async (t) => {
-  const pending = fakeChain(world({ pending: true }));
+test("a dry run fails as the run would, on a transaction of the proposer that may still land or a proposer that cannot pay", async (t) => {
+  const pending = fakeChain(world());
+  await sentNotMined(pending.chain, PROPOSER, 0);
   const broke = world();
   broke.eth[low(PROPOSER)] = 1_000n;
   const cannotPay = fakeChain(broke);

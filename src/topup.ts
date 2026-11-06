@@ -315,8 +315,8 @@ function simulator({ chain }: Run, state: State): Executor {
 }
 
 /**
- * Fails if the proposer has a transaction pending, because it may be a vote and a top-up must never replace one, or if
- * `balance` can't pay for the call's gas and value.
+ * Fails if a transaction this run sent from the proposer may still land at its nonce, because it may be a vote and a
+ * top-up must never replace one, or if `balance` can't pay for the call's gas and value.
  */
 function payable(
   { tx, cost, queued }: { tx: { nonce: number }; cost: bigint; queued: boolean },

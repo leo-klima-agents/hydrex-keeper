@@ -11,7 +11,7 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import { immutableAbi, moduleAbi } from "./abi.ts";
-import { lastBlockBefore, lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
+import { blocksBetween, lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
@@ -20,10 +20,6 @@ export const RECEIPT_TIMEOUT_MS = 60_000;
 const CONGESTED = 0.9; // in blocks this full, the builder orders by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
-// Votes in the last blocks tip at least this, more than other voters paid at the flip of 5 November 2026 (0.016 gwei at
-// most), so that the builder puts them ahead when voters crowd a block. Usually, transactions tipping this much use
-// under 6M of a block's 40M gas.
-const LAST_TIP = parseGwei("0.02");
 const FEE_BLOCKS = 20; // four seconds of blocks
 const MAX_GAS = 16_777_216n; // Base's gas limit per transaction since its Azul upgrade
 
@@ -155,7 +151,6 @@ export async function prepareCall(
     before: before.map((c) => txCallOf(sender, c)),
     blockNumber: head?.number ?? at,
     time: time === undefined ? undefined : min(time + 1n, (time / WEEK + 1n) * WEEK - 1n),
-    minTip: target ? LAST_TIP : 0n,
     rival: rival && {
       name: rival.sender.name,
       from: rival.sender.from,
@@ -177,7 +172,6 @@ type TxOptions = {
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
-  minTip?: bigint;
 };
 
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
@@ -195,12 +189,12 @@ const simulatedAs =
 
 /**
  * Throws if the transaction would revert. The max fee is twice the base fee plus the tip. If any of the last
- * FEE_BLOCKS blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. It is at least
- * `minTip`. Costs are in wei, include the L1 fee and leave out the value sent. `queued` means another transaction of
- * the sender is pending at its nonce.
+ * FEE_BLOCKS blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. Costs are in wei,
+ * include the L1 fee and leave out the value sent. `queued` means a transaction this process sent at the same nonce
+ * may still land.
  */
 export async function prepareTx(chain: Chain, { from, client }: From, call: TxCall, options: TxOptions) {
-  const { what, before = [], blockNumber, time, rival, landed = false, minTip = 0n } = options;
+  const { what, before = [], blockNumber, time, rival, landed = false } = options;
   const { to, value } = call;
   const data = dataOf(call);
   const on = blockNumber === undefined ? {} : { blockNumber };
@@ -208,14 +202,12 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const calls = [...before, call].map(simulatedAs(from));
   const simulate = (prior: readonly unknown[]) =>
     client.simulateBlocks({ ...on, blocks: [{ ...blockOverrides, calls: [...prior, ...calls] as never[] }] });
-  const [[block], afterRival, suggested, history, latest, pending, balance, l1Fee] = await allOrFirstFailure([
+  const [[block], afterRival, suggested, history, latest, balance, l1Fee] = await allOrFirstFailure([
     simulate([]),
     rival ? simulate(rival.calls.map(simulatedAs(rival.from))) : Promise.resolve(undefined),
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
-    client.getTransactionCount({ address: from, blockTag: "latest" }),
-    // Base no longer has a pending block, but a node may still count the transactions in its mempool here.
-    client.getTransactionCount({ address: from, blockTag: "pending" }),
+    client.getTransactionCount({ address: from }),
     client.getBalance({ address: from }),
     client.estimateL1Fee({ account: from, to, data, ...(value ? { value } : {}) }),
   ]);
@@ -230,18 +222,17 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  const tip = max(congested ? max(suggested, min(top, MAX_TIP)) : suggested, minTip);
-  // The confirmed nonce, so that a pending transaction is replaced rather than queued behind. A replacement pays a
-  // quarter more than the one this process sent, or twice the fees when the pending one's fees are unknown. The last
+  const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
+  // The confirmed nonce, so that a transaction this process sent and hasn't seen in a block is replaced rather than
+  // queued behind, at a quarter more than its fees. Only this process's own transactions are known this way. The last
   // transaction counts as mined, whatever the node says, once its receipt was seen, once the Voter shows its votes (see
   // `landed` in last.ts), or when the caller knows it is in a block.
   const lastSent = sentBy(chain.client).get(lower(from));
   const mined = lastSent?.mined === true || landed;
   const nonce = Math.max(latest, mined && lastSent ? lastSent.nonce + 1 : 0);
-  const queued = pending > nonce;
   const own = lastSent?.nonce === nonce ? lastSent : undefined;
-  const bump = (fee: bigint, sent?: bigint) =>
-    sent !== undefined ? max(fee, (sent * 5n) / 4n) : queued ? fee * 2n : fee;
+  const queued = own !== undefined;
+  const bump = (fee: bigint, sent?: bigint) => (sent !== undefined ? max(fee, (sent * 5n) / 4n) : fee);
   const tx = {
     chainId: base.id,
     to,
@@ -325,11 +316,11 @@ export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: n
 }
 
 /**
- * Whether `nonce` is already used, in a block or, if the node counts it, in its mempool. A vote decided before the one
- * it replaces landed would reuse that nonce, and nodes refuse it.
+ * Whether `nonce` is already used in a block. A vote decided before the one it replaces landed would reuse that
+ * nonce, and nodes refuse it.
  */
 export async function nonceTaken({ client, keeper }: Chain, nonce: number, from: Address = keeper): Promise<boolean> {
-  return client.getTransactionCount({ address: from, blockTag: "pending" }).then(
+  return client.getTransactionCount({ address: from }).then(
     (next) => next > nonce,
     () => false,
   );
@@ -397,24 +388,22 @@ async function tookSecond(chain: Chain, conduit: Address, blockNumber: bigint): 
  * conduit per second, so it is if the conduit accepted a vote the sender proposed in one of that second's blocks.
  */
 export async function votedAt({ client }: Chain, { from, conduit }: Sender, lastVoted: bigint): Promise<boolean> {
-  const [before, last] = await Promise.all([
-    lastBlockBefore(client, lastVoted),
-    lastBlockBefore(client, lastVoted + 1n),
-  ]);
+  const [first, last] = await blocksBetween(client, lastVoted, lastVoted + 1n);
   const accepted = await client.getContractEvents({
     address: conduit,
     abi: immutableAbi,
     eventName: "VoteAccepted",
     args: { proposer: from },
-    fromBlock: before + 1n,
+    fromBlock: first,
     toBlock: last,
   });
   return accepted.length > 0;
 }
 
 /**
- * The vote this process sent last for the sender, while it may still land: until its receipt is seen, and while a
- * transaction of the sender is pending at its nonce. If that can't be read, it counts as pending.
+ * The vote this process sent last for the sender, while it may still land: until its receipt is seen, and while no
+ * block holds a transaction at its nonce. A send that failed may still have reached a node, so it counts too, and so
+ * does a nonce that can't be read.
  */
 export async function pendingVote(chain: Chain, { from, to, abi, client }: Sender): Promise<Vote | undefined> {
   const last = sentBy(chain.client).get(lower(from));
@@ -422,15 +411,12 @@ export async function pendingVote(chain: Chain, { from, to, abi, client }: Sende
   if (!last || last.mined || !isAddressEqual(last.to, to)) return undefined;
   const { functionName, args } = decodeFunctionData({ abi, data: last.data });
   if (functionName !== "vote") return undefined;
-  const pending = await Promise.all([
-    client.getTransactionCount({ address: from, blockTag: "latest" }),
-    client.getTransactionCount({ address: from, blockTag: "pending" }),
-  ]).then(
-    ([latest, next]) => latest <= last.nonce && last.nonce < next,
+  const landing = await client.getTransactionCount({ address: from }).then(
+    (latest) => latest <= last.nonce,
     () => true,
   );
   const [pools, weights] = args as readonly [readonly Address[], readonly bigint[]];
-  return pending ? { pools: [...pools], weights: [...weights] } : undefined;
+  return landing ? { pools: [...pools], weights: [...weights] } : undefined;
 }
 
 export async function verifyVote(

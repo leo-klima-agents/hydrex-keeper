@@ -11,6 +11,7 @@ import {
   HEDGE_DELAY_MS,
   hedged,
   hostOf,
+  blocksBetween,
   lastBlockBefore,
   readMany,
   type Call,
@@ -245,4 +246,13 @@ test("since Denim's 200 ms blocks, the last block before a time is worked out in
     assert.ok(timeOf(found) < time && timeOf(found + 1n) >= time, `${back} s back: ${found}`);
     if (time * 1000n > denimMs) assert.equal(reads, 3, `${back} s back, after Denim`);
   }
+  reads = 0;
+  const second = timeOf(head) - 60n;
+  const [first, last] = await blocksBetween(client, second, second + 1n);
+  assert.deepEqual(
+    [timeOf(first - 1n), timeOf(first), timeOf(last), timeOf(last + 1n)],
+    [second - 1n, second, second, second + 1n],
+  );
+  assert.equal(last - first, 4n, "five blocks in a second");
+  assert.equal(reads, 5, "one read of the latest block for both ends");
 });

@@ -1,9 +1,9 @@
-import { msOf, type Client } from "./chain.ts";
+import { BLOCK_MS, msOf, type Client } from "./chain.ts";
 import { warnOnce } from "./log.ts";
 
 const HISTORY = 30;
-const DEFAULT_GAP_MS = 200; // Base's block time since its Denim upgrade
 const SEND_MARGIN_MS = 200; // covers poll lag and the time a vote takes to reach the sequencer
+const FAST_POLL_MS = 100; // a slower poll could have seen its block anywhere in it, too loosely to time the seal
 const SLACK = 1; // blocks a vote can land late and still be in the second it is for
 const SECONDS = 2; // the last seconds before the flip, each with a vote
 const POLL_MS = 50;
@@ -18,7 +18,7 @@ type Header = { number: bigint; time: number };
  */
 type Timing = { gap: number; seal: number; lead: number };
 
-type Seen = { time: number; at: number };
+type Seen = { time: number; at: number; took: number };
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 
@@ -35,26 +35,22 @@ export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
 export class Blocks {
   #seen = new Map<bigint, Seen>();
   #last: bigint | undefined;
+  #timing = timingOf(this.#seen);
 
-  /** Only the first sighting of a block counts, and none of a block older than one already seen. */
-  observe({ number, time }: Header, at: number): void {
+  /**
+   * Only the first sighting of a block counts, and none of a block older than one already seen. `took` is how long the
+   * poll that saw it took.
+   */
+  observe({ number, time }: Header, at: number, took = 0): void {
     if (this.#last !== undefined && number <= this.#last) return;
-    this.#seen.set(number, { time, at });
+    this.#seen.set(number, { time, at, took });
     this.#last = number;
     for (const n of this.#seen.keys()) if (n <= number - BigInt(HISTORY)) this.#seen.delete(n);
+    this.#timing = timingOf(this.#seen);
   }
 
   get timing(): Timing {
-    const seen = [...this.#seen];
-    const gaps = seen.flatMap(([n, { time }]) => {
-      const before = this.#seen.get(n - 1n);
-      return before && time > before.time ? [time - before.time] : [];
-    });
-    const gap = median(gaps) ?? DEFAULT_GAP_MS;
-    // The earliest sighting. Blocks seen late, from a lagging RPC, after a pause in the polls, or from a sequencer
-    // behind its schedule, can only make votes go early, never late.
-    const seal = Math.min(0, ...seen.map(([, { time, at }]) => at - time));
-    return { gap, seal, lead: gap - seal + SEND_MARGIN_MS };
+    return this.#timing;
   }
 
   /** The time of the block being built at `now`: the first one not sealed yet. */
@@ -77,6 +73,19 @@ export class Blocks {
   upcoming(flip: number, now: number): number | undefined {
     return this.next(flip, now + this.timing.lead, now);
   }
+}
+
+function timingOf(seen: Map<bigint, Seen>): Timing {
+  const gaps = [...seen].flatMap(([n, { time }]) => {
+    const before = seen.get(n - 1n);
+    return before && time > before.time ? [time - before.time] : [];
+  });
+  const gap = median(gaps) ?? BLOCK_MS;
+  // The earliest sighting by a fast poll. Blocks seen late, from a lagging RPC, after a pause in the polls, or from a
+  // sequencer behind its schedule, can only make votes go early, never late.
+  const fast = [...seen.values()].filter(({ took }) => took <= FAST_POLL_MS);
+  const seal = Math.min(0, ...fast.map(({ time, at }) => at - time));
+  return { gap, seal, lead: gap - seal + SEND_MARGIN_MS };
 }
 
 /** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on the grid of `anchor`. */
@@ -103,8 +112,9 @@ export async function watch(client: Client, blocks: Blocks, stop: () => boolean)
       if (block?.number) {
         const number = BigInt(block.number);
         const time = msOf(block);
+        const took = Date.now() - started;
         if (time === undefined) unstamped(new Error(`block ${number} has no timestampMs`));
-        else blocks.observe({ number, time }, (started + Date.now()) / 2);
+        else blocks.observe({ number, time }, started + took / 2, took);
       }
     } catch {}
     await sleep(Math.max(0, started + POLL_MS - Date.now()));

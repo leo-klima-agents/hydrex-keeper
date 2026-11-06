@@ -8,7 +8,18 @@ import {
 } from "viem";
 import { voterAbi } from "./abi.ts";
 import { Blocks, sleep, watch } from "./blocks.ts";
-import { lastBlockBefore, lower, msOf, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
+import {
+  blocksBetween,
+  lastBlockBefore,
+  lower,
+  msAt,
+  msOf,
+  readMany,
+  voterCall,
+  WEEK,
+  type Chain,
+  type Client,
+} from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
@@ -308,11 +319,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   ): Promise<Plan> => {
     const { readAt, time, vote } = base;
     if (!vote) return base;
-    // The Voter takes one vote per conduit per second, and five blocks share a second.
-    const second = BigInt(Math.floor(time / 1000));
-    if (lastVoted >= second) return { ...base, note: "already voted in this second" };
+    if (votedInSecond(lastVoted, time)) return { ...base, note: "already voted in this second" };
     if (reusable(best, base, lastVoted, rival?.vote)) return { ...best!, readAt, answered: base.answered };
-    const target = { time: second, lastVoted };
+    const target = { time: BigInt(Math.floor(time / 1000)), lastVoted };
     const prepared = await prepareVote(chain, signer, vote, dryRun, target, sender, rival);
     return { ...base, prepared, rival: rival?.vote };
   };
@@ -505,7 +514,7 @@ function landing(flipMs: number, block: Landed, receipt: Receipted) {
   const { baseFeePerGas: baseFee, gasUsed: blockGasUsed, gasLimit: blockGasLimit } = block;
   const { transactionIndex: index, gasUsed, effectiveGasPrice: price } = receipt;
   return {
-    msToFlip: (msOf(block) ?? Number(block.timestamp) * 1000) - flipMs,
+    msToFlip: msAt(block) - flipMs,
     index,
     gasUsed,
     tip: price !== undefined && baseFee != null ? price - baseFee : undefined,
@@ -520,12 +529,12 @@ function landing(flipMs: number, block: Landed, receipt: Receipted) {
  */
 export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   const { client, voter } = chain;
-  const [first, last] = await Promise.all([lastBlockBefore(client, flip - WATCHED_S), lastBlockBefore(client, flip)]);
+  const [first, last] = await blocksBetween(client, flip - WATCHED_S, flip);
   const events = await client.getContractEvents({
     address: voter,
     abi: voterAbi,
     eventName: "Voted",
-    fromBlock: first + 1n,
+    fromBlock: first,
     toBlock: last,
   });
   const votes = new Map<Hex, { voter: Address | undefined; pools: number }>();
@@ -540,20 +549,9 @@ export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   };
   const rows = await Promise.all(
     [...votes].map(async ([hash, { voter: by, pools }]) => {
-      const [receipt, tx] = await Promise.all([
-        client.getTransactionReceipt({ hash }),
-        client.getTransaction({ hash }),
-      ]);
-      const block = await blockOf(receipt.blockNumber);
-      const where = landing(Number(flip) * 1000, block, receipt);
-      return {
-        voter: by,
-        ours: by !== undefined && ours.has(lower(by)),
-        from: receipt.from,
-        pools,
-        gasLimit: tx.gas,
-        ...where,
-      };
+      const receipt = await client.getTransactionReceipt({ hash });
+      const where = landing(Number(flip) * 1000, await blockOf(receipt.blockNumber), receipt);
+      return { hash, voter: by, ours: by !== undefined && ours.has(lower(by)), from: receipt.from, pools, ...where };
     }),
   );
   rows.sort((a, b) => a.msToFlip - b.msToFlip || (a.index ?? 0) - (b.index ?? 0));
@@ -592,7 +590,7 @@ export async function outcome(
       const { timestamp } = landedIn;
       // To tune the timing: how far from its target block a vote lands, how long after it was sent, and how crowded.
       const where = landing(flipMs, landedIn, receipt);
-      const ms = where.msToFlip + flipMs;
+      const ms = msAt(landedIn);
       log.info("vote landed", {
         ...fields,
         ...where,
@@ -655,6 +653,12 @@ export async function outcome(
   });
   return failures;
 }
+
+/**
+ * Whether a conduit whose last vote was at `lastVoted` (s) already voted in the second of the block at `time` (ms). The
+ * Voter takes one vote per conduit per second, and five blocks share a second.
+ */
+export const votedInSecond = (lastVoted: bigint, time: number) => lastVoted >= BigInt(Math.floor(time / 1000));
 
 /** A vote that landed since `best` was prepared may have taken its nonce, so `lastVoted` must match too. */
 export const reusable = (best: Plan | undefined, { time, vote }: Plan, lastVoted: bigint, rival?: Vote) =>

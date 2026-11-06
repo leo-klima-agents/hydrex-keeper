@@ -13,6 +13,7 @@ import {
   refreshed,
   reusable,
   v2Answered,
+  votedInSecond,
   type Lane,
   type Plan,
 } from "../src/last.ts";
@@ -432,7 +433,6 @@ function outcomeChain(
       if (!receipt) throw new TransactionReceiptNotFoundError({ hash });
       return { ...receipt, transactionHash: hash };
     },
-    getTransaction: async () => ({ gas: 9_000_000n }),
     getBlock: async (args?: { blockNumber?: bigint }) => {
       blockReads++;
       const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 56n); // 11 s after the flip
@@ -591,14 +591,22 @@ test("every vote of the last 10 s before the flip is logged, anyone's, in the or
   assert.deepEqual(
     lines
       .filter((l) => l.message === "vote before the flip")
-      .map(({ voter, ours, pools, msToFlip, index, tip }) => [voter, ours, pools, msToFlip, index, tip]),
+      .map(({ hash, voter, ours, pools, msToFlip, index, tip }) => [hash, voter, ours, pools, msToFlip, index, tip]),
     [
-      [OTHER, false, 2, -800, 7, "6000000"],
-      [KLIMA, true, 1, -400, 2, "20000000"],
+      ["0x01", OTHER, false, 2, -800, 7, "6000000"],
+      ["0x02", KLIMA, true, 1, -400, 2, "20000000"],
     ],
   );
   const summary = lines.find((l) => l.message === "votes before the flip");
   assert.deepEqual(summary, { severity: "INFO", message: "votes before the flip", seconds: "10", votes: 2, others: 1 });
+});
+
+test("a conduit already voted in a block's second once its last vote is in that second or later", () => {
+  const flipMs = Number(FLIP) * 1000;
+  assert.equal(votedInSecond(FLIP - 1n, flipMs - 400), true, "the last second, at its fourth block");
+  assert.equal(votedInSecond(FLIP - 1n, flipMs - 1_000), true, "the last second, at its first block");
+  assert.equal(votedInSecond(FLIP - 2n, flipMs - 400), false, "the second before");
+  assert.equal(votedInSecond(FLIP - 1n, flipMs - 1_200), true, "a later second than the block's");
 });
 
 test("a prepared vote is reused only for the same block, votes and rival, and the same last vote on chain", () => {

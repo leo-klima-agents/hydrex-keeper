@@ -69,6 +69,15 @@ test("when polls stop, the block being built is extrapolated; before any poll, n
   assert.deepEqual(targets(blocks, flip - 3_000), [-1_400, -400]);
 });
 
+test("a sighting by a slow poll doesn't time the seal: the block could have been seen anywhere in that poll", () => {
+  const blocks = new Blocks();
+  feed(blocks, every(flip - 10_000, 200, 30), -20);
+  blocks.observe({ number: 31n, time: flip - 4_000 }, flip - 4_225, 450);
+  assert.equal(blocks.timing.seal, -20, "a 450 ms poll");
+  blocks.observe({ number: 32n, time: flip - 3_800 }, flip - 3_850, 80);
+  assert.equal(blocks.timing.seal, -50, "an 80 ms poll");
+});
+
 test("a late answer about an older block, or a block seen again, is ignored", () => {
   const blocks = new Blocks();
   feed(blocks, every(flip - 10_000, 200, 30));

@@ -173,7 +173,7 @@ test("with the immutable conduit, readVotes also reads its votes and power, in o
   }
 });
 
-test("readVotes reads the latest block, as Base has had no pending block since Denim", async () => {
+test("readVotes reads the latest block", async () => {
   const chain = fakeChain(table);
   const rewards = await readRewards(chain, [TOK_1]);
   blockTags.length = 0;

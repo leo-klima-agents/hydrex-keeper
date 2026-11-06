@@ -474,7 +474,7 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       at,
       sender,
     });
-    // A pending transaction may be a vote, and a claim must never replace a vote.
+    // A transaction this run sent at this nonce may still land and may be a vote, and a claim must never replace one.
     if (queued) throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);
     if (simulated.gasUsed > MAX_GAS_USED) {
       if (++replans === REPLANS)

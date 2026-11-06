@@ -32,6 +32,7 @@ import {
 } from "../src/claim.ts";
 import { BadSwap, SwapRefused, type Swapper } from "../src/kyber.ts";
 import type { Run } from "../src/pass.ts";
+import { broadcastTx } from "../src/vote.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
 const [MODULE, CONDUIT, VOTER, VE] = [addr(1), addr(2), addr(3), addr(4)];
@@ -96,7 +97,6 @@ type World = {
   overpays?: boolean;
   /** The retirement price per tonne drops as the amount grows, and a whole tonne costs more than a claim spends. */
   falling?: boolean;
-  pending?: boolean;
   /** A pair, by `key`, that one claim only half empties. This happens when more than 50 epochs are owed. */
   partial?: string;
   /**
@@ -409,8 +409,8 @@ function fakeChain(w: World = world()) {
       gasUsedRatio: [0.2, 0.3],
       reward: [[1_000_000n], [1_000_000n]],
     }),
-    getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag: string }) =>
-      7 + sent.filter((signed) => fromOf(signed) === address).length + (w.pending && blockTag === "pending" ? 1 : 0),
+    getTransactionCount: async ({ address }: { address: Address }) =>
+      7 + sent.filter((signed) => fromOf(signed) === address).length,
     getBalance: async ({ address }: { address: Address }) =>
       (address === proposer.address ? w.proposerBalance : w.balance) ?? E18,
     estimateL1Fee: async () => 5_000n,
@@ -652,11 +652,33 @@ test("a contract still owing after a claim, as for more than 50 epochs, is claim
   assert.ok(first!.fees.includes(I1) && second!.fees.includes(I1) && second!.tokens.includes(USDC));
 });
 
-test("a claim never replaces a transaction pending at its nonce, which may be a vote: the claims stop", async () => {
-  const { chain, sent } = fakeChain(world({ pending: true }));
+/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight would be. */
+async function sentNotMined(chain: Chain, from: Address, nonce: number): Promise<void> {
+  const { broadcast } = chain;
+  chain.broadcast = (async () => {
+    throw new Error("no RPC accepted the transaction");
+  }) as never;
+  const tx = {
+    chainId: 8453,
+    to: from,
+    data: "0x" as Hex,
+    gas: 21_000n,
+    maxFeePerGas: 1n,
+    maxPriorityFeePerGas: 1n,
+    nonce,
+  };
+  await broadcastTx(chain, { tx, from, signed: "0x01" }, Number.MAX_SAFE_INTEGER).catch(() => undefined);
+  chain.broadcast = broadcast;
+}
+
+test("a claim never replaces a transaction this run sent that may still land, which may be a vote: the claims stop", async () => {
+  const { chain, sent } = fakeChain(world());
+  await sentNotMined(chain, chain.keeper, 7);
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 1);
   assert.equal(sent.length, 0);
-  const both = fakeChain(world({ pending: true, v2: true }));
+  const both = fakeChain(world({ v2: true }));
+  await sentNotMined(both.chain, both.chain.keeper, 7);
+  await sentNotMined(both.chain, proposer.address, 7);
   assert.equal(await claims(runOf(both.chain), START, until(), fakeSwapper().swapper), 2, "the proposer's too");
   assert.equal(both.sent.length, 0);
 });
