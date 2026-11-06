@@ -73,25 +73,18 @@ load_config() {
   RPC_SECRET=${RPC_SECRET:-base-rpc-url}
   ALCHEMY_SECRET=${ALCHEMY_SECRET:-alchemy-api-key}
   COINGECKO_SECRET=${COINGECKO_SECRET:-}
-  CONDUIT=${CONDUIT:-}
-  PROPOSER=${PROPOSER:-}
-  PROPOSER_KMS_KEY_VERSION=${PROPOSER_KMS_KEY_VERSION:-}
 
-  for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL; do
+  for required in KEEPER_PROJECT KMS_KEY_VERSION ALERT_EMAIL CONDUIT PROPOSER PROPOSER_KMS_KEY_VERSION; do
     eval "value=\${$required:-}"
     [ -n "$value" ] || die "$required is not set in $CONFIG_FILE"
   done
   require_key_version KMS_KEY_VERSION "$KMS_KEY_VERSION"
   require_address MODULE "$MODULE"
-  if [ -n "$CONDUIT$PROPOSER$PROPOSER_KMS_KEY_VERSION" ]; then
-    [ -n "$CONDUIT" ] && [ -n "$PROPOSER" ] && [ -n "$PROPOSER_KMS_KEY_VERSION" ] ||
-      die "CONDUIT, PROPOSER and PROPOSER_KMS_KEY_VERSION go together"
-    require_address CONDUIT "$CONDUIT"
-    require_address PROPOSER "$PROPOSER"
-    require_key_version PROPOSER_KMS_KEY_VERSION "$PROPOSER_KMS_KEY_VERSION"
-    [ "${PROPOSER_KMS_KEY_VERSION%/cryptoKeyVersions/*}" != "${KMS_KEY_VERSION%/cryptoKeyVersions/*}" ] ||
-      die "the proposer needs its own key, not the keeper's"
-  fi
+  require_address CONDUIT "$CONDUIT"
+  require_address PROPOSER "$PROPOSER"
+  require_key_version PROPOSER_KMS_KEY_VERSION "$PROPOSER_KMS_KEY_VERSION"
+  [ "${PROPOSER_KMS_KEY_VERSION%/cryptoKeyVersions/*}" != "${KMS_KEY_VERSION%/cryptoKeyVersions/*}" ] ||
+    die "the proposer needs its own key, not the keeper's"
   case "$ALERT_EMAIL" in
     ?*@?*) ;;
     *) die "ALERT_EMAIL must be an email address" ;;
@@ -104,10 +97,8 @@ load_config() {
   # Thursday 00:00 flip. See src/schedule.ts.
   SCHEDULE="50 23 * * 2,3"
   # Sorted by name, because that is how check.sh reads them back.
-  ENV_VARS="KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE"
-  if [ -n "$CONDUIT" ]; then
-    ENV_VARS="CONDUIT=$CONDUIT,$ENV_VARS,PROPOSER=$PROPOSER,PROPOSER_KMS_KEY_VERSION=$PROPOSER_KMS_KEY_VERSION"
-  fi
+  ENV_VARS="CONDUIT=$CONDUIT,KMS_KEY_VERSION=$KMS_KEY_VERSION,MODULE=$MODULE,PROPOSER=$PROPOSER"
+  ENV_VARS="$ENV_VARS,PROPOSER_KMS_KEY_VERSION=$PROPOSER_KMS_KEY_VERSION"
   SECRETS="ALCHEMY_API_KEY=$ALCHEMY_SECRET:latest,BASE_RPC_URLS=$RPC_SECRET:latest"
   SECRET_NAMES="$RPC_SECRET $ALCHEMY_SECRET"
   if [ -n "$COINGECKO_SECRET" ]; then
@@ -219,12 +210,4 @@ rpc() {
     log "$1 failed on $rpc_url: $rpc_reply"
   done
   die "$1 failed on every public Base node"
-}
-
-# Older versions named their scheduler jobs $JOB-*. Call this as x=$(stale_schedulers), so that a failed listing
-# stops the script.
-stale_schedulers() {
-  stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
-  require_json "$stale_list" "scheduler job list"
-  printf '%s\n' "$stale_list" | jq -r --arg job "$JOB" '[.[].name | split("/") | last | select(startswith($job + "-"))] | join(" ")'
 }

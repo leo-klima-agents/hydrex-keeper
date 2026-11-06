@@ -22,10 +22,11 @@ import {
   broadcastTx,
   confirmTx,
   klimaSender,
+  heldAt,
   prepareCall,
   signTx,
   Unconfirmed,
-  v2Sender,
+  immutableSender,
   type ModuleCall,
   type Sender,
 } from "./vote.ts";
@@ -45,7 +46,7 @@ const RESERVE = parseEther("0.001"); // kept in the keeper or the proposer for t
 const MARGIN_MS = 60_000;
 // Rough gas costs for planning a claim. The simulation has the final say.
 const BASE_GAS = 1_300_000n;
-const V2_BASE_GAS = 400_000n;
+const IMMUTABLE_BASE_GAS = 400_000n;
 const SWAP_GAS = 800_000n;
 const PAIR_GAS = 300_000n;
 const GAS_BUDGET = 10_000_000n;
@@ -224,7 +225,7 @@ export async function claims(run: Run, flip: bigint, until: number, swapper: Swa
   }
   const conduits: Conduit[] = [
     { sender: klimaSender(chain), signer: account, excluded: EXCLUDED_OWNERS },
-    ...(chain.v2 ? [{ sender: v2Sender(chain), signer: proposer, excluded: new Map() }] : []),
+    { sender: immutableSender(chain), signer: proposer, excluded: new Map() },
   ];
   const shared: Shared = {
     delegatees: sharedRead(() => readDelegatees(chain, start - WEEK)),
@@ -443,7 +444,7 @@ function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET, reopened = true):
       !nft.unswapped.has(lower(p.token)) &&
       (reopened || !nft.reopened.has(pairKey(p.bribe, p.token))),
   );
-  const baseGas = ctx.klima ? BASE_GAS : V2_BASE_GAS;
+  const baseGas = ctx.klima ? BASE_GAS : IMMUTABLE_BASE_GAS;
   return planClaim(pairs, budget, ctx.usdPerGas, (token) => swapped(ctx, token), nft.caps, baseGas);
 }
 
@@ -469,13 +470,14 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       for (const refusal of built) refuse(ctx, nft, refusal);
       continue;
     }
-    const { tx, cost, expectedCost, balance, queued, simulated } = await prepareCall(chain, built.call, {
+    const { tx, cost, expectedCost, balance, simulated } = await prepareCall(chain, built.call, {
       before: nft.prepared,
       at,
       sender,
     });
-    // A pending transaction may be a vote, and a claim must never replace a vote.
-    if (queued) throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);
+    if ((await heldAt(chain, sender.from, tx.nonce)) !== false) {
+      throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);
+    }
     if (simulated.gasUsed > MAX_GAS_USED) {
       if (++replans === REPLANS)
         throw new Error(`no claim fits in ${MAX_GAS_USED} gas: ${REPLANS} smaller plans did not`);

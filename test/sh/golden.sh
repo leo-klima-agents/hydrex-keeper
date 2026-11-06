@@ -38,7 +38,11 @@ golden_case() {
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   {
     printf 'exit=%s\n--- output ---\n' "$rc"
-    cat "$tmp/$name.out"
+    # The checkout's path, taken literally rather than as a pattern.
+    ROOT=$root awk '{
+      while ((i = index($0, ENVIRON["ROOT"])) > 0) $0 = substr($0, 1, i - 1) "<repo>" substr($0, i + length(ENVIRON["ROOT"]))
+      print
+    }' "$tmp/$name.out"
   } >>"$log"
   golden=$root/test/sh/golden/$name.txt
   if grep -Eq '^exit=12[67]$' "$log"; then # the shell couldn't run a command
@@ -63,23 +67,20 @@ golden_case setup-list-fails list-fails keeper setup.sh
 golden_case deploy-no-secret fresh keeper deploy.sh
 golden_case deploy-first first-deploy keeper deploy.sh
 golden_case deploy-existing existing keeper deploy.sh
-golden_case deploy-stale drift keeper deploy.sh
-golden_case deploy-list-fails list-fails keeper deploy.sh
+golden_case deploy-drift drift keeper deploy.sh
 golden_case deploy-coingecko existing coingecko deploy.sh
 golden_case run-dry existing keeper run.sh --dry-run --now
 golden_case run-claim existing keeper run.sh --dry-run --claim
 golden_case run-bad-arg existing keeper run.sh --later
 golden_case run-now-claim existing keeper run.sh --now --dry-run --claim
 golden_case config-bad-module existing bad-module run.sh --now
-golden_case config-half-conduit existing half-conduit run.sh --now
+golden_case config-missing-proposer existing missing-proposer run.sh --now
 golden_case config-shared-key existing shared-key run.sh --now
-golden_case deploy-conduit with-conduit conduit deploy.sh
 golden_case check-ok existing keeper check.sh
 golden_case check-drift drift keeper check.sh
 golden_case check-fresh fresh keeper check.sh
 golden_case check-list-fails list-fails keeper check.sh
-golden_case check-conduit with-conduit conduit check.sh
-golden_case check-conduit-missing existing conduit check.sh
+golden_case check-conduit-missing no-conduit keeper check.sh
 
 [ "$failures" -eq 0 ] || {
   printf '%s golden case(s) failed\n' "$failures"

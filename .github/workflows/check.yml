@@ -18,10 +18,16 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CI_SERVICE_ACCOUNT }}
-      # Builds config.env from the repository variables named in config.env.example.
+      # Builds the config from config.env.example, with the repository variables named there in place of its values. A
+      # setting neither gives is reported as not set in repository-variables.env.
       - env:
           VARS: ${{ toJSON(vars) }}
         run: |
-          sed -n 's/^\([A-Z_]*\)=.*/\1/p' config.env.example |
-            jq -Rr --argjson vars "$VARS" '. as $name | $vars[$name] // empty | "\($name)=\(@sh)"' >config.env
+          {
+            cat config.env.example
+            sed -n 's/^\([A-Z_]*\)=.*/\1/p' config.env.example |
+              jq -Rr --argjson vars "$VARS" '. as $name | $vars[$name] // empty | "\($name)=\(@sh)"'
+          } >repository-variables.env
       - run: sh/check.sh
+        env:
+          HYDREX_CONFIG: repository-variables.env

@@ -11,7 +11,7 @@ keeper_sa=hydrex-keeper@$project.iam.gserviceaccount.com
 scheduler_sa=hydrex-keeper-scheduler@$project.iam.gserviceaccount.com
 key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1
 module=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
-# These must match test/sh/config/conduit.env.
+# These must match test/sh/config/keeper.env.
 conduit=0x692c323B425A9DfeebE302F56168a7798D93EAC5
 proposer=0x000000000000000000000000000000000000bEEF
 proposer_key=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-proposer-v1/cryptoKeyVersions/1
@@ -20,14 +20,14 @@ channel=projects/$project/notificationChannels/1234567890
 run_uri=https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/$job:run
 
 has_sas=yes has_secret=yes has_version=yes has_channel=yes has_alert=yes has_job=yes has_scheduler=yes drift=no list_fails=no
-with_conduit=no
+with_conduit=yes
 case "$FAKE_GCLOUD_SCENARIO" in
   fresh) has_sas=no has_secret=no has_version=no has_channel=no has_alert=no has_job=no has_scheduler=no ;;
   first-deploy) has_job=no has_scheduler=no ;;
   existing) ;;
   drift) drift=yes ;;
   list-fails) list_fails=yes ;;
-  with-conduit) with_conduit=yes ;;
+  no-conduit) with_conduit=no ;;
   *)
     printf 'fake-gcloud: unknown scenario %s\n' "$FAKE_GCLOUD_SCENARIO" >&2
     exit 98
@@ -35,9 +35,9 @@ case "$FAKE_GCLOUD_SCENARIO" in
 esac
 
 job_json() {
-  if [ "$drift" = yes ]; then # an older version deployed this job and set VOTE_OFFSETS
+  if [ "$drift" = yes ]; then # a job that differs from the config: another service account, no retries, an extra variable
     sa=123456789-compute@developer.gserviceaccount.com retries=0
-    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400"}'
+    env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"EXTRA","value":"1"}'
   else
     sa=$keeper_sa retries=3
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"}'
@@ -236,19 +236,8 @@ case "$*" in
     [ "$has_scheduler" = yes ] || missing "$4"
     scheduler_json "$4"
     ;;
-  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs resume "* | "scheduler jobs delete "*)
+  "scheduler jobs create http "* | "scheduler jobs update http "* | "scheduler jobs resume "*)
     log_call "$@"
-    ;;
-  "scheduler jobs list "*)
-    log_call "$@"
-    [ "$list_fails" = no ] || {
-      printf 'ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED\n' >&2
-      exit 1
-    }
-    names=''
-    [ "$has_scheduler" = no ] || names="\"projects/$project/locations/$region/jobs/$job\""
-    [ "$drift" = no ] || names="$names,\"projects/$project/locations/$region/jobs/$job-1\",\"projects/$project/locations/$region/jobs/other-job\""
-    printf '[%s]\n' "$(printf '%s' "$names" | sed 's/"\([^"]*\)"/{"name":"\1"}/g')"
     ;;
   "projects get-iam-policy "*)
     log_call "$@"

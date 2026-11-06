@@ -17,12 +17,13 @@ import type { Chain, Client } from "../src/chain.ts";
 import {
   broadcastTx,
   castVote,
+  heldAt,
+  immutableSender,
   klimaSender,
   markMined,
   nonceTaken,
   pendingVote,
   prepareVote,
-  v2Sender,
   votedAt,
   VoteSent,
 } from "../src/vote.ts";
@@ -33,7 +34,6 @@ const signer = privateKeyToAccount(generatePrivateKey());
 
 type Behaviour = {
   nonce?: number;
-  pending?: number;
   congested?: boolean;
   topTip?: bigint;
   reverts?: boolean;
@@ -43,6 +43,10 @@ type Behaviour = {
   minedHash?: Hex;
   verifyFails?: boolean;
   sendFails?: boolean;
+  /** Nodes refuse the send because a transaction they hold at its nonce pays as much. */
+  underpriced?: boolean;
+  /** Whether a node holds a transaction this process sent: by default, one does. */
+  held?: boolean | "unanswered";
   balance?: bigint;
   revertsAfterRival?: boolean;
   lastVoted?: bigint;
@@ -79,8 +83,7 @@ function fakeChain(b: Behaviour = {}) {
       gasUsedRatio: [b.congested ? 0.95 : 0.2, 0.3],
       reward: [[b.topTip ?? 400n], [300n]],
     }),
-    getTransactionCount: async ({ blockTag }: { blockTag: string }) =>
-      blockTag === "pending" ? (b.pending ?? b.nonce ?? 7) : (b.nonce ?? 7),
+    getTransactionCount: async () => b.nonce ?? 7,
     getBlock: async (args?: { blockNumber?: bigint }) => {
       if (args?.blockNumber === 42n) return { number: 42n, timestamp: MINED_AT };
       assert.equal(args, undefined, "the latest block");
@@ -113,19 +116,26 @@ function fakeChain(b: Behaviour = {}) {
   } as unknown as Client;
   const broadcast = async (signed: Hex) => {
     sent.push(signed);
-    if (b.sendFails) throw new Error("no RPC accepted the transaction: timeout");
+    if (b.sendFails) {
+      throw new Error(
+        `no RPC accepted the transaction: ${b.underpriced ? "replacement transaction underpriced" : "timeout"}`,
+      );
+    }
     return `0x${"ab".repeat(32)}` as Hex;
   };
   const chain: Chain = {
     client,
     bulk: client,
-    v2Client: client,
+    proposerClient: client,
     broadcast,
+    known: async (hashes: readonly Hex[]) =>
+      hashes.length === 0 ? false : b.held === "unanswered" ? undefined : (b.held ?? true),
     module: MODULE,
     conduit: CONDUIT,
     keeper: signer.address,
     voter: VOTER,
     ve: addr(6),
+    immutable: { conduit: IMMUTABLE, proposer: proposer.address, priced: [] },
   };
   return { chain, sent, simulatedAt, simulatedOn, simulatedCalls };
 }
@@ -164,6 +174,35 @@ test("a re-vote under the same nonce pays a quarter more than the pending one", 
   assert.equal(parseTransaction(later.sent[0]!).maxFeePerGas, 1_000n, "a new nonce starts from the estimate");
 });
 
+test("a vote prepared with the fees read with the votes reads none of its own", async () => {
+  const { chain } = fakeChain({ nonce: 3 });
+  let feeReads = 0;
+  const { estimateMaxPriorityFeePerGas, getFeeHistory } = chain.client;
+  chain.client.estimateMaxPriorityFeePerGas = (async () => (feeReads++, estimateMaxPriorityFeePerGas())) as never;
+  chain.client.getFeeHistory = (async (args: never) => (feeReads++, getFeeHistory(args))) as never;
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const fees = { baseFee: 600n, tip: 70n, congested: false };
+  const { tx } = await prepareVote(chain, signer, vote, false, target, klimaSender(chain), undefined, fees);
+  assert.deepEqual([tx.maxFeePerGas, tx.maxPriorityFeePerGas, feeReads], [1_270n, 70n, 0]);
+  const read = await prepareVote(chain, signer, vote, false, target);
+  assert.deepEqual([read.tx.maxFeePerGas, feeReads], [1_000n, 2], "without them, it reads them");
+});
+
+test("a transaction this process sent is held while a node has it, and never once in a block or at another nonce", async () => {
+  const held = async (b: Behaviour, nonce = 3, mined = false) => {
+    const { chain } = fakeChain({ nonce: 3, receipt: "timeout", ...b });
+    await castVote(chain, signer, vote, false, far);
+    if (mined) markMined(chain, 3);
+    return heldAt(chain, signer.address, nonce);
+  };
+  assert.equal(await held({}), true);
+  assert.equal(await held({ held: false }), false, "no node has it");
+  assert.equal(await held({ held: "unanswered" }), undefined, "no node answers");
+  assert.equal(await held({}, 4), false, "another nonce");
+  assert.equal(await held({}, 3, true), false, "in a block");
+  assert.equal(await heldAt(fakeChain().chain, signer.address, 3), false, "nothing sent");
+});
+
 test("a receipt that does not arrive in time is left to the next pass", async () => {
   const { chain, sent } = fakeChain({ receipt: "timeout" });
   await castVote(chain, signer, vote, false, far);
@@ -198,21 +237,6 @@ test("a dry run signs but never sends", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a pending vote of unknown fees is replaced at twice the fees; one this process sent at a quarter more", async () => {
-  const unknown = fakeChain({ nonce: 3, pending: 4 });
-  await castVote(unknown.chain, signer, vote, false, far);
-  const replacing = parseTransaction(unknown.sent[0]!);
-  assert.deepEqual([replacing.nonce, replacing.maxFeePerGas], [3, 2_000n], "replaced, not queued behind");
-  const own = fakeChain({ nonce: 3, pending: 3, receipt: "timeout" });
-  await castVote(own.chain, signer, vote, false, far);
-  own.chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
-  await castVote(own.chain, signer, vote, false, far);
-  const tx = parseTransaction(own.sent[1]!);
-  assert.equal(tx.nonce, 3);
-  assert.equal(tx.maxFeePerGas, 1_250n);
-});
-
 test("once the Voter shows a later vote than the sent one was decided on, the nonce moves past it", async () => {
   const { chain, sent } = fakeChain({ nonce: 3 });
   const first = await prepareVote(chain, signer, vote, false, { time: 1_790_812_797n, lastVoted: 100n });
@@ -239,21 +263,35 @@ test("once the receipt of the transaction sent last was seen, the nonce moves pa
 test("a send that fails still counts as this process's vote: it may have reached a node", async () => {
   const { chain, sent } = fakeChain({ nonce: 3, sendFails: true });
   await assert.rejects(castVote(chain, signer, vote, false, far), /no RPC accepted/);
-  chain.client.getTransactionCount = (async ({ blockTag }: { blockTag: string }) =>
-    blockTag === "pending" ? 4 : 3) as never;
   await assert.rejects(castVote(chain, signer, vote, false, far));
   const tx = parseTransaction(sent[1]!);
   assert.deepEqual([tx.nonce, tx.maxFeePerGas], [3, 1_250n], "a quarter more than the recorded fees");
 });
 
-test("a nonce is taken once the keeper's nonce in the block being built is past it", async () => {
-  const { chain } = fakeChain({ nonce: 3, pending: 4 });
+test("a send refused as underpriced is sent again at twice its fees, past a transaction this process doesn't know", async () => {
+  const { chain, sent } = fakeChain({ nonce: 3, sendFails: true, underpriced: true });
+  await assert.rejects(castVote(chain, signer, vote, false, far), /underpriced/);
+  await assert.rejects(castVote(chain, signer, vote, false, far));
+  const tx = parseTransaction(sent[1]!);
+  assert.deepEqual([tx.nonce, tx.maxFeePerGas, tx.maxPriorityFeePerGas], [3, 2_000n, 200n]);
+});
+
+test("a nonce is taken once the keeper's nonce in the latest block is past it, or a node holds a vote sent at it", async () => {
+  const { chain } = fakeChain({ nonce: 4 });
   assert.equal(await nonceTaken(chain, 3), true);
   assert.equal(await nonceTaken(chain, 4), false);
   chain.client.getTransactionCount = (async () => {
     throw new Error("timeout");
   }) as never;
   assert.equal(await nonceTaken(chain, 3), false, "unknown counts as not taken");
+  const held = async (b: Behaviour) => {
+    const { chain } = fakeChain({ nonce: 4, receipt: "timeout", ...b });
+    await castVote(chain, signer, vote, false, far);
+    return nonceTaken(chain, 4);
+  };
+  assert.equal(await held({}), true, "a node holds a vote this process sent at it");
+  assert.equal(await held({ held: false }), false, "no node holds it");
+  assert.equal(await held({ held: "unanswered" }), false, "no node answers");
 });
 
 test("before the last blocks, the keeper must be able to pay for a vote twice; in them, once", async () => {
@@ -296,31 +334,28 @@ test("the module ABI names the Voter's and the conduit's errors that a simulated
 });
 
 const proposer = privateKeyToAccount(generatePrivateKey());
-const V2 = addr(7);
+const IMMUTABLE = addr(7);
 
 test("the immutable conduit's vote goes from the proposer straight to the conduit", async () => {
   const { chain, sent } = fakeChain({ nonce: 5 });
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
-  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  await castVote(chain, proposer, vote, false, far, immutableSender(chain));
   const tx = parseTransaction(sent[0]!);
-  assert.equal(tx.to, V2);
+  assert.equal(tx.to, IMMUTABLE);
   assert.equal(tx.nonce, 5);
   const moduleVote = encodeFunctionData({ abi: moduleAbi, functionName: "vote", args: [vote.pools, vote.weights] });
   assert.equal(tx.data, moduleVote, "the same vote(address[],uint256[]) as the module's");
-  assert.throws(() => v2Sender(fakeChain().chain), /no immutable conduit/);
 });
 
 test("the keeper's and the proposer's pending votes are tracked apart", async () => {
   const { chain, sent } = fakeChain({ nonce: 3, receipt: "timeout" });
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
   await castVote(chain, signer, vote, false, far);
-  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  await castVote(chain, proposer, vote, false, far, immutableSender(chain));
   assert.equal(
     parseTransaction(sent[1]!).maxFeePerGas,
     1_000n,
     "the keeper's pending vote does not bump the proposer's",
   );
-  await castVote(chain, proposer, vote, false, far, v2Sender(chain));
+  await castVote(chain, proposer, vote, false, far, immutableSender(chain));
   assert.equal(parseTransaction(sent[2]!).maxFeePerGas, 1_250n, "its own does");
   markMined(chain, 3, proposer.address);
   const keeperNext = await prepareVote(chain, signer, vote, false);
@@ -333,8 +368,7 @@ test("the keeper's and the proposer's pending votes are tracked apart", async ()
 
 test("a proposer short of funds is told so", async () => {
   const { chain } = fakeChain({ balance: 1n });
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
-  await assert.rejects(castVote(chain, proposer, vote, false, far, v2Sender(chain)), /fund the proposer: 0x/);
+  await assert.rejects(castVote(chain, proposer, vote, false, far, immutableSender(chain)), /fund the proposer: 0x/);
 });
 
 test("the immutable conduit's ABI names its own errors and the Voter's it passes through", () => {
@@ -356,8 +390,7 @@ test("a vote for the last block before a flip is simulated within its epoch, as 
 
 test("anyone may vote for the immutable conduit, so a later vote of it does not mean the proposer's was mined", async () => {
   const { chain } = fakeChain({ nonce: 3 });
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
-  const sender = v2Sender(chain);
+  const sender = immutableSender(chain);
   const first = await prepareVote(chain, proposer, vote, false, { time: 1_790_812_797n, lastVoted: 100n }, sender);
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const target = { time: 1_790_812_799n, lastVoted: 1_790_812_797n };
@@ -371,13 +404,19 @@ test("anyone may vote for the immutable conduit, so a later vote of it does not 
 test("the immutable conduit's votes are prepared through a client of their own, which knows what was sent", async () => {
   const { chain, simulatedCalls } = fakeChain({ nonce: 3 });
   const own = fakeChain({ nonce: 3 });
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
-  chain.v2Client = own.chain.client;
+  chain.proposerClient = own.chain.client;
   const target = { time: 1_790_812_797n, lastVoted: 100n };
-  const first = await prepareVote(chain, proposer, vote, false, target, v2Sender(chain));
+  const first = await prepareVote(chain, proposer, vote, false, target, immutableSender(chain));
   assert.deepEqual([simulatedCalls.length, own.simulatedCalls.length], [0, 1], "simulated through its own client");
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
-  const next = await prepareVote(chain, proposer, vote, false, { ...target, time: 1_790_812_799n }, v2Sender(chain));
+  const next = await prepareVote(
+    chain,
+    proposer,
+    vote,
+    false,
+    { ...target, time: 1_790_812_799n },
+    immutableSender(chain),
+  );
   assert.deepEqual(
     [next.tx.nonce, next.tx.maxFeePerGas],
     [3, 1_250n],
@@ -391,36 +430,37 @@ test("the immutable conduit's votes are prepared through a client of their own, 
   );
 });
 
-test("an immutable conduit's vote that another vote beat to its block is decided again, not reported as sent", async () => {
+test("an immutable conduit's vote that another vote beat to its second is decided again, not reported as sent", async () => {
   const beatenTo = (lastVoted?: bigint) => {
     const { chain } = fakeChain({ receipt: "reverted", ...(lastVoted ? { lastVoted } : {}) });
-    chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
     return chain;
   };
   const beaten = beatenTo(MINED_AT);
   await assert.rejects(
-    castVote(beaten, proposer, vote, false, far, v2Sender(beaten)),
-    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its block/.test(e.message),
+    castVote(beaten, proposer, vote, false, far, immutableSender(beaten)),
+    (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /first in its second/.test(e.message),
   );
-  const next = await prepareVote(beaten, proposer, vote, false, undefined, v2Sender(beaten));
+  const next = await prepareVote(beaten, proposer, vote, false, undefined, immutableSender(beaten));
   assert.equal(next.tx.nonce, 8, "past the one the reverted vote took");
   const lost = beatenTo();
-  await assert.rejects(castVote(lost, proposer, vote, false, far, v2Sender(lost)), VoteSent, "reverted for itself");
+  await assert.rejects(
+    castVote(lost, proposer, vote, false, far, immutableSender(lost)),
+    VoteSent,
+    "reverted for itself",
+  );
   const klima = fakeChain({ receipt: "reverted", lastVoted: MINED_AT }).chain;
   await assert.rejects(castVote(klima, signer, vote, false, far), VoteSent, "only the keeper votes for the Klima one");
 });
 
 test("a vote cast a day before the flip is also checked after the Klima conduit's, which may still be pending", async () => {
   const { chain, sent, simulatedCalls } = fakeChain();
-  chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
   const rival = { sender: klimaSender(chain), vote: { pools: [OTHER], weights: [1n] } };
-  await castVote(chain, proposer, vote, false, far, v2Sender(chain), rival);
+  await castVote(chain, proposer, vote, false, far, immutableSender(chain), rival);
   assert.deepEqual(simulatedCalls, [1, 2], "alone, then after the Klima conduit's");
   assert.equal(sent.length, 1);
   const refused = fakeChain({ revertsAfterRival: true });
-  refused.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
   await assert.rejects(
-    castVote(refused.chain, proposer, vote, false, far, v2Sender(refused.chain), rival),
+    castVote(refused.chain, proposer, vote, false, far, immutableSender(refused.chain), rival),
     (e: unknown) => e instanceof Error && !(e instanceof VoteSent) && /after the keeper's/.test(e.message),
   );
   assert.equal(refused.sent.length, 0, "not sent, and retried");
@@ -429,14 +469,12 @@ test("a vote cast a day before the flip is also checked after the Klima conduit'
 test("with a rival vote, the vote is also simulated after it, and refused if it would revert there", async () => {
   const target = { time: 1_790_812_797n, lastVoted: 0n };
   const ok = fakeChain();
-  ok.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
   const rival = { sender: klimaSender(ok.chain), vote: { pools: [OTHER], weights: [1n] } };
-  await prepareVote(ok.chain, proposer, vote, false, target, v2Sender(ok.chain), rival);
+  await prepareVote(ok.chain, proposer, vote, false, target, immutableSender(ok.chain), rival);
   assert.deepEqual(ok.simulatedCalls, [1, 2], "alone, then after the rival's");
   const refused = fakeChain({ revertsAfterRival: true });
-  refused.chain.v2 = { conduit: V2, proposer: proposer.address, priced: [] };
   await assert.rejects(
-    prepareVote(refused.chain, proposer, vote, false, target, v2Sender(refused.chain), rival),
+    prepareVote(refused.chain, proposer, vote, false, target, immutableSender(refused.chain), rival),
     /would revert after the keeper's/,
   );
 });
@@ -447,17 +485,25 @@ test("another conduit's vote is checked after the keeper's while that one may st
     await castVote(chain, signer, vote, false, far).catch(() => undefined);
     return pendingVote(chain, klimaSender(chain));
   };
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "lost" }), vote, "its outcome unknown");
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, receipt: "timeout" }), vote, "not in a block yet");
-  assert.deepEqual(await pendingAfter({ nonce: 3, pending: 4, sendFails: true }), vote, "a node has it after all");
-  assert.equal(await pendingAfter({ nonce: 3, sendFails: true }), undefined, "no node has it");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4, receipt: "reverted" }), undefined, "it reverted");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4 }), undefined, "it is in force");
-  assert.equal(await pendingAfter({ nonce: 3, pending: 4, reverts: true }), undefined, "it was never sent");
+  assert.deepEqual(await pendingAfter({ nonce: 3, receipt: "lost" }), vote, "its outcome unknown");
+  assert.deepEqual(await pendingAfter({ nonce: 3, receipt: "timeout" }), vote, "not in a block yet");
+  assert.deepEqual(await pendingAfter({ nonce: 3, sendFails: true }), vote, "a failed send that reached a node");
+  assert.equal(await pendingAfter({ nonce: 3, sendFails: true, held: false }), undefined, "one no node holds");
+  assert.deepEqual(await pendingAfter({ nonce: 3, receipt: "timeout", held: "unanswered" }), vote, "nodes silent");
+  assert.equal(await pendingAfter({ nonce: 3, receipt: "reverted" }), undefined, "it reverted");
+  assert.equal(await pendingAfter({ nonce: 3 }), undefined, "it is in force");
+  assert.equal(await pendingAfter({ nonce: 3, reverts: true }), undefined, "it was never sent");
+  const used = async () => {
+    const { chain } = fakeChain({ nonce: 3, receipt: "timeout" });
+    await castVote(chain, signer, vote, false, far);
+    chain.client.getTransactionCount = (async () => 4) as never;
+    return pendingVote(chain, klimaSender(chain));
+  };
+  assert.equal(await used(), undefined, "a block holds a transaction at its nonce");
 });
 
-test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer", async () => {
-  const VOTED = 1_790_812_000n; // timestamp of block 100
+test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer in that second", async () => {
+  const VOTED = 1_790_812_000n; // timestamp of blocks 100 to 104, 200 ms apart as on Base
   type Filter = {
     address: Address;
     eventName: string;
@@ -469,15 +515,20 @@ test("the immutable conduit's vote in force is the proposer's only if the condui
     const client = {
       getBlock: async (args?: { blockNumber?: bigint }) => {
         const number = args?.blockNumber ?? 130n;
-        return { number, timestamp: VOTED + (number - 100n) * 2n };
+        const ms = VOTED * 1000n + (number - 100n) * 200n;
+        return { number, timestamp: ms / 1000n, timestampMs: `0x${ms.toString(16)}` };
       },
       getContractEvents: async ({ address, eventName, args, fromBlock, toBlock }: Filter) => {
-        assert.deepEqual([address, eventName, fromBlock, toBlock], [V2, "VoteAccepted", 100n, 100n]);
+        assert.deepEqual([address, eventName, fromBlock, toBlock], [IMMUTABLE, "VoteAccepted", 100n, 104n]);
         return proposers.filter((p) => p === args.proposer).map(() => ({}));
       },
     } as unknown as Client;
-    const chain = { client, v2Client: client, v2: { conduit: V2, proposer: proposer.address, priced: [] } };
-    return votedAt(chain as unknown as Chain, v2Sender(chain as unknown as Chain), VOTED);
+    const chain = {
+      client,
+      proposerClient: client,
+      immutable: { conduit: IMMUTABLE, proposer: proposer.address, priced: [] },
+    };
+    return votedAt(chain as unknown as Chain, immutableSender(chain as unknown as Chain), VOTED);
   };
   assert.equal(await acceptedFrom([proposer.address]), true);
   assert.equal(await acceptedFrom([OTHER]), false, "another's vote");

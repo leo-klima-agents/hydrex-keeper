@@ -15,6 +15,7 @@ export const moduleAbi = parseAbi([
   "error InsufficientVotingPower()",
 ]);
 
+// KlimaVeTokenConduit.
 export const conduitAbi = parseAbi([
   "function voter() view returns (address)",
   "function veToken() view returns (address)",
@@ -55,7 +56,6 @@ export const immutableAbi = parseAbi([
   "error NoRewardContracts()",
   "error TokenCallFailed(address token)",
   "error Reentrancy()",
-  // Errors from the Voter, which the conduit passes on.
   "error EpochFlipInProgress()",
   "error VoteDelayNotMet()",
   "error InsufficientVotingPower()",
@@ -73,6 +73,9 @@ export const voterAbi = parseAbi([
   "function votes(address voter, address pool) view returns (uint256)",
   "function poolVote(address voter, uint256 index) view returns (address)",
   "function lastVoted(address voter) view returns (uint256)",
+  "function vote(address[] poolVote, uint256[] voteProportions)",
+  "function poke()",
+  "event Voted(address indexed voter, uint256 weight)",
 ]);
 
 export const veAbi = parseAbi([
