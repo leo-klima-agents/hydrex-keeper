@@ -1,7 +1,46 @@
 import type { TestContext } from "node:test";
 import type { Address, Hex } from "viem";
-import type { Chain } from "../src/chain.ts";
+import { immutableAbi, klimaModuleAbi } from "../src/abi.ts";
+import type { ByConduit, Chain, Client, Conduit } from "../src/chain.ts";
 import { broadcastTx } from "../src/vote.ts";
+
+/** Where each conduit is, and its key: the Klima conduit is reached through its module. */
+export type Places = {
+  klima: { address: Address; from: Address; module: Address };
+  immutable: { address: Address; from: Address; priced?: Address[] };
+};
+
+/** Both conduits as `connect` builds them, each sending through `clients` or the one client given. */
+export function conduitsOf({ klima, immutable }: Places, clients: Client | ByConduit<Client>): ByConduit<Conduit> {
+  const both = clients as Partial<ByConduit<Client>>;
+  const [klimaClient, immutableClient] =
+    both.klima && both.immutable ? [both.klima, both.immutable] : [clients, clients];
+  return {
+    klima: {
+      name: "klima",
+      label: "the Klima conduit",
+      address: klima.address,
+      role: "keeper",
+      from: klima.from,
+      to: klima.module,
+      abi: klimaModuleAbi,
+      open: false,
+      client: klimaClient as Client,
+    },
+    immutable: {
+      name: "immutable",
+      label: "the immutable conduit",
+      address: immutable.address,
+      role: "proposer",
+      from: immutable.from,
+      to: immutable.address,
+      abi: immutableAbi,
+      open: true,
+      client: immutableClient as Client,
+      priced: immutable.priced ?? [],
+    },
+  };
+}
 
 export type Line = { severity: string; message: string; error?: string } & Record<string, unknown>;
 

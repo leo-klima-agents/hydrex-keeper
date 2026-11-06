@@ -30,8 +30,8 @@ import {
   USDC,
   VENUES,
 } from "../src/topup.ts";
-import { immutableSender, pendingVote, prepareVote } from "../src/vote.ts";
-import { logged, sentNotMined } from "./helpers.ts";
+import { pendingVote, prepareVote } from "../src/vote.ts";
+import { conduitsOf, logged, sentNotMined } from "./helpers.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
 const [MODULE, CONDUIT, VOTER, VE, IMMUTABLE, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
@@ -332,15 +332,17 @@ function fakeChain(w: World) {
   const chain: Chain = {
     client,
     bulk: client,
-    proposerClient: client,
     broadcast,
     known: async () => false,
-    module: MODULE,
-    conduit: CONDUIT,
-    keeper: KEEPER,
     voter: VOTER,
     ve: VE,
-    immutable: { conduit: IMMUTABLE, proposer: PROPOSER, priced: [USDC] },
+    conduits: conduitsOf(
+      {
+        klima: { address: CONDUIT, from: KEEPER, module: MODULE },
+        immutable: { address: IMMUTABLE, from: PROPOSER, priced: [USDC] },
+      },
+      client,
+    ),
   };
   return { chain, sent, simulated, txs };
 }
@@ -354,8 +356,7 @@ const runOf = (chain: Chain, dryRun = false): Run => ({
   chain,
   tokens: [],
   prices: async () => prices,
-  account: keeper,
-  proposer,
+  signers: { klima: keeper, immutable: proposer },
   dryRun,
 });
 
@@ -606,10 +607,11 @@ test("a transaction that would revert is not sent, and the proposer's USDC waits
 test("a top-up transaction whose outcome is unknown does not hold up the proposer's vote: it replaces it", async () => {
   const { chain, txs } = fakeChain(world({ lost: "transfer" }));
   assert.equal(await topUp(runOf(chain), until()), 1);
-  assert.equal(await pendingVote(chain, immutableSender(chain)), undefined, "a transfer to the keeper is no vote");
+  const { immutable } = chain.conduits;
+  assert.equal(await pendingVote(chain, immutable), undefined, "a transfer to the keeper is no vote");
   const lost = txs.at(-1)!;
   const vote = { pools: [addr(20)], weights: [1n] };
-  const { tx } = await prepareVote(chain, proposer, vote, false, undefined, immutableSender(chain));
+  const { tx } = await prepareVote(chain, immutable, proposer, vote, false);
   assert.equal(tx.nonce, lost.nonce, "at its nonce");
   assert.ok(tx.maxFeePerGas * 4n >= lost.maxFeePerGas! * 5n, "a quarter more in fees");
   assert.ok(tx.maxPriorityFeePerGas * 4n >= lost.maxPriorityFeePerGas! * 5n, "and in tip");

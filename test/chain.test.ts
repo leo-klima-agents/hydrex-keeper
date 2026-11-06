@@ -267,7 +267,7 @@ test("without timestampMs, or with blocks not 200 ms apart, the lookup fails rat
   await assert.rejects(lastBlockBefore(slower.client, slower.timeOf(slower.head) - 10n), /are not either side of/);
 });
 
-test("the conduits' addresses are read once the proposer is known not to be the keeper, and must share a Voter", async () => {
+test("both conduits are read once their keys are known to differ, and must share a Voter", async () => {
   const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
   const [MODULE, CONDUIT, KEEPER, VOTER, VE, IMMUTABLE, PROPOSER] = [1, 2, 3, 4, 5, 6, 7].map(addr) as [
     Address,
@@ -297,22 +297,36 @@ test("the conduits' addresses are read once the proposer is known not to be the 
     } as unknown as Client;
     return { client, reads };
   };
+  const settings = (proposer: Address) => ({ klima: { module: MODULE }, immutable: { conduit: IMMUTABLE, proposer } });
   const ok = clientOf(VOTER, 2);
-  assert.deepEqual(await readAddresses(ok.client, MODULE, { conduit: IMMUTABLE, proposer: PROPOSER }), {
-    conduit: CONDUIT,
-    keeper: KEEPER,
-    voter: VOTER,
-    ve: VE,
-    immutable: { conduit: IMMUTABLE, proposer: PROPOSER, priced: [addr(30), addr(31)] },
+  const { voter, ve, conduits } = await readAddresses(ok.client, settings(PROPOSER));
+  assert.deepEqual([voter, ve], [VOTER, VE]);
+  const fields = ({ address, role, from, to, open, priced }: (typeof conduits)["klima"]) => ({
+    address,
+    role,
+    from,
+    to,
+    open,
+    priced,
+  });
+  assert.deepEqual(fields(conduits.klima), {
+    address: CONDUIT,
+    role: "keeper",
+    from: KEEPER,
+    to: MODULE,
+    open: false,
+    priced: undefined,
+  });
+  assert.deepEqual(fields(conduits.immutable), {
+    address: IMMUTABLE,
+    role: "proposer",
+    from: PROPOSER,
+    to: IMMUTABLE,
+    open: true,
+    priced: [addr(30), addr(31)],
   });
   const sameKey = clientOf(VOTER);
-  await assert.rejects(
-    readAddresses(sameKey.client, MODULE, { conduit: IMMUTABLE, proposer: KEEPER }),
-    /PROPOSER is the keeper/,
-  );
+  await assert.rejects(readAddresses(sameKey.client, settings(KEEPER)), /each needs its own key/);
   assert.deepEqual(sameKey.reads, ["CONDUIT", "KEEPER"], "nothing more is read");
-  await assert.rejects(
-    readAddresses(clientOf(addr(9)).client, MODULE, { conduit: IMMUTABLE, proposer: PROPOSER }),
-    /uses Voter/,
-  );
+  await assert.rejects(readAddresses(clientOf(addr(9)).client, settings(PROPOSER)), /uses Voter/);
 });

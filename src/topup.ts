@@ -1,17 +1,24 @@
 import { encodeFunctionData, erc20Abi, parseEther, zeroAddress, type Abi, type Address } from "viem";
+import { aeroQuoterAbi, aeroRouterAbi, allowanceAbi, safeAbi, uniswapQuoterAbi, uniswapRouterAbi } from "./abi.ts";
 import {
-  aeroQuoterAbi,
-  aeroRouterAbi,
-  allowanceAbi,
-  immutableAbi,
-  safeAbi,
-  uniswapQuoterAbi,
-  uniswapRouterAbi,
-} from "./abi.ts";
-import { blockAtLeast, call, lower, readEach, readMany, WETH, type Call, type Chain } from "./chain.ts";
+  blockAtLeast,
+  byConduit,
+  call,
+  CONDUITS,
+  lower,
+  otherOf,
+  readEach,
+  readMany,
+  WETH,
+  type ByConduit,
+  type Call,
+  type Chain,
+  type Conduit,
+  type ConduitName,
+} from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Run } from "./pass.ts";
-import { broadcastTx, confirmTx, heldAt, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
+import { broadcastTx, confirmTx, heldAt, prepareTx, signTx, type TxCall } from "./vote.ts";
 
 /** Safe's Allowance Module, version 1.0.0. */
 export const ALLOWANCE_MODULE: Address = "0x691f59471Bfd2B7d639DCF74671a2d648ED1E331";
@@ -26,8 +33,13 @@ const UNISWAP_SELF: Address = "0x0000000000000000000000000000000000000002";
 export const AERO_ROUTER: Address = "0x9Ee35Bf1bd69a03c6F0393582030fCe8Bb93D418";
 const AERO_QUOTER: Address = "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868";
 export const TARGET = parseEther("0.003");
-// check.sh fails while a key holds less: MIN_KEEPER_WEI and MIN_PROPOSER_WEI in sh/lib.sh.
+// check.sh fails while a key holds less: MIN_KEY_WEI in sh/lib.sh.
 const MIN_ETH = parseEther("0.002");
+/**
+ * The conduit whose treasury pays for both keys' ETH. Its key draws USDC under the treasury's allowance, swaps it to
+ * ETH, and sends the other conduit's key its share.
+ */
+export const FUNDER: ConduitName = "immutable";
 export const TOP_UP_MS = 5 * 60_000; // the scheduled run starts 10 minutes before its vote
 export const MIN_SWAP = 1_000_000n; // 1 USDC
 export const MIN_SEND = parseEther("0.0001");
@@ -82,33 +94,36 @@ export const VENUES: Venue[] = [
 
 const ROUTERS = [...new Set(VENUES.map((venue) => venue.router))];
 
-/** ETH is in wei and USDC in its 6-decimal units. `left` is what remains of the weekly allowance. */
+/**
+ * ETH is in wei and USDC in its 6-decimal units. `left` is what remains of the weekly allowance, `eth` each conduit's
+ * key's ETH, and `usdc` the funder's key's USDC.
+ */
 type State = {
   at: bigint;
-  sender: From;
+  funder: Conduit;
+  funded: Conduit;
   treasury: Address;
   allowed: bigint;
   left: bigint;
   inTreasury: bigint;
-  keeper: bigint;
-  proposer: bigint;
+  eth: ByConduit<bigint>;
   usdc: bigint;
   approved: Map<Address, bigint>;
   ethUsd: number;
   usdcUsd: number;
 };
 
-/** `gains` is the least ETH the step pays the proposer. */
+/** `gains` is the least ETH the step pays the funder's key. */
 type Step = { what: string; call: TxCall; gains?: bigint };
 
 /**
- * `send` returns once the step is in a block. `at` is the block to quote the swap on, and `balances` gives the keeper's
- * and the proposer's ETH there.
+ * `send` returns once the step is in a block. `at` is the block to quote the swap on, and `balances` gives each
+ * conduit's key's ETH there.
  */
 type Executor = {
   send: (step: Step) => Promise<void>;
   at: () => Promise<bigint>;
-  balances: () => Promise<readonly [bigint, bigint]>;
+  balances: () => Promise<ByConduit<bigint>>;
 };
 
 /**
@@ -120,15 +135,12 @@ export async function topUp(run: Run, until: number): Promise<number> {
     const state = await readState(run, until);
     const exec = (run.dryRun ? simulator : sender)(run, state, until);
     await execute(run.chain, state, allot(state), until, exec);
-    const [keeper, proposer] = await exec.balances();
-    log.info(run.dryRun ? "dry run: would top up to" : "topped up", { keeper, proposer });
-    const keys = [
-      ["keeper", run.chain.keeper, keeper],
-      ["proposer", run.chain.immutable.proposer, proposer],
-    ] as const;
-    const low = keys.filter(([, , eth]) => eth < MIN_ETH);
-    for (const [name, address, eth] of low) {
-      log.error(`${name} ${address} holds ${(Number(eth) / 1e18).toFixed(4)} ETH; fund it`);
+    const eth = await exec.balances();
+    log.info(run.dryRun ? "dry run: would top up to" : "topped up", { eth });
+    const low = CONDUITS.filter((name) => eth[name] < MIN_ETH);
+    for (const name of low) {
+      const { role, from } = run.chain.conduits[name];
+      log.error(`${role} ${from} holds ${(Number(eth[name]) / 1e18).toFixed(4)} ETH; fund it`);
     }
     return low.length;
   } catch (error) {
@@ -138,22 +150,23 @@ export async function topUp(run: Run, until: number): Promise<number> {
 }
 
 async function readState({ chain, prices }: Run, until: number): Promise<State> {
-  const { conduit, proposer } = chain.immutable;
+  const [funder, funded] = [chain.conduits[FUNDER], chain.conduits[otherOf(FUNDER)]];
   const at = await blockAtLeast(chain);
   const read = <T>(calls: Call[]) => readMany<T>(chain.client, calls, { blockNumber: at });
-  const balance = (address: Address) => chain.client.getBalance({ address, blockNumber: at });
-  const [[treasury], priced, keeperEth, proposerEth] = await Promise.all([
-    read<Address>([call(conduit, immutableAbi, "TREASURY")]),
+  const balance = (name: ConduitName) =>
+    chain.client.getBalance({ address: chain.conduits[name].from, blockNumber: at });
+  const [[treasury], priced, ...balances] = await Promise.all([
+    read<Address>([call(funder.address, funder.abi, "TREASURY")]),
     prices([USDC, WETH], until),
-    balance(chain.keeper),
-    balance(proposer),
+    ...CONDUITS.map(balance),
   ]);
+  const key = funder.from;
   const [enabled, allowance, inTreasury, usdc, ...approvals] = await read<boolean | readonly bigint[] | bigint>([
     call(treasury!, safeAbi, "isModuleEnabled", [ALLOWANCE_MODULE]),
-    call(ALLOWANCE_MODULE, allowanceAbi, "getTokenAllowance", [treasury!, proposer, USDC]),
+    call(ALLOWANCE_MODULE, allowanceAbi, "getTokenAllowance", [treasury!, key, USDC]),
     call(USDC, erc20Abi, "balanceOf", [treasury!]),
-    call(USDC, erc20Abi, "balanceOf", [proposer]),
-    ...ROUTERS.map((router) => call(USDC, erc20Abi, "allowance", [proposer, router])),
+    call(USDC, erc20Abi, "balanceOf", [key]),
+    ...ROUTERS.map((router) => call(USDC, erc20Abi, "allowance", [key, router])),
   ]);
   const ethUsd = priced.get(lower(WETH));
   const usdcUsd = priced.get(lower(USDC));
@@ -163,13 +176,13 @@ async function readState({ chain, prices }: Run, until: number): Promise<State> 
   const allowed = enabled ? amount! : 0n;
   return {
     at,
-    sender: { from: proposer, client: chain.proposerClient },
+    funder,
+    funded,
     treasury: treasury!,
     allowed,
     left: allowed > spent! ? allowed - spent! : 0n,
     inTreasury: inTreasury as bigint,
-    keeper: keeperEth,
-    proposer: proposerEth,
+    eth: byConduit((name) => balances[CONDUITS.indexOf(name)]!),
     usdc: usdc as bigint,
     approved: new Map(ROUTERS.map((router, i) => [router, approvals[i] as bigint])),
     ethUsd,
@@ -181,44 +194,37 @@ const toWei = ({ ethUsd, usdcUsd }: State, usdc: bigint) =>
   BigInt(Math.floor((Number(usdc) * 1e12 * usdcUsd) / ethUsd));
 
 /**
- * Enough USDC to take both keys to TARGET, counting what the proposer holds, within the allowance and the treasury's
- * balance. The proposer's ETH above TARGET can go to the keeper, but not the other way around.
+ * Enough USDC to take both keys to TARGET, counting what the funder's key holds, within the allowance and the treasury's
+ * balance. The funder's key's ETH above TARGET can go to the other key, but not the other way around.
  */
 function allot(state: State): bigint {
-  const { keeper, proposer, usdc, allowed, left, inTreasury, ethUsd, usdcUsd } = state;
-  const short = (keeper < TARGET ? TARGET - keeper : 0n) + TARGET - proposer - toWei(state, usdc);
+  const { funder, funded, eth, usdc, allowed, left, inTreasury, ethUsd, usdcUsd } = state;
+  const [has, gets] = [eth[funder.name], eth[funded.name]];
+  const short = (gets < TARGET ? TARGET - gets : 0n) + TARGET - has - toWei(state, usdc);
   const needed = short > 0n ? BigInt(Math.ceil(((Number(short) / 1e18) * ethUsd * 1e6) / usdcUsd)) : 0n;
-  log.info("top-up", {
-    treasury: state.treasury,
-    allowanceLeft: left,
-    inTreasury,
-    ethUsd,
-    keeper,
-    proposer,
-    usdc,
-    needed,
-  });
+  log.info("top-up", { treasury: state.treasury, allowanceLeft: left, inTreasury, ethUsd, eth, usdc, needed });
   const available = left < inTreasury ? left : inTreasury;
   if (needed <= available) return needed;
   const fields = { needed, allowanceLeft: left, inTreasury };
-  if (allowed === 0n) log.warning("the treasury does not let the proposer draw USDC: not topping up", fields);
+  const { role } = funder;
+  if (allowed === 0n) log.warning(`the treasury does not let the ${role} draw USDC: not topping up`, fields);
   else if (inTreasury < left) log.warning("the treasury holds too little USDC to top up the keys: fund it", fields);
-  else log.warning("the proposer's allowance limits the top-up this week", fields);
+  else log.warning(`the ${role}'s allowance limits the top-up this week`, fields);
   return available;
 }
 
-/** Enough to take the keeper to TARGET or, if both keys can't get there, to leave them even. */
-export function shareOf(keeper: bigint, proposer: bigint): bigint {
-  const even = (keeper + proposer) / 2n;
+/** Enough to take the funded key to TARGET or, if both keys can't get there, to leave them even. */
+export function shareOf(funded: bigint, funder: bigint): bigint {
+  const even = (funded + funder) / 2n;
   const goal = even < TARGET ? even : TARGET;
-  return goal > keeper ? goal - keeper : 0n;
+  return goal > funded ? goal - funded : 0n;
 }
 
-const drawCall = ({ treasury, sender }: State, amount: bigint): TxCall => ({
+const drawCall = ({ treasury, funder }: State, amount: bigint): TxCall => ({
   to: ALLOWANCE_MODULE,
   abi: allowanceAbi,
   functionName: "executeAllowanceTransfer",
-  args: [treasury, USDC, sender.from, amount, zeroAddress, 0n, sender.from, "0x"],
+  args: [treasury, USDC, funder.from, amount, zeroAddress, 0n, funder.from, "0x"],
 });
 
 const approveCall = (router: Address, amount: bigint): TxCall => ({
@@ -262,7 +268,7 @@ async function bestVenue(
 }
 
 /**
- * Draws, approves the router, swaps, then sends the keeper its share. The swap is quoted before the draw, so that
+ * Draws, approves the router, swaps, then sends the funded key its share. The swap is quoted before the draw, so that
  * nothing is drawn unless a venue pays enough, and again before the swap, so that its minimum follows the price.
  */
 async function execute(chain: Chain, state: State, draw: bigint, until: number, exec: Executor): Promise<void> {
@@ -275,83 +281,90 @@ async function execute(chain: Chain, state: State, draw: bigint, until: number, 
     }
     const at = await exec.at();
     if (at !== state.at) ({ minimum } = await bestVenue(chain, state, usdc, at, [venue]));
-    const call = venue.swap(usdc, minimum, state.sender.from, deadline(until));
+    const call = venue.swap(usdc, minimum, state.funder.from, deadline(until));
     await exec.send({ what: "swap", call, gains: minimum });
   }
-  const [keeper, proposer] = await exec.balances();
-  const share = shareOf(keeper, proposer);
-  if (share >= MIN_SEND) await exec.send({ what: "transfer to the keeper", call: { to: chain.keeper, value: share } });
+  const { funder, funded } = state;
+  const eth = await exec.balances();
+  const share = shareOf(eth[funded.name], eth[funder.name]);
+  const call = { to: funded.from, value: share };
+  if (share >= MIN_SEND) await exec.send({ what: `transfer to the ${funded.role}`, call });
 }
 
 function sender(run: Run, state: State, until: number): Executor {
   const { chain } = run;
   let pinned = state.at;
-  const balance = (address: Address) => chain.client.getBalance({ address, blockNumber: pinned });
+  const balance = (name: ConduitName) =>
+    chain.client.getBalance({ address: chain.conduits[name].from, blockNumber: pinned });
   return {
     send: async ({ what, call }) => {
-      pinned = await sendTx(run, state.sender, call, what, await blockAtLeast(chain, pinned), until);
+      pinned = await sendTx(run, state.funder, call, what, await blockAtLeast(chain, pinned), until);
     },
     at: async () => (pinned === state.at ? pinned : blockAtLeast(chain, pinned)),
-    balances: () => Promise.all([balance(chain.keeper), balance(state.sender.from)] as const),
+    balances: async () => {
+      const eth = await Promise.all(CONDUITS.map(balance));
+      return byConduit((name) => eth[CONDUITS.indexOf(name)]!);
+    },
   };
 }
 
 /**
- * Simulates each step after the ones before it, and checks it as sendTx does, against the proposer's balance after the
- * earlier steps. Each step costs what it is expected to, and the swap pays its minimum.
+ * Simulates each step after the ones before it, and checks it as sendTx does, against the funder's key's balance after
+ * the earlier steps. Each step costs what it is expected to, and the swap pays its minimum.
  */
 function simulator({ chain }: Run, state: State): Executor {
   const done: TxCall[] = [];
-  let [keeper, proposer] = [state.keeper, state.proposer];
+  const { funder, funded } = state;
+  const eth = { ...state.eth };
   return {
     send: async ({ what, call, gains = 0n }) => {
       const options = { what: `the ${what}`, before: done, blockNumber: state.at };
-      const prepared = await prepareTx(chain, state.sender, call, options);
-      await payable(chain, prepared, call, state.sender.from, proposer);
+      const prepared = await prepareTx(chain, funder, call, options);
+      await payable(chain, funder, prepared, call, eth[funder.name]);
       done.push(call);
       const value = call.value ?? 0n;
-      proposer += gains - prepared.expectedCost - value;
-      if (call.to === chain.keeper) keeper += value;
+      eth[funder.name] += gains - prepared.expectedCost - value;
+      if (call.to === funded.from) eth[funded.name] += value;
       const { tx } = prepared;
       log.info("dry run: top-up simulated, not sent", { what, to: tx.to, value: tx.value, gas: tx.gas });
     },
     at: async () => state.at,
-    balances: async () => [keeper, proposer] as const,
+    balances: async () => ({ ...eth }),
   };
 }
 
 /**
- * Fails if a transaction this run sent from the proposer may still land at its nonce, because it may be a vote and a
- * top-up must never replace one, or if `balance` can't pay for the call's gas and value.
+ * Fails if a transaction this run sent from the funder's key may still land at its nonce, because it may be a vote and
+ * a top-up must never replace one, or if `balance` can't pay for the call's gas and value.
  */
 async function payable(
   chain: Chain,
+  { role, from }: Conduit,
   { tx, cost }: { tx: { nonce: number }; cost: bigint },
   call: TxCall,
-  from: Address,
   balance: bigint,
 ): Promise<void> {
   if ((await heldAt(chain, from, tx.nonce)) !== false) {
-    throw new Error(`a transaction of the proposer is pending at nonce ${tx.nonce}`);
+    throw new Error(`a transaction of the ${role} is pending at nonce ${tx.nonce}`);
   }
   const needed = cost + (call.value ?? 0n);
-  if (balance < needed) throw new Error(`fund the proposer: ${from} has ${balance} wei, needs ${needed}`);
+  if (balance < needed) throw new Error(`fund the ${role}: ${from} has ${balance} wei, needs ${needed}`);
 }
 
 async function sendTx(
-  { chain, proposer: signer }: Run,
-  sender: From,
+  { chain, signers }: Run,
+  funder: Conduit,
   call: TxCall,
   what: string,
   at: bigint,
   until: number,
 ): Promise<bigint> {
-  const { from } = sender;
-  const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at });
-  await payable(chain, prepared, call, from, prepared.balance);
+  const { from } = funder;
+  const prepared = await prepareTx(chain, funder, call, { what: `the ${what}`, blockNumber: at });
+  await payable(chain, funder, prepared, call, prepared.balance);
   const { tx } = prepared;
-  const { signed, ...ready } = await signTx(signer, tx, false, from);
-  if (!signed) throw new Error("no key signs for the proposer");
+  const { signed, ...ready } = await signTx(signers[funder.name], tx, false, from);
+  if (!signed) throw new Error(`no key signs for the ${funder.role}`);
   const hash = await broadcastTx(chain, { ...ready, signed }, until);
   log.info("top-up sent", { what, hash, nonce: tx.nonce });
   const { blockNumber } = await confirmTx(chain, from, hash, tx.nonce, `the ${what}`);

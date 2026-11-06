@@ -11,8 +11,8 @@ import {
   type LocalAccount,
 } from "viem";
 import { base } from "viem/chains";
-import { immutableAbi, moduleAbi } from "./abi.ts";
-import { blocksBetween, lower, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
+import type { immutableAbi } from "./abi.ts";
+import { blocksBetween, lower, readMany, voterCall, WEEK, type Chain, type Client, type Conduit } from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
@@ -43,47 +43,11 @@ type Target = { time: bigint; lastVoted: bigint };
 
 export type Prepared = { tx: Tx; from: Address; signed?: Hex | undefined; lastVoted?: bigint | undefined };
 
-/**
- * `conduit` is the address the Voter records votes for. Anyone can vote for an `open` conduit, so a vote on chain may
- * not be the sender's.
- */
-export type Sender = {
-  name: string;
-  from: Address;
-  to: Address;
-  abi: Abi;
-  conduit: Address;
-  open: boolean;
-  client: Client;
-};
+/** The other conduit's vote, which may land before ours in the same block. */
+export type Rival = { conduit: Conduit; vote: Vote };
 
-export const klimaSender = ({ client, keeper, module, conduit }: Chain): Sender => ({
-  name: "keeper",
-  from: keeper,
-  to: module,
-  abi: moduleAbi,
-  conduit,
-  open: false,
-  client,
-});
-
-export function immutableSender({ immutable, proposerClient }: Chain): Sender {
-  const { proposer, conduit } = immutable;
-  return {
-    name: "proposer",
-    from: proposer,
-    to: conduit,
-    abi: immutableAbi,
-    conduit,
-    open: true,
-    client: proposerClient,
-  };
-}
-
-/** Another sender's vote that may land before ours in the same block. */
-export type Rival = { sender: Sender; vote: Vote };
-
-export type ModuleCall =
+/** What a conduit's key sends: to the Klima conduit's Safe module, or to the immutable conduit itself. */
+export type ConduitCall =
   | { functionName: "vote"; args: readonly [Address[], bigint[]] }
   | {
       functionName: "claimSwapAndDistribute";
@@ -111,45 +75,46 @@ function sentBy(client: Client): Map<Address, LastSent> {
   return sent;
 }
 
+type VoteOptions = { target?: Target | undefined; rival?: Rival | undefined; fees?: Fees | undefined };
+
 /** With a `rival`, the vote must also succeed after the rival's. Without `fees`, they are read. */
 export async function prepareVote(
   chain: Chain,
+  conduit: Conduit,
   account: LocalAccount | undefined,
   vote: Vote,
   dryRun: boolean,
-  target?: Target,
-  sender: Sender = klimaSender(chain),
-  rival?: Rival,
-  fees?: Fees,
+  { target, rival, fees }: VoteOptions = {},
 ): Promise<Prepared> {
-  const options = { target, sender, rival, fees };
-  const { tx, cost, balance, tip, congested } = await prepareCall(chain, voteCall(vote), options);
+  const prepared = await prepareCall(chain, conduit, voteCall(vote), { target, rival, fees });
+  const { tx, cost, balance, tip, congested } = prepared;
   // A vote before the last blocks must leave enough ETH to vote again in them.
   const needed = (target ? 1n : 2n) * cost;
-  const { name, from, conduit } = sender;
+  const { label, role, from } = conduit;
   if (balance < needed) {
-    throw new Error(`fund the ${name}: ${from} has ${balance} wei, needs ${needed}: a vote costs up to ${cost}`);
+    throw new Error(`fund ${label}'s ${role}: ${from} has ${balance} wei, needs ${needed}: a vote costs up to ${cost}`);
   }
   const { pools, weights } = vote;
-  log.info("vote prepared", { conduit, pools, weights, gas: tx.gas, nonce: tx.nonce, tip, congested });
+  const fields = { conduit: conduit.address, pools, weights, gas: tx.gas, nonce: tx.nonce, tip, congested };
+  log.info("vote prepared", fields);
   return { ...(await signTx(account, tx, dryRun, from)), lastVoted: target?.lastVoted };
 }
 
-const voteCall = ({ pools, weights }: Vote): ModuleCall => ({ functionName: "vote", args: [pools, weights] });
+const voteCall = ({ pools, weights }: Vote): ConduitCall => ({ functionName: "vote", args: [pools, weights] });
 
 type CallOptions = {
   target?: Target | undefined;
-  before?: readonly ModuleCall[];
+  before?: readonly ConduitCall[];
   at?: bigint;
-  sender?: Sender;
   rival?: Rival | undefined;
   fees?: Fees | undefined;
 };
 
 export async function prepareCall(
   chain: Chain,
-  call: ModuleCall,
-  { target, before = [], at, sender = klimaSender(chain), rival, fees }: CallOptions = {},
+  sender: Conduit,
+  call: ConduitCall,
+  { target, before = [], at, rival, fees }: CallOptions = {},
 ) {
   // Votes are simulated just after the latest block, at a time kept inside the epoch. The latest block may already be
   // in the second a last-block vote is for, the last one before the flip, and the immutable conduit refuses votes from
@@ -168,16 +133,21 @@ export async function prepareCall(
     blockNumber: head?.number ?? at,
     time: time === undefined ? undefined : min(time + 1n, (time / WEEK + 1n) * WEEK - 1n),
     rival: rival && {
-      name: rival.sender.name,
-      from: rival.sender.from,
-      calls: [txCallOf(rival.sender, voteCall(rival.vote))],
+      name: rival.conduit.label,
+      from: rival.conduit.from,
+      calls: [txCallOf(rival.conduit, voteCall(rival.vote))],
     },
     landed: later,
     fees,
   });
 }
 
-const txCallOf = ({ to, abi }: Sender, { functionName, args }: ModuleCall): TxCall => ({ to, abi, functionName, args });
+const txCallOf = ({ to, abi }: Conduit, { functionName, args }: ConduitCall): TxCall => ({
+  to,
+  abi,
+  functionName,
+  args,
+});
 
 type TxOptions = {
   what: string;
@@ -251,7 +221,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const second = afterRival?.[0]?.calls.at(-1);
   if (second && second.status !== "success") {
     const reason = second.error ? errorMessage(second.error) : "no reason given";
-    throw new Error(`${what} would revert after the ${rival!.name}'s: ${reason}`);
+    throw new Error(`${what} would revert after ${rival!.name}'s vote: ${reason}`);
   }
   const { baseFee, tip, congested } = fees;
   // The confirmed nonce, so that a transaction this process sent and hasn't seen in a block is replaced rather than
@@ -343,7 +313,7 @@ export async function heldAt(chain: Chain, from: Address, nonce: number): Promis
   return chain.known(last.hashes);
 }
 
-export function markMined({ client, keeper }: Chain, nonce: number, from: Address = keeper): void {
+export function markMined({ client }: Chain, nonce: number, from: Address): void {
   const sent = sentBy(client);
   const lastSent = sent.get(lower(from));
   if (lastSent?.nonce === nonce) sent.set(lower(from), { ...lastSent, mined: true });
@@ -372,7 +342,7 @@ export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: n
  * decided before the one it replaces landed would reuse that nonce, and a node refuses it, as it refuses one that pays
  * too little more than a transaction it holds.
  */
-export async function nonceTaken(chain: Chain, nonce: number, from: Address = chain.keeper): Promise<boolean> {
+export async function nonceTaken(chain: Chain, nonce: number, from: Address): Promise<boolean> {
   const [next, held] = await Promise.all([
     chain.client.getTransactionCount({ address: from }).catch(() => undefined),
     heldAt(chain, from, nonce),
@@ -382,16 +352,16 @@ export async function nonceTaken(chain: Chain, nonce: number, from: Address = ch
 
 export async function castVote(
   chain: Chain,
+  sender: Conduit,
   account: LocalAccount | undefined,
   vote: Vote,
   dryRun: boolean,
   until: number,
-  sender: Sender = klimaSender(chain),
   rival?: Rival,
 ): Promise<void> {
-  const prepared = await prepareVote(chain, account, vote, dryRun, undefined, sender, rival);
+  const prepared = await prepareVote(chain, sender, account, vote, dryRun, { rival });
   const { signed } = prepared;
-  const { conduit } = sender;
+  const conduit = sender.address;
   if (!signed) return;
   if (dryRun) {
     log.info("dry run: signed, not sent", { conduit });
@@ -421,7 +391,7 @@ export async function castVote(
     if (taken) throw new Error(`vote ${hash} reverted: another vote for ${conduit} was first in its second; again`);
     throw new VoteSent(`vote ${hash} reverted`);
   }
-  await verifyVote(chain, vote, hash, receipt.blockNumber, sender.conduit);
+  await verifyVote(chain, vote, hash, receipt.blockNumber, conduit);
 }
 
 export async function lastVotedAt(chain: Chain, conduit: Address, blockNumber: bigint): Promise<bigint> {
@@ -438,14 +408,14 @@ async function tookSecond(chain: Chain, conduit: Address, blockNumber: bigint): 
 }
 
 /**
- * Whether the immutable conduit's vote recorded at `lastVoted` (s) is the sender's. The Voter takes one vote per
- * conduit per second, so it is if the conduit accepted a vote the sender proposed in one of that second's blocks.
+ * Whether an open conduit's vote recorded at `lastVoted` (s) is its key's. The Voter takes one vote per conduit per
+ * second, so it is if the conduit accepted a vote the key proposed in one of that second's blocks.
  */
-export async function votedAt({ client }: Chain, { from, conduit }: Sender, lastVoted: bigint): Promise<boolean> {
+export async function votedAt({ client }: Chain, { from, address, abi }: Conduit, lastVoted: bigint): Promise<boolean> {
   const [first, last] = await blocksBetween(client, lastVoted, lastVoted + 1n);
   const accepted = await client.getContractEvents({
-    address: conduit,
-    abi: immutableAbi,
+    address,
+    abi: abi as typeof immutableAbi,
     eventName: "VoteAccepted",
     args: { proposer: from },
     fromBlock: first,
@@ -455,11 +425,11 @@ export async function votedAt({ client }: Chain, { from, conduit }: Sender, last
 }
 
 /**
- * The vote this process sent last for the sender, while it may still land: until its receipt is seen, while no block
+ * The vote this process sent last for the conduit, while it may still land: until its receipt is seen, while no block
  * holds a transaction at its nonce, and while a node still has it. A nonce that can't be read counts as unused, and
  * nodes that don't answer as holding the vote.
  */
-export async function pendingVote(chain: Chain, { from, to, abi, client }: Sender): Promise<Vote | undefined> {
+export async function pendingVote(chain: Chain, { from, to, abi, client }: Conduit): Promise<Vote | undefined> {
   const last = sentBy(chain.client).get(lower(from));
   // The last transaction may have gone elsewhere, like a top-up's. Then it isn't a vote, and `abi` can't decode it.
   if (!last || last.mined || !isAddressEqual(last.to, to)) return undefined;
@@ -482,7 +452,7 @@ export async function verifyVote(
   vote: Vote,
   hash: Hex,
   blockNumber: bigint,
-  conduit: Address = chain.conduit,
+  conduit: Address,
 ): Promise<void> {
   const calls = [
     ...vote.pools.map((_, i) => voterCall(chain, "poolVote", [conduit, BigInt(i)])),
