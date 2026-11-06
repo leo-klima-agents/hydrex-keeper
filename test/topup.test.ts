@@ -30,10 +30,11 @@ import {
   USDC,
   VENUES,
 } from "../src/topup.ts";
-import { pendingVote, prepareVote, v2Sender } from "../src/vote.ts";
+import { immutableSender, pendingVote, prepareVote } from "../src/vote.ts";
+import { logged, sentNotMined } from "./helpers.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
-const [MODULE, CONDUIT, VOTER, VE, V2, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
+const [MODULE, CONDUIT, VOTER, VE, IMMUTABLE, TREASURY] = [addr(1), addr(2), addr(3), addr(4), addr(10), addr(11)];
 const keeper = privateKeyToAccount(generatePrivateKey());
 const proposer = privateKeyToAccount(generatePrivateKey());
 const [KEEPER, PROPOSER] = [keeper.address, proposer.address];
@@ -64,7 +65,6 @@ type World = {
   venues: (number | undefined)[];
   /** The payouts that replace `venues` once an approval is mined. */
   afterApproval?: (number | undefined)[];
-  pending?: boolean;
   reverts?: string;
   lost?: string;
 };
@@ -184,7 +184,7 @@ function apply(w: World, { from, to, functionName, args, value }: Sent): void {
     case `${low(KEEPER)}.transfer`:
       take(w.eth, from, value, "insufficient funds");
       return add(w.eth, to, value);
-    case `${low(V2)}.vote`:
+    case `${low(IMMUTABLE)}.vote`:
       return;
   }
   throw new Error(`unexpected ${functionName} on ${to}`);
@@ -203,7 +203,7 @@ function read(w: World, c: Call): unknown {
   const [a, b] = args as [Address, Address];
   switch (functionName) {
     case "TREASURY":
-      assert.equal(address, V2);
+      assert.equal(address, IMMUTABLE);
       return TREASURY;
     case "isModuleEnabled":
       assert.deepEqual([address, a], [TREASURY, ALLOWANCE_MODULE]);
@@ -249,7 +249,7 @@ const ABIS: Record<string, Abi> = {
 
 type Simulated = { account: Address; to: Address; functionName?: string; args?: readonly unknown[]; value?: bigint };
 
-function fakeChain(w: World, { v2 = true } = {}) {
+function fakeChain(w: World) {
   const sent: Sent[] = [];
   const mined: Sent[] = [];
   const txs: ReturnType<typeof parseTransaction>[] = [];
@@ -291,11 +291,8 @@ function fakeChain(w: World, { v2 = true } = {}) {
     },
     estimateMaxPriorityFeePerGas: async () => 1_000_000n,
     getFeeHistory: async () => ({ baseFeePerGas: [5_000_000n, 5_000_000n], gasUsedRatio: [0.2, 0.3], reward: [] }),
-    // "latest" counts mined transactions, and "pending" also counts sent ones. A lost transaction stays pending.
-    getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag: string }) =>
-      blockTag === "latest"
-        ? mined.filter((s) => s.from === address).length
-        : sent.filter((s) => s.from === address).length + (w.pending ? 1 : 0),
+    // Counts mined transactions only: a lost one never is.
+    getTransactionCount: async ({ address }: { address: Address }) => mined.filter((s) => s.from === address).length,
     estimateL1Fee: async () => 5_000n,
     waitForTransactionReceipt: async ({ hash }: { hash: Hex }) => {
       const tx = inFlight.get(hash)!;
@@ -335,14 +332,15 @@ function fakeChain(w: World, { v2 = true } = {}) {
   const chain: Chain = {
     client,
     bulk: client,
-    v2Client: client,
+    proposerClient: client,
     broadcast,
+    known: async () => false,
     module: MODULE,
     conduit: CONDUIT,
     keeper: KEEPER,
     voter: VOTER,
     ve: VE,
-    ...(v2 ? { v2: { conduit: V2, proposer: PROPOSER, priced: [USDC] } } : {}),
+    immutable: { conduit: IMMUTABLE, proposer: PROPOSER, priced: [USDC] },
   };
   return { chain, sent, simulated, txs };
 }
@@ -389,15 +387,8 @@ function swapOf(sent: Sent[]): { amountIn: bigint; minimum: bigint; deadline: bi
 }
 
 async function errorsOf(t: { mock: TestContext["mock"] }, body: () => Promise<unknown>): Promise<string[]> {
-  const write = t.mock.method(process.stdout, "write", () => true);
-  try {
-    await body();
-  } finally {
-    write.mock.restore();
-  }
-  return write.mock.calls
-    .map((call) => JSON.parse(String(call.arguments[0])) as { severity: string; error?: string })
-    .flatMap((line) => (line.severity === "ERROR" && line.error ? [line.error] : []));
+  const lines = await logged(t, body);
+  return lines.flatMap((line) => (line.severity === "ERROR" && line.error ? [line.error] : []));
 }
 
 test("tops up both keys: the proposer draws what both lack, swaps it where it is paid most, and sends the keeper its share", async () => {
@@ -467,12 +458,6 @@ test("keys at the target send nothing", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("without the immutable conduit, there is no proposer, and nothing is topped up", async () => {
-  const { chain, sent } = fakeChain(world(), { v2: false });
-  assert.equal(await topUp(runOf(chain), until()), 0);
-  assert.equal(sent.length, 0);
-});
-
 test("when the allowance cannot pay for both, the proposer draws all it may, and both keys end even", async () => {
   const w = world({ allowed: usdc(10) });
   w.eth[low(PROPOSER)] = eth(0.0001);
@@ -500,19 +485,42 @@ test("the keeper's ETH beyond the target does not count for the proposer", async
   near(ethOf(w, PROPOSER), TARGET, "topped up");
 });
 
-test("a treasury that holds too little fails the top-up, once the proposer drew what it holds", async () => {
-  const w = world({ usdc: { [low(TREASURY)]: usdc(6) } });
+test("a treasury that holds too little only warns, once the proposer drew what it holds, if both keys keep 0.002 ETH", async (t) => {
+  const w = world({ usdc: { [low(TREASURY)]: usdc(8) } });
   const { chain, sent } = fakeChain(w);
-  assert.equal(await topUp(runOf(chain), until()), 1);
-  assert.equal(drawn(sent), usdc(6));
+  let failures = -1;
+  const lines = await logged(t, async () => (failures = await topUp(runOf(chain), until())));
+  assert.equal(failures, 0);
+  assert.deepEqual(
+    lines.filter((l) => l.severity !== "INFO").map((l) => [l.severity, l.message]),
+    [["WARNING", "the treasury holds too little USDC to top up the keys: fund it"]],
+  );
+  assert.equal(drawn(sent), usdc(8));
   near(ethOf(w, KEEPER), ethOf(w, PROPOSER), "both even");
 });
 
-test("a treasury that lets the proposer draw nothing tops up nothing, and does not fail", async () => {
+test("a key left under 0.002 ETH fails the top-up with check.sh's message, however little was drawn", async (t) => {
+  const w = world({ usdc: { [low(TREASURY)]: usdc(6) } });
+  const { chain, sent } = fakeChain(w);
+  let failures = -1;
+  const lines = await logged(t, async () => (failures = await topUp(runOf(chain), until())));
+  assert.equal(failures, 2, "one for each key");
+  assert.equal(drawn(sent), usdc(6), "after drawing all the treasury holds");
+  const errors = lines.filter((l) => l.severity === "ERROR").map((l) => l.message);
+  assert.equal(errors.length, 2);
+  assert.match(errors[0]!, /^keeper 0x[0-9a-fA-F]{40} holds 0\.\d{4} ETH; fund it$/);
+  assert.match(errors[1]!, /^proposer 0x[0-9a-fA-F]{40} holds 0\.\d{4} ETH; fund it$/);
+});
+
+test("a treasury that lets the proposer draw nothing tops up nothing, and fails only for a key under 0.002 ETH", async () => {
   for (const more of [{ enabled: false }, { allowed: 0n }, { spent: usdc(20) }]) {
-    const { chain, sent } = fakeChain(world(more));
+    const enough = { [low(KEEPER)]: eth(0.0025), [low(PROPOSER)]: eth(0.0025) };
+    const { chain, sent } = fakeChain(world({ ...more, eth: enough }));
     assert.equal(await topUp(runOf(chain), until()), 0);
     assert.equal(sent.length, 0, "and the proposer has no ETH to spare for the keeper");
+    const short = fakeChain(world(more));
+    assert.equal(await topUp(runOf(short.chain), until()), 2, "keys at 0.0014 and 0.0005 ETH");
+    assert.equal(short.sent.length, 0);
   }
 });
 
@@ -573,10 +581,18 @@ test("everything goes through the proposer: one that cannot pay tops up neither 
   assert.equal(ethOf(w, KEEPER), eth(0.0014));
 });
 
-test("a top-up never replaces a transaction pending at the proposer's nonce, which may be a vote", async () => {
-  const { chain, sent } = fakeChain(world({ pending: true }));
+test("a top-up never replaces a transaction this run sent from the proposer that may still land, which may be a vote", async () => {
+  const { chain, sent } = fakeChain(world());
+  await sentNotMined(chain, PROPOSER, 0);
   assert.equal(await topUp(runOf(chain), until()), 1);
   assert.equal(sent.length, 0);
+});
+
+test("a top-up replaces a transaction this run sent from the proposer that no node holds any more", async () => {
+  const { chain, txs } = fakeChain(world());
+  await sentNotMined(chain, PROPOSER, 0, false);
+  assert.equal(await topUp(runOf(chain), until()), 0);
+  assert.equal(txs[0]?.nonce, 0, "at the nonce the dropped one held");
 });
 
 test("a transaction that would revert is not sent, and the proposer's USDC waits for the next top-up", async () => {
@@ -590,10 +606,10 @@ test("a transaction that would revert is not sent, and the proposer's USDC waits
 test("a top-up transaction whose outcome is unknown does not hold up the proposer's vote: it replaces it", async () => {
   const { chain, txs } = fakeChain(world({ lost: "transfer" }));
   assert.equal(await topUp(runOf(chain), until()), 1);
-  assert.equal(await pendingVote(chain, v2Sender(chain)), undefined, "a transfer to the keeper is no vote");
+  assert.equal(await pendingVote(chain, immutableSender(chain)), undefined, "a transfer to the keeper is no vote");
   const lost = txs.at(-1)!;
   const vote = { pools: [addr(20)], weights: [1n] };
-  const { tx } = await prepareVote(chain, proposer, vote, false, undefined, v2Sender(chain));
+  const { tx } = await prepareVote(chain, proposer, vote, false, undefined, immutableSender(chain));
   assert.equal(tx.nonce, lost.nonce, "at its nonce");
   assert.ok(tx.maxFeePerGas * 4n >= lost.maxFeePerGas! * 5n, "a quarter more in fees");
   assert.ok(tx.maxPriorityFeePerGas * 4n >= lost.maxPriorityFeePerGas! * 5n, "and in tip");
@@ -614,8 +630,9 @@ test("a dry run whose transactions would revert fails", async () => {
   assert.equal(sent.length, 0);
 });
 
-test("a dry run fails as the run would, on a transaction pending at the proposer's nonce or a proposer that cannot pay", async (t) => {
-  const pending = fakeChain(world({ pending: true }));
+test("a dry run fails as the run would, on a transaction of the proposer that may still land or a proposer that cannot pay", async (t) => {
+  const pending = fakeChain(world());
+  await sentNotMined(pending.chain, PROPOSER, 0);
   const broke = world();
   broke.eth[low(PROPOSER)] = 1_000n;
   const cannotPay = fakeChain(broke);

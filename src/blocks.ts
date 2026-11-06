@@ -1,17 +1,24 @@
-import type { Client } from "./chain.ts";
+import { BLOCK_MS, msOf, type Client } from "./chain.ts";
+import { warnOnce } from "./log.ts";
 
 const HISTORY = 30;
-const DEFAULT_GAP_MS = 2_000;
-const SEND_MARGIN_MS = 200; // covers poll lag and the time a vote takes to reach the builder
+const SEND_MARGIN_MS = 200; // covers poll lag and the time a vote takes to reach the sequencer
+const FAST_POLL_MS = 100; // a slower poll could have seen its block anywhere in it, too loosely to time the seal
+const SLACK = 1; // blocks a vote can land late and still be in the second it is for
+const SECONDS = 2; // the last seconds before the flip, each with a vote
 const POLL_MS = 50;
 const POLL_TIMEOUT_MS = 500;
 
-type Header = { number: bigint; timestamp: bigint; txs: number };
+/** A block's number and its time in ms. */
+type Header = { number: bigint; time: number };
 
-/** In ms. `seal` is how long after its timestamp a block is sealed, and `lead` how long before it a vote is sent. */
-type Timing = { gap: number; maxGap: number; seal: number; lead: number };
+/**
+ * In ms. `seal` is how long after its time a block is first seen, at most 0, and `lead` how long before its block's
+ * time a vote is sent.
+ */
+type Timing = { gap: number; seal: number; lead: number };
 
-type Seen = { time: number; txs: number; changes: number[] };
+type Seen = { time: number; at: number; took: number };
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 
@@ -19,43 +26,34 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Learns block timing from polls of the pending block. Base builds each block in sub-blocks, which appear one after
- * another until shortly before the block is sealed. A vote is sent `lead` ms before the block's timestamp so that it
- * reaches the builder before the last sub-block starts. When no sub-blocks are seen, it is sent half a block early.
+ * Learns block timing from polls of the latest block. Base makes a block every 200 ms, five in each second of
+ * `block.timestamp`. The Voter takes one vote per conduit per second, so a vote goes in each of the last SECONDS
+ * seconds before the flip, in the block SLACK blocks before that second's last, so that a vote that lands a block late
+ * still counts in that second. A vote is sent `lead` ms before its block's time, so that it reaches the sequencer
+ * before that block's build starts, when the block before it is sealed.
  */
 export class Blocks {
   #seen = new Map<bigint, Seen>();
   #last: bigint | undefined;
+  #timing = timingOf(this.#seen);
 
-  observe({ number, timestamp, txs }: Header, at: number): void {
-    if (this.#last !== undefined && number < this.#last) return;
-    const seen = this.#seen.get(number);
-    if (seen) {
-      if (txs > seen.txs) {
-        seen.txs = txs;
-        seen.changes.push(at);
-      }
-      return;
-    }
-    this.#seen.set(number, { time: Number(timestamp) * 1000, txs, changes: [at] });
+  /**
+   * Only the first sighting of a block counts, and none of a block older than one already seen. `took` is how long the
+   * poll that saw it took.
+   */
+  observe({ number, time }: Header, at: number, took = 0): void {
+    if (this.#last !== undefined && number <= this.#last) return;
+    this.#seen.set(number, { time, at, took });
     this.#last = number;
     for (const n of this.#seen.keys()) if (n <= number - BigInt(HISTORY)) this.#seen.delete(n);
+    this.#timing = timingOf(this.#seen);
   }
 
   get timing(): Timing {
-    const pairs = [...this.#seen].flatMap(([n, block]) => {
-      const next = this.#seen.get(n + 1n);
-      return next ? [{ block, next }] : [];
-    });
-    const gaps = pairs.map(({ block, next }) => next.time - block.time).filter((g) => g > 0);
-    const gap = median(gaps) ?? DEFAULT_GAP_MS;
-    const seal = median(pairs.map(({ block, next }) => next.changes[0]! - block.time)) ?? 0;
-    const built = pairs.map(({ block }) => block).filter((b) => b.changes.length > 2);
-    const lastStarts = median(built.map((b) => b.changes.at(-2)! - b.time));
-    const lead = lastStarts === undefined ? gap / 2 : SEND_MARGIN_MS - lastStarts;
-    return { gap, maxGap: Math.max(gap, ...gaps), seal, lead };
+    return this.#timing;
   }
 
+  /** The time of the block being built at `now`: the first one not sealed yet. */
   building(now: number, { gap, seal } = this.timing): number | undefined {
     if (this.#last === undefined) return undefined;
     let time = this.#seen.get(this.#last)!.time;
@@ -63,31 +61,57 @@ export class Blocks {
     return time;
   }
 
-  /** The first block after `after` that could be one of the last two before `flip`. */
+  /** The first block after `after` that a vote goes in and that isn't sealed at `now`. */
   next(flip: number, after: number, now: number): number | undefined {
     const timing = this.timing;
-    let time = this.building(now, timing);
-    if (time === undefined) return undefined;
-    while (time <= after || time + 2 * timing.maxGap < flip) time += timing.gap;
-    return time < flip ? time : undefined;
+    const building = this.building(now, timing);
+    if (building === undefined) return undefined;
+    return targets(flip, building, timing.gap).find((time) => time > after && time >= building);
+  }
+
+  /** The block the next vote goes in: the first whose deadline is still ahead at `now`. */
+  upcoming(flip: number, now: number): number | undefined {
+    return this.next(flip, now + this.timing.lead, now);
   }
 }
 
+function timingOf(seen: Map<bigint, Seen>): Timing {
+  const gaps = [...seen].flatMap(([n, { time }]) => {
+    const before = seen.get(n - 1n);
+    return before && time > before.time ? [time - before.time] : [];
+  });
+  const gap = median(gaps) ?? BLOCK_MS;
+  // The earliest sighting by a fast poll. Blocks seen late, from a lagging RPC, after a pause in the polls, or from a
+  // sequencer behind its schedule, can only make votes go early, never late.
+  const fast = [...seen.values()].filter(({ took }) => took <= FAST_POLL_MS);
+  const seal = Math.min(0, ...fast.map(({ time, at }) => at - time));
+  return { gap, seal, lead: gap - seal + SEND_MARGIN_MS };
+}
+
+/** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on `anchor`'s grid. */
+function targets(flip: number, anchor: number, gap: number): number[] {
+  return Array.from({ length: SECONDS }, (_, i) => {
+    const end = flip - (SECONDS - 1 - i) * 1000;
+    const last = anchor + Math.floor((end - 1 - anchor) / gap) * gap;
+    return last - SLACK * gap;
+  });
+}
+
 export async function watch(client: Client, blocks: Blocks, stop: () => boolean): Promise<void> {
+  const unstamped = warnOnce("a block without timestampMs is left out of the timing: is the RPC behind Base?");
   while (!stop()) {
     const started = Date.now();
     try {
       const block = await Promise.race([
-        client.request({ method: "eth_getBlockByNumber", params: ["pending", false] }),
+        client.request({ method: "eth_getBlockByNumber", params: ["latest", false] }),
         sleep(POLL_TIMEOUT_MS).then(() => null),
       ]);
       if (block?.number) {
-        const header = {
-          number: BigInt(block.number),
-          timestamp: BigInt(block.timestamp),
-          txs: block.transactions.length,
-        };
-        blocks.observe(header, (started + Date.now()) / 2);
+        const number = BigInt(block.number);
+        const time = msOf(block);
+        const took = Date.now() - started;
+        if (time === undefined) unstamped(new Error(`block ${number} has no timestampMs`));
+        else blocks.observe({ number, time }, started + took / 2, took);
       }
     } catch {}
     await sleep(Math.max(0, started + POLL_MS - Date.now()));

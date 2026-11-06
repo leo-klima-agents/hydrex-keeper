@@ -11,7 +11,7 @@ import {
 import { blockAtLeast, call, lower, readEach, readMany, WETH, type Call, type Chain } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Run } from "./pass.ts";
-import { broadcastTx, confirmTx, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
+import { broadcastTx, confirmTx, heldAt, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
 
 /** Safe's Allowance Module, version 1.0.0. */
 export const ALLOWANCE_MODULE: Address = "0x691f59471Bfd2B7d639DCF74671a2d648ED1E331";
@@ -25,7 +25,9 @@ const UNISWAP_SELF: Address = "0x0000000000000000000000000000000000000002";
 // address.
 export const AERO_ROUTER: Address = "0x9Ee35Bf1bd69a03c6F0393582030fCe8Bb93D418";
 const AERO_QUOTER: Address = "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868";
-export const TARGET = parseEther("0.003"); // above the 0.002 ETH that check.sh requires
+export const TARGET = parseEther("0.003");
+// check.sh fails while a key holds less: MIN_KEEPER_WEI and MIN_PROPOSER_WEI in sh/lib.sh.
+const MIN_ETH = parseEther("0.002");
 export const TOP_UP_MS = 5 * 60_000; // the scheduled run starts 10 minutes before its vote
 export const MIN_SWAP = 1_000_000n; // 1 USDC
 export const MIN_SEND = parseEther("0.0001");
@@ -109,27 +111,34 @@ type Executor = {
   balances: () => Promise<readonly [bigint, bigint]>;
 };
 
-/** If there isn't enough USDC for both keys to reach TARGET, they end up even. Returns the number of failures. */
+/**
+ * If there isn't enough USDC for both keys to reach TARGET, they end up even, and that only warns, unless a key ends
+ * with less than MIN_ETH. Each such key is an error, as check.sh reports it. Returns the number of failures.
+ */
 export async function topUp(run: Run, until: number): Promise<number> {
-  if (!run.chain.v2) return 0;
-  let failures = 0;
   try {
     const state = await readState(run, until);
-    const allotted = allot(state);
-    failures = allotted.failures;
     const exec = (run.dryRun ? simulator : sender)(run, state, until);
-    await execute(run.chain, state, allotted.draw, until, exec);
+    await execute(run.chain, state, allot(state), until, exec);
     const [keeper, proposer] = await exec.balances();
     log.info(run.dryRun ? "dry run: would top up to" : "topped up", { keeper, proposer });
-    return failures;
+    const keys = [
+      ["keeper", run.chain.keeper, keeper],
+      ["proposer", run.chain.immutable.proposer, proposer],
+    ] as const;
+    const low = keys.filter(([, , eth]) => eth < MIN_ETH);
+    for (const [name, address, eth] of low) {
+      log.error(`${name} ${address} holds ${(Number(eth) / 1e18).toFixed(4)} ETH; fund it`);
+    }
+    return low.length;
   } catch (error) {
     log.error(run.dryRun ? "dry run: top-up failed" : "top-up failed", { error: errorMessage(error) });
-    return failures + 1;
+    return 1;
   }
 }
 
 async function readState({ chain, prices }: Run, until: number): Promise<State> {
-  const { conduit, proposer } = chain.v2!;
+  const { conduit, proposer } = chain.immutable;
   const at = await blockAtLeast(chain);
   const read = <T>(calls: Call[]) => readMany<T>(chain.client, calls, { blockNumber: at });
   const balance = (address: Address) => chain.client.getBalance({ address, blockNumber: at });
@@ -154,7 +163,7 @@ async function readState({ chain, prices }: Run, until: number): Promise<State> 
   const allowed = enabled ? amount! : 0n;
   return {
     at,
-    sender: { from: proposer, client: chain.v2Client },
+    sender: { from: proposer, client: chain.proposerClient },
     treasury: treasury!,
     allowed,
     left: allowed > spent! ? allowed - spent! : 0n,
@@ -175,7 +184,7 @@ const toWei = ({ ethUsd, usdcUsd }: State, usdc: bigint) =>
  * Enough USDC to take both keys to TARGET, counting what the proposer holds, within the allowance and the treasury's
  * balance. The proposer's ETH above TARGET can go to the keeper, but not the other way around.
  */
-function allot(state: State): { draw: bigint; failures: number } {
+function allot(state: State): bigint {
   const { keeper, proposer, usdc, allowed, left, inTreasury, ethUsd, usdcUsd } = state;
   const short = (keeper < TARGET ? TARGET - keeper : 0n) + TARGET - proposer - toWei(state, usdc);
   const needed = short > 0n ? BigInt(Math.ceil(((Number(short) / 1e18) * ethUsd * 1e6) / usdcUsd)) : 0n;
@@ -190,15 +199,12 @@ function allot(state: State): { draw: bigint; failures: number } {
     needed,
   });
   const available = left < inTreasury ? left : inTreasury;
-  if (needed <= available) return { draw: needed, failures: 0 };
+  if (needed <= available) return needed;
   const fields = { needed, allowanceLeft: left, inTreasury };
-  let failures = 0;
   if (allowed === 0n) log.warning("the treasury does not let the proposer draw USDC: not topping up", fields);
-  else if (inTreasury < left) {
-    failures++;
-    log.error("the treasury holds too little USDC to top up the keys: fund it", fields);
-  } else log.warning("the proposer's allowance limits the top-up this week", fields);
-  return { draw: available, failures };
+  else if (inTreasury < left) log.warning("the treasury holds too little USDC to top up the keys: fund it", fields);
+  else log.warning("the proposer's allowance limits the top-up this week", fields);
+  return available;
 }
 
 /** Enough to take the keeper to TARGET or, if both keys can't get there, to leave them even. */
@@ -301,7 +307,7 @@ function simulator({ chain }: Run, state: State): Executor {
     send: async ({ what, call, gains = 0n }) => {
       const options = { what: `the ${what}`, before: done, blockNumber: state.at };
       const prepared = await prepareTx(chain, state.sender, call, options);
-      payable(prepared, call, state.sender.from, proposer);
+      await payable(chain, prepared, call, state.sender.from, proposer);
       done.push(call);
       const value = call.value ?? 0n;
       proposer += gains - prepared.expectedCost - value;
@@ -315,16 +321,19 @@ function simulator({ chain }: Run, state: State): Executor {
 }
 
 /**
- * Fails if the proposer has a transaction pending, because it may be a vote and a top-up must never replace one, or if
- * `balance` can't pay for the call's gas and value.
+ * Fails if a transaction this run sent from the proposer may still land at its nonce, because it may be a vote and a
+ * top-up must never replace one, or if `balance` can't pay for the call's gas and value.
  */
-function payable(
-  { tx, cost, queued }: { tx: { nonce: number }; cost: bigint; queued: boolean },
+async function payable(
+  chain: Chain,
+  { tx, cost }: { tx: { nonce: number }; cost: bigint },
   call: TxCall,
   from: Address,
   balance: bigint,
-): void {
-  if (queued) throw new Error(`a transaction of the proposer is pending at nonce ${tx.nonce}`);
+): Promise<void> {
+  if ((await heldAt(chain, from, tx.nonce)) !== false) {
+    throw new Error(`a transaction of the proposer is pending at nonce ${tx.nonce}`);
+  }
   const needed = cost + (call.value ?? 0n);
   if (balance < needed) throw new Error(`fund the proposer: ${from} has ${balance} wei, needs ${needed}`);
 }
@@ -339,7 +348,7 @@ async function sendTx(
 ): Promise<bigint> {
   const { from } = sender;
   const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at });
-  payable(prepared, call, from, prepared.balance);
+  await payable(chain, prepared, call, from, prepared.balance);
   const { tx } = prepared;
   const { signed, ...ready } = await signTx(signer, tx, false, from);
   if (!signed) throw new Error("no key signs for the proposer");

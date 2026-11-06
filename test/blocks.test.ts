@@ -5,25 +5,10 @@ import { Blocks, watch } from "../src/blocks.ts";
 
 const flip = 1_790_812_800_000;
 
-type Chain = { gap?: number; seal?: number; subBlocks?: number; leeway?: number };
-
-/**
- * Feeds `blocks` polls of a block at each of `times` (ms), each sealed `seal` ms after its timestamp and built in
- * `subBlocks` steps that end `leeway` ms before the seal, and returns when the last block started.
- */
-function feed(blocks: Blocks, times: number[], { seal = 0, subBlocks = 10, leeway = 450 }: Chain = {}) {
-  times.forEach((time, k) => {
-    const number = BigInt(k + 1);
-    const start = (k ? times[k - 1]! : time - 2_000) + seal;
-    const last = time + seal - leeway;
-    for (let i = 0; i <= subBlocks; i++) {
-      blocks.observe(
-        { number, timestamp: BigInt(time / 1000), txs: 1 + i },
-        start + ((last - start) * i) / (subBlocks || 1),
-      );
-    }
-  });
-  return (times.at(-2) ?? times.at(-1)! - 2_000) + seal;
+/** Feeds `blocks` a first sighting of a block at each of `times` (ms), `seal` ms after its time. */
+function feed(blocks: Blocks, times: number[], seal = 0) {
+  times.forEach((time, k) => blocks.observe({ number: BigInt(k + 1), time }, time + seal));
+  return times.at(-1)! + seal;
 }
 
 const every = (from: number, gap: number, count: number) => Array.from({ length: count }, (_, k) => from + k * gap);
@@ -34,72 +19,81 @@ function targets(blocks: Blocks, now: number) {
   return out;
 }
 
-test("learns Base's timing: two-second blocks, the last sub-block 450 ms before the timestamp", () => {
+test("learns Base's timing: a block every 200 ms, each seen just before its time", () => {
   const blocks = new Blocks();
-  feed(blocks, every(flip - 61_000, 2_000, 10));
-  assert.deepEqual(blocks.timing, { gap: 2_000, maxGap: 2_000, seal: 0, lead: 155 + 200 + 450 });
+  feed(blocks, every(flip - 10_000, 200, 30), -20);
+  assert.deepEqual(blocks.timing, { gap: 200, seal: -20, lead: 200 + 20 + 200 });
 });
 
-test("votes in the last two blocks before the flip, whether timestamps fall on odd or even seconds", () => {
-  const odd = new Blocks();
-  assert.deepEqual(targets(odd, feed(odd, every(flip - 61_000, 2_000, 10))), [-3_000, -1_000]);
-  const even = new Blocks();
-  assert.deepEqual(targets(even, feed(even, every(flip - 60_000, 2_000, 10))), [-4_000, -2_000]);
-  assert.deepEqual(targets(even, flip - 3_000), [-2_000], "once the second-to-last is sealed");
-  assert.deepEqual(targets(even, flip + 1), [], "after the flip");
+test("votes once in each of the last two seconds, in the block before each second's last", () => {
+  const blocks = new Blocks();
+  const now = feed(blocks, every(flip - 10_000, 200, 30));
+  assert.deepEqual(targets(blocks, now), [-1_400, -400]);
+  assert.deepEqual(targets(blocks, flip - 1_401), [-1_400, -400], "while the first is being built");
+  assert.deepEqual(targets(blocks, flip - 1_400), [-400], "once it is sealed");
+  assert.deepEqual(targets(blocks, flip - 400), [], "never in a second's last block");
+  assert.deepEqual(targets(blocks, flip + 1), [], "after the flip");
 });
 
-test("the deadline follows the seal wherever it falls within the second", () => {
+test("a vote is sent to reach the sequencer 200 ms before its block's build starts, when the block before is sealed", () => {
   const blocks = new Blocks();
-  feed(blocks, every(flip - 61_000, 2_000, 10), { seal: 300 });
-  const { lead, seal } = blocks.timing;
-  assert.equal(seal, 300);
-  assert.equal(-lead, 300 - 450 - 155 - 200, "a margin before the last sub-block starts");
+  feed(blocks, every(flip - 10_000, 200, 30), -100);
+  const { gap, seal, lead } = blocks.timing;
+  assert.equal(lead, gap - seal + 200);
+  assert.equal(blocks.upcoming(flip, flip - 1_400 - lead - 1), flip - 1_400);
+  assert.equal(blocks.upcoming(flip, flip - 1_400 - lead), flip - 400, "the first one's deadline passed");
+  assert.equal(blocks.upcoming(flip, flip - 400 - lead), undefined);
 });
 
-test("with irregular gaps, votes in every block that may be one of the last two", () => {
+test("blocks seen late, from a lagging RPC or a sequencer behind its schedule, never make a vote later", () => {
   const blocks = new Blocks();
-  const now = feed(blocks, [...every(flip - 21_000, 2_000, 7), flip - 5_000]);
-  assert.deepEqual(blocks.timing.maxGap, 4_000);
-  assert.deepEqual(targets(blocks, now), [-5_000, -3_000, -1_000]);
-});
-
-test("without sub-blocks, a vote goes half a gap before the timestamp", () => {
-  const blocks = new Blocks();
-  feed(blocks, every(flip - 61_000, 2_000, 10), { subBlocks: 0 });
-  assert.deepEqual(blocks.timing, { gap: 2_000, maxGap: 2_000, seal: 0, lead: 1_000 });
+  feed(blocks, every(flip - 10_000, 200, 30), 300);
+  assert.deepEqual(blocks.timing, { gap: 200, seal: 0, lead: 400 });
 });
 
 test("when polls stop, the block being built is extrapolated; before any poll, nothing is known", () => {
   const blocks = new Blocks();
   assert.equal(blocks.building(flip), undefined);
   assert.equal(blocks.next(flip, -Infinity, flip), undefined);
-  feed(blocks, every(flip - 61_000, 2_000, 10));
-  assert.equal(blocks.building(flip - 43_001), flip - 43_000);
-  assert.equal(blocks.building(flip - 43_000), flip - 41_000, "sealed");
-  assert.deepEqual(targets(blocks, flip - 10_000), [-3_000, -1_000]);
+  assert.equal(blocks.upcoming(flip, flip), undefined);
+  feed(blocks, every(flip - 10_000, 200, 30));
+  assert.equal(blocks.building(flip - 3_001), flip - 3_000);
+  assert.equal(blocks.building(flip - 3_000), flip - 2_800, "sealed");
+  assert.deepEqual(targets(blocks, flip - 3_000), [-1_400, -400]);
 });
 
-test("a late answer about an older block, or about fewer transactions, is ignored", () => {
+test("a sighting by a slow poll doesn't time the seal: the block could have been seen anywhere in that poll", () => {
   const blocks = new Blocks();
-  feed(blocks, every(flip - 61_000, 2_000, 10));
+  feed(blocks, every(flip - 10_000, 200, 30), -20);
+  blocks.observe({ number: 31n, time: flip - 4_000 }, flip - 4_225, 450);
+  assert.equal(blocks.timing.seal, -20, "a 450 ms poll");
+  blocks.observe({ number: 32n, time: flip - 3_800 }, flip - 3_850, 80);
+  assert.equal(blocks.timing.seal, -50, "an 80 ms poll");
+});
+
+test("a late answer about an older block, or a block seen again, is ignored", () => {
+  const blocks = new Blocks();
+  feed(blocks, every(flip - 10_000, 200, 30));
   const before = blocks.timing;
-  blocks.observe({ number: 9n, timestamp: BigInt((flip - 45_000) / 1000), txs: 99 }, flip - 40_000);
-  blocks.observe({ number: 10n, timestamp: BigInt((flip - 43_000) / 1000), txs: 2 }, flip - 40_000);
+  blocks.observe({ number: 29n, time: flip - 4_400 }, flip - 9_000);
+  blocks.observe({ number: 30n, time: flip - 4_200 }, flip - 9_000);
   assert.deepEqual(blocks.timing, before);
 });
 
-test("a failed, hung or malformed poll is skipped", async () => {
+test("the latest block is polled; a failed, hung, malformed or unstamped poll is skipped", async () => {
   const answers = [
     () => Promise.reject(new Error("HTTP 503")),
     () => new Promise(() => {}),
     async () => ({ number: "0x1", timestamp: "0x6abd8f7f" }),
+    async () => ({ number: "0x2", timestamp: "0x6abd8f80", timestampMs: "not a number" }),
     async () => null,
-    async () => ({ number: "0x2", timestamp: "0x6abd8f81", transactions: ["0xab"] }),
+    async () => ({ number: "0x3", timestamp: "0x6abd8f81", timestampMs: "0x1a0e44c0ec8", transactions: ["0xab"] }),
   ];
+  const tags: unknown[] = [];
   let polls = 0;
-  const client = { request: () => answers[polls++]!() } as unknown as Client;
+  const request = ({ params }: { params: unknown[] }) => (tags.push(params[0]), answers[polls++]!());
   const blocks = new Blocks();
-  await watch(client, blocks, () => polls === answers.length);
-  assert.equal(blocks.building(0), 0x6abd8f81 * 1000);
+  await watch({ request } as unknown as Client, blocks, () => polls === answers.length);
+  assert.equal(blocks.building(0), 0x1a0e44c0ec8);
+  assert.ok(tags.every((tag) => tag === "latest"));
 });
