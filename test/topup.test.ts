@@ -248,7 +248,7 @@ const ABIS: Record<string, Abi> = {
 
 type Simulated = { account: Address; to: Address; functionName?: string; args?: readonly unknown[]; value?: bigint };
 
-function fakeChain(w: World, { v2 = true } = {}) {
+function fakeChain(w: World) {
   const sent: Sent[] = [];
   const mined: Sent[] = [];
   const txs: ReturnType<typeof parseTransaction>[] = [];
@@ -338,7 +338,7 @@ function fakeChain(w: World, { v2 = true } = {}) {
     keeper: KEEPER,
     voter: VOTER,
     ve: VE,
-    ...(v2 ? { v2: { conduit: V2, proposer: PROPOSER, priced: [USDC] } } : {}),
+    v2: { conduit: V2, proposer: PROPOSER, priced: [USDC] },
   };
   return { chain, sent, simulated, txs };
 }
@@ -464,12 +464,6 @@ test("the swap's deadline is a minute past the last send, so that a swap sent ne
 
 test("keys at the target send nothing", async () => {
   const { chain, sent } = fakeChain(world({ eth: { [low(KEEPER)]: TARGET, [low(PROPOSER)]: TARGET } }));
-  assert.equal(await topUp(runOf(chain), until()), 0);
-  assert.equal(sent.length, 0);
-});
-
-test("without the immutable conduit, there is no proposer, and nothing is topped up", async () => {
-  const { chain, sent } = fakeChain(world(), { v2: false });
   assert.equal(await topUp(runOf(chain), until()), 0);
   assert.equal(sent.length, 0);
 });

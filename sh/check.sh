@@ -96,7 +96,7 @@ check_balance() {
 keeper=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
 keeper=0x$(printf '%s' "$keeper" | tail -c 40)
 check_balance keeper "$keeper" "$MIN_KEEPER_WEI"
-[ -z "$PROPOSER" ] || check_balance proposer "$PROPOSER" "$MIN_PROPOSER_WEI"
+check_balance proposer "$PROPOSER" "$MIN_PROPOSER_WEI"
 
 channel=$(find_channel "$KEEPER_PROJECT")
 [ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"

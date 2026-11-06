@@ -42,9 +42,6 @@ export function msOf(block: object): number | undefined {
   }
 }
 
-/** A block's time in ms, or its second's when it has no `timestampMs`. */
-export const msAt = (block: { timestamp: bigint }) => msOf(block) ?? Number(block.timestamp) * 1000;
-
 export const lower = (address: Address) => address.toLowerCase() as Address;
 
 // Logs only show the host, because provider URLs contain API keys.
@@ -158,12 +155,13 @@ export type Chain = {
   keeper: Address;
   voter: Address;
   ve: Address;
-  v2?: V2 | undefined;
+  v2: V2;
 };
 
 export type V2 = { conduit: Address; proposer: Address; priced: Address[] };
 
-export async function connect(module: Address, rpcUrls: string[]): Promise<Chain> {
+/** The chain without the immutable conduit, which `connectV2` adds. */
+export async function connect(module: Address, rpcUrls: string[]): Promise<Omit<Chain, "v2">> {
   const client = makeClient(hedged(rpcUrls));
   const [conduit, keeper] = (await readMany<Address>(client, [
     call(module, moduleAbi, "CONDUIT"),

@@ -36,7 +36,7 @@ const v2Call = (conduit: Address, functionName: string, args?: readonly unknown[
 
 const usd = (wad: bigint) => Number(wad) / 1e18;
 
-export async function connectV2(chain: Chain, { conduit, proposer }: Omit<V2, "priced">): Promise<V2> {
+export async function connectV2(chain: Omit<Chain, "v2">, { conduit, proposer }: Omit<V2, "priced">): Promise<Chain> {
   const [voter, ve] = await readMany<Address>(chain.client, [v2Call(conduit, "voter"), v2Call(conduit, "veToken")]);
   if (!isAddressEqual(voter!, chain.voter) || !isAddressEqual(ve!, chain.ve)) {
     throw new Error(`${conduit} uses Voter ${voter} and VotingEscrow ${ve}, not ${chain.voter} and ${chain.ve}`);
@@ -45,7 +45,7 @@ export async function connectV2(chain: Chain, { conduit, proposer }: Omit<V2, "p
   const entries = await readEach<readonly [Address, ...unknown[]]>(chain.client, calls);
   const priced = entries.flatMap((entry) => (entry ? [entry[0]] : []));
   if (priced.length === 0) throw new Error(`${conduit} prices no token`);
-  return { conduit, proposer, priced };
+  return { ...chain, v2: { conduit, proposer, priced } };
 }
 
 export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] {
@@ -55,13 +55,13 @@ export function pricedPools(pools: PoolRewards[], priced: Address[]): Address[] 
 
 /** Fails while the conduit can't vote. */
 export async function readValues({ v2 }: Chain, client: Client, pools: Address[]): Promise<Map<Address, number>> {
-  const calls = pools.map((pool) => v2Call(v2!.conduit, "poolValue", [pool]));
+  const calls = pools.map((pool) => v2Call(v2.conduit, "poolValue", [pool]));
   const values = await readMany<bigint>(client, calls, { chunk: VALUE_CHUNK, concurrency: VALUE_CONCURRENCY });
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
 
 export async function readScore({ v2 }: Chain, client: Client): Promise<number> {
-  const [current] = await readMany<bigint>(client, [v2Call(v2!.conduit, "currentScore")]);
+  const [current] = await readMany<bigint>(client, [v2Call(v2.conduit, "currentScore")]);
   return usd(current!);
 }
 
@@ -100,7 +100,7 @@ export function decideV2(
     votes: candidates.map((c) => c.ownVotes),
     summary,
   });
-  if (!v2 || v2.power === 0n) return keep("v2 has no voting power this epoch");
+  if (v2.power === 0n) return keep("v2 has no voting power this epoch");
   const { power } = v2;
   let x: number[] | null;
   if (proportionally) x = proportional(usdValues, MAX_V2_POOLS);

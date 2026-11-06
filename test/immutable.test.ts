@@ -176,7 +176,7 @@ test("the conduit's values of pools are read a few heavy calls at a time", async
 test("the immutable conduit is checked against the Klima conduit's Voter and VotingEscrow", async () => {
   const [VOTER, VE] = [addr(1), addr(2)];
   const chainOn = (client: Client) => ({ client, bulk: client, voter: VOTER, ve: VE }) as unknown as Chain;
-  const v2 = await connectV2(chainOn(conduitClient(VOTER, VE)), { conduit: B, proposer: C });
+  const { v2 } = await connectV2(chainOn(conduitClient(VOTER, VE)), { conduit: B, proposer: C });
   assert.deepEqual(v2, { conduit: B, proposer: C, priced: [addr(30), addr(31), addr(32), addr(33)] });
   await assert.rejects(connectV2(chainOn(conduitClient(addr(9), VE)), { conduit: B, proposer: C }), /uses Voter/);
 });

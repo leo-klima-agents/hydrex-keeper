@@ -270,7 +270,11 @@ test("each conduit sends its freshest plan for the block when the immutable cond
   assert.deepEqual(readAts(pick(9, klima, v2Keeps)), { klima: 300, v2: 400 }, "the immutable conduit keeps its own");
   assert.deepEqual(readAts(pick(9, undefined, v2)), { klima: undefined, v2: 400 }, "no Klima conduit to vote for");
   assert.deepEqual(readAts(pick(9, laneOf(), v2)), { klima: undefined, v2: 400 }, "nothing planned for the Klima one");
-  assert.deepEqual(readAts(pick(9, klima, undefined)), { klima: 300, v2: undefined }, "no immutable conduit");
+  assert.deepEqual(
+    readAts(pick(9, klima, undefined)),
+    { klima: 300, v2: undefined },
+    "no vote for the immutable conduit",
+  );
 });
 
 test("the immutable conduit's vote goes only with a Klima conduit's vote it was checked after", () => {

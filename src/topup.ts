@@ -116,7 +116,6 @@ type Executor = {
  * with less than MIN_ETH. Each such key is an error, as check.sh reports it. Returns the number of failures.
  */
 export async function topUp(run: Run, until: number): Promise<number> {
-  if (!run.chain.v2) return 0;
   try {
     const state = await readState(run, until);
     const exec = (run.dryRun ? simulator : sender)(run, state, until);
@@ -139,7 +138,7 @@ export async function topUp(run: Run, until: number): Promise<number> {
 }
 
 async function readState({ chain, prices }: Run, until: number): Promise<State> {
-  const { conduit, proposer } = chain.v2!;
+  const { conduit, proposer } = chain.v2;
   const at = await blockAtLeast(chain);
   const read = <T>(calls: Call[]) => readMany<T>(chain.client, calls, { blockNumber: at });
   const balance = (address: Address) => chain.client.getBalance({ address, blockNumber: at });

@@ -90,7 +90,7 @@ export async function pass(run: Run, { pools, priced }: DayBefore, until: number
  */
 export async function passV2(run: Run, { pools, priced }: DayBefore, until: number, klima?: Vote): Promise<void> {
   const { chain } = run;
-  const { conduit, priced: tokens } = chain.v2!;
+  const { conduit, priced: tokens } = chain.v2;
   const [state, values, current] = await Promise.all([
     readVotes(chain, pools),
     readValues(chain, chain.bulk, pricedPools(pools, tokens)).catch(

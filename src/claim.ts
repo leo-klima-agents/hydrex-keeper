@@ -224,7 +224,7 @@ export async function claims(run: Run, flip: bigint, until: number, swapper: Swa
   }
   const conduits: Conduit[] = [
     { sender: klimaSender(chain), signer: account, excluded: EXCLUDED_OWNERS },
-    ...(chain.v2 ? [{ sender: v2Sender(chain), signer: proposer, excluded: new Map() }] : []),
+    { sender: v2Sender(chain), signer: proposer, excluded: new Map() },
   ];
   const shared: Shared = {
     delegatees: sharedRead(() => readDelegatees(chain, start - WEEK)),

@@ -1,8 +1,8 @@
 # hydrex-keeper
 
 A Cloud Run job that casts the weekly Hydrex vote of the Klima "Carbon Impact" conduit on Base, and claims the rewards
-of the conduit's delegators after each epoch flip. It can also vote and claim for the immutable conduit of
-[hydrex-conduit](https://github.com/ldeso/hydrex-conduit), and top up its two signing keys with ETH from that conduit's
+of the conduit's delegators after each epoch flip. It does the same for the immutable conduit of
+[hydrex-conduit](https://github.com/ldeso/hydrex-conduit), and tops up its two signing keys with ETH from that conduit's
 treasury.
 
 The keys are HSM keys from [hydrex-keeper-key](https://github.com/ldeso/hydrex-keeper-key). The Klima conduit's
@@ -34,8 +34,8 @@ what is still due. It doesn't vote again for a conduit whose day-before vote is 
 
 ### The immutable conduit
 
-With `CONDUIT` set, the job also votes for the immutable conduit, at the same times and in the same way, with at most 20
-pools per vote. The proposer key signs these votes and sends them straight to the conduit.
+The job also votes for the immutable conduit, at the same times and in the same way, with at most 20 pools per vote. The
+proposer key signs these votes and sends them straight to the conduit.
 
 Anyone can propose a vote to this conduit, but it only accepts one that beats the vote in force by $1 on its own score.
 That score counts WETH, cbBTC, USDC and EURC at Chainlink prices, plus some trading fees. The job picks votes at its own
@@ -63,9 +63,8 @@ ETH, which is kept for votes, or when a transaction the run sent from that key m
 
 ### Top-ups
 
-With `CONDUIT` set, the Tuesday run first tops up the keeper and the proposer to 0.003 ETH each. The money comes from
-the immutable conduit's treasury, a Safe whose Allowance Module (version 1.0.0) lets the proposer draw a weekly amount
-of USDC.
+The Tuesday run first tops up the keeper and the proposer to 0.003 ETH each. The money comes from the immutable
+conduit's treasury, a Safe whose Allowance Module (version 1.0.0) lets the proposer draw a weekly amount of USDC.
 
 The proposer sends every transaction. It draws the USDC both keys need, swaps it to ETH through whichever pays more of
 Uniswap v3's 0.05% pool or Aero's Slipstream pools with tick spacings 100 and 50, and sends the keeper its share. The
@@ -118,11 +117,11 @@ You need `gcloud`, `jq` and `curl`. `sh/setup.sh` and `sh/deploy.sh` need `roles
 to run again.
 
 1. **Configure.** Copy `config.env.example` to `config.env` and fill in `KEEPER_PROJECT`, `KMS_KEY_VERSION`,
-   `PROPOSER_KMS_KEY_VERSION` and `ALERT_EMAIL`. To vote for the Klima conduit only, leave `CONDUIT`, `PROPOSER` and
-   `PROPOSER_KMS_KEY_VERSION` empty.
+   `PROPOSER_KMS_KEY_VERSION` and `ALERT_EMAIL`.
 2. **Create the resources.** `sh/setup.sh` enables the APIs, and creates the service accounts, the secrets and the
    alerts. It prints the job's service account.
-3. **Grant the keys.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`.
+3. **Grant the keys.** In hydrex-keeper-key, set `KEEPER_SA` to that service account and run `sh/grant.sh`. Its
+   `sh/check.sh` confirms that the service account can sign with both keys.
 4. **Add the secrets.** `sh/setup.sh` prints the command for each: your Base RPC URLs, separated by commas, and an
    Alchemy API key. Public RPCs are tried after yours.
 5. **Fund the keys.** Send ETH on Base to `KEEPER` and `PROPOSER`. 0.01 ETH lasts each of them a few months, and the
@@ -134,11 +133,8 @@ to run again.
    are refused while a scheduled run could be sending, and `--claim` also when one could start within the hour. The logs
    are in Cloud Run.
 
-To add the immutable conduit to a deployment that only votes for the Klima conduit, set `CONDUIT`, `PROPOSER` and
-`PROPOSER_KMS_KEY_VERSION` in `config.env` and in the `check` workflow's repository variables, fund `PROPOSER`, and run
-`sh/deploy.sh`. hydrex-keeper-key's `sh/check.sh` confirms that the job's service account can sign with the proposer
-key. For top-ups, the treasury's owners must also enable the Allowance Module, add `PROPOSER` as a delegate with a
-weekly USDC allowance, and keep some USDC in the Safe.
+For top-ups, the treasury's owners must enable the Allowance Module, add `PROPOSER` as a delegate with a weekly USDC
+allowance, and keep some USDC in the Safe.
 
 ## Checks
 
@@ -147,7 +143,8 @@ keeper or the proposer holds less than 0.002 ETH.
 
 The `check` workflow runs it every Friday and on demand. It signs in through Workload Identity Federation as the service
 account named by the `WIF_PROVIDER` and `CI_SERVICE_ACCOUNT` repository variables, and builds `config.env` from the
-repository variables named in `config.env.example`. Set at least `KEEPER_PROJECT`, `KMS_KEY_VERSION` and `ALERT_EMAIL`.
+repository variables named in `config.env.example`. Set at least `KEEPER_PROJECT`, `KMS_KEY_VERSION`, `CONDUIT`,
+`PROPOSER`, `PROPOSER_KMS_KEY_VERSION` and `ALERT_EMAIL`.
 
 Two things are outside the scripts. Enforce `iam.managed.disableServiceAccountKeyCreation` on the keeper project,
 because `check.sh` only detects keys. And change `tokens.json` through a pull request, then redeploy.
@@ -169,8 +166,7 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
   until an hour after the flip.
 - **Klima conduit:** without voting power, it gets no vote and the run fails. The immutable conduit still votes.
 - **Immutable conduit:** without voting power, it gets no vote and the job logs a warning. While Base's sequencer is
-  down, and for an hour after, it refuses votes. A misconfigured or unreachable `CONDUIT` is left out and fails the run,
-  and the Klima conduit votes and claims anyway.
+  down, and for an hour after, it refuses votes.
 - **Cloud Scheduler:** a failed start is retried three times within five minutes and sends an alert. A paused or deleted
   schedule does neither, but `check.sh` reports it.
 
@@ -178,9 +174,8 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
 
 You need Node 26 LTS. Run `npm ci`, then `npm run typecheck`, `npm test` and `npm run format` before committing.
 
-`MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81 BASE_RPC_URLS=… npm run dry-run` runs the Tuesday run against Base
-without KMS, and sends nothing. `npm run dry-run-claim` does the same for the claims. Set `CONDUIT` and `PROPOSER` too
-to include the immutable conduit and the top-up.
+`npm run dry-run` runs the Tuesday run against Base without KMS, and sends nothing. `npm run dry-run-claim` does the
+same for the claims. Both need `MODULE`, `CONDUIT` and `PROPOSER`, as in `config.env.example`, and `BASE_RPC_URLS`.
 
 `test/sh/golden.sh` runs the scripts against a fake `gcloud` and `curl` and compares their calls and output with
 `test/sh/golden/`. Pass `--update` to rewrite them. CI also runs `shellcheck` and `reuse lint`, and builds the image.

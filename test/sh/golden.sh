@@ -38,7 +38,7 @@ golden_case() {
     "$test_sh" "$root/sh/$script" "$@" >"$tmp/$name.out" 2>&1 || rc=$?
   {
     printf 'exit=%s\n--- output ---\n' "$rc"
-    cat "$tmp/$name.out"
+    sed "s|$root|<repo>|g" "$tmp/$name.out"
   } >>"$log"
   golden=$root/test/sh/golden/$name.txt
   if grep -Eq '^exit=12[67]$' "$log"; then # the shell couldn't run a command
@@ -70,15 +70,13 @@ golden_case run-claim existing keeper run.sh --dry-run --claim
 golden_case run-bad-arg existing keeper run.sh --later
 golden_case run-now-claim existing keeper run.sh --now --dry-run --claim
 golden_case config-bad-module existing bad-module run.sh --now
-golden_case config-half-conduit existing half-conduit run.sh --now
+golden_case config-missing-proposer existing missing-proposer run.sh --now
 golden_case config-shared-key existing shared-key run.sh --now
-golden_case deploy-conduit with-conduit conduit deploy.sh
 golden_case check-ok existing keeper check.sh
 golden_case check-drift drift keeper check.sh
 golden_case check-fresh fresh keeper check.sh
 golden_case check-list-fails list-fails keeper check.sh
-golden_case check-conduit with-conduit conduit check.sh
-golden_case check-conduit-missing existing conduit check.sh
+golden_case check-conduit-missing no-conduit keeper check.sh
 
 [ "$failures" -eq 0 ] || {
   printf '%s golden case(s) failed\n' "$failures"

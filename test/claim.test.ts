@@ -72,7 +72,8 @@ const owners: Record<string, Address> = {
 };
 const powers: Record<string, bigint> = { 1: 7n, 2: 100n, 3: 800n, 4: 1n, 5: 99n, 6: 10n, 7: 300n, 8: 20n };
 const unapproved = new Set(["6"]);
-const delegateOf = (id: unknown): Address => ({ 1: OTHER, 7: V2, 8: V2 })[String(id)] ?? CONDUIT;
+const delegateOf = (id: unknown, v2: boolean): Address =>
+  ({ 1: OTHER, 7: v2 ? V2 : OTHER, 8: v2 ? V2 : OTHER })[String(id)] ?? CONDUIT;
 
 /** A pool's fee contract and its bribe contract, each with the reward tokens it lists. */
 type Pool = [[Address, Address[]], [Address, Address[]]];
@@ -80,6 +81,7 @@ type Pool = [[Address, Address[]], [Address, Address[]]];
 type World = {
   pools: Pool[];
   earned: Map<string, bigint>;
+  /** Whether veNFTs 7 and 8 delegate to the immutable conduit, rather than to someone else. */
   v2?: boolean;
   /** Number of epoch reads that happen before the minter starts the new epoch. */
   lag?: number;
@@ -285,17 +287,20 @@ function fakeChain(w: World = world()) {
       case `${VOTER}.external_bribes`:
         return w.pools[Number(BigInt(a as Address)) - 2_000]![1][0];
       case `${VE}.getPastVotes`:
-        return Object.entries(powers).reduce((sum, [id, power]) => (delegateOf(id) === a ? sum + power : sum), 0n);
+        return Object.entries(powers).reduce(
+          (sum, [id, power]) => (delegateOf(id, !!w.v2) === a ? sum + power : sum),
+          0n,
+        );
       case `${VE}.totalNftsMinted`:
         return 8n;
       case `${VE}.delegates`:
         assert.equal(b, ENDED, "the delegates when the epoch that ended began");
-        return delegateOf(a);
+        return delegateOf(a, !!w.v2);
       case `${VE}.ownerOf`:
         if (!owners[String(a)]) throw reverts("ownerOf");
         return owners[String(a)];
       case `${VE}.isApprovedClaimRedirectOrOwner`:
-        assert.equal(a, delegateOf(b), "the conduit that claims for it");
+        assert.equal(a, delegateOf(b, !!w.v2), "the conduit that claims for it");
         return !unapproved.has(String(b));
       case `${VE}.balanceOfNFTAt`:
         return powers[String(a)];
@@ -440,7 +445,7 @@ function fakeChain(w: World = world()) {
     keeper: signer.address,
     voter: VOTER,
     ve: VE,
-    ...(w.v2 ? { v2: { conduit: V2, proposer: proposer.address, priced: [USDC] } } : {}),
+    v2: { conduit: V2, proposer: proposer.address, priced: [USDC] },
   };
   return { chain, sent, earnedFor, called };
 }

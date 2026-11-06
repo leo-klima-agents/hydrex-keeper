@@ -37,6 +37,7 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
     keeper: addr(98),
     voter: VOTER,
     ve: VE,
+    v2: { conduit: V2, proposer: addr(23), priced: [] },
   };
 }
 
@@ -109,7 +110,8 @@ function table({ address, functionName, args = [] }: Call): unknown {
   throw new Error(`unexpected call ${functionName} on ${address}`);
 }
 
-const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, lastVoted: 1000n, votedThisEpoch: true };
+const v2 = { power: 7n, lastVoted: 1000n, votedThisEpoch: true };
+const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, lastVoted: 1000n, votedThisEpoch: true, v2 };
 
 test("readRewards keeps the pools with live gauges and rewards in whitelisted tokens, and those rewards alone", async () => {
   const rewards = await readRewards(fakeChain(table), [TOK_1, TOK_2]);
@@ -119,18 +121,18 @@ test("readRewards keeps the pools with live gauges and rewards in whitelisted to
   ]);
 });
 
-test("readVotes reads the epoch and the votes on each pool, in one multicall for up to 498 pools", async () => {
+test("readVotes reads the epoch and both conduits' votes on each pool, in one multicall for up to 331 pools", async () => {
   const chain = fakeChain(table);
   const rewards = await readRewards(chain, [TOK_1]);
   multicalls = 0;
   assert.deepEqual(await readVotes(chain, rewards), {
     epoch,
     pools: [
-      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, v2Votes: 0n },
+      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, v2Votes: 40n },
       { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n, v2Votes: 0n },
     ],
   });
-  await readVotes(chain, Array<(typeof rewards)[number]>(498).fill(rewards[0]!));
+  await readVotes(chain, Array<(typeof rewards)[number]>(331).fill(rewards[0]!));
   assert.equal(multicalls, 2);
   assert.deepEqual(await readMany(chain.client, []), []);
   assert.equal(multicalls, 2, "no calls make no request");
@@ -148,21 +150,9 @@ test("readVotes reads the epoch and the votes on each pool, in one multicall for
   }
 });
 
-test("with the immutable conduit, readVotes also reads its votes and power, in one multicall for up to 331 pools", async () => {
-  const chain = { ...fakeChain(table), v2: { conduit: V2, proposer: addr(23), priced: [] } };
+test("the immutable conduit's votes count only once it voted this epoch", async () => {
+  const chain = fakeChain(table);
   const rewards = await readRewards(chain, [TOK_1]);
-  multicalls = 0;
-  const v2 = { power: 7n, lastVoted: 1000n, votedThisEpoch: true };
-  assert.deepEqual(await readVotes(chain, rewards), {
-    epoch: { ...epoch, v2 },
-    pools: [
-      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, v2Votes: 40n },
-      { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n, v2Votes: 0n },
-    ],
-  });
-  await readVotes(chain, Array<(typeof rewards)[number]>(331).fill(rewards[0]!));
-  assert.equal(multicalls, 2);
-  assert.deepEqual(await readEpoch(chain), { ...epoch, v2 });
   voterState.v2LastVoted = 999n;
   try {
     const { epoch: stale, pools } = await readVotes(chain, rewards);

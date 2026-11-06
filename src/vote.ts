@@ -67,7 +67,6 @@ export const klimaSender = ({ client, keeper, module, conduit }: Chain): Sender 
 });
 
 export function v2Sender({ v2, v2Client }: Chain): Sender {
-  if (!v2) throw new Error("no immutable conduit configured");
   const { proposer, conduit } = v2;
   return { name: "proposer", from: proposer, to: conduit, abi: immutableAbi, conduit, open: true, client: v2Client };
 }

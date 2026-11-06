@@ -12,7 +12,6 @@ import {
   blocksBetween,
   lastBlockBefore,
   lower,
-  msAt,
   msOf,
   readMany,
   voterCall,
@@ -186,7 +185,7 @@ export function v2Answered(v2: Plan | undefined, time: number, dryRun: boolean):
  * and its nonce is used, whatever a lagging node says.
  */
 export function landed(state: State, sent: Iterable<Sent>): number[] {
-  if (!state.epoch.v2?.votedThisEpoch) return [];
+  if (!state.epoch.v2.votedThisEpoch) return [];
   return [...sent].flatMap(({ votes, nonce }) =>
     votes && state.pools.every((p) => p.v2Votes === (votes.get(lower(p.pool)) ?? 0n)) ? [nonce] : [],
   );
@@ -284,8 +283,8 @@ const keyOf = ({ epoch, pools }: State) =>
     epoch.start,
     epoch.power,
     epoch.lastVoted,
-    epoch.v2?.power,
-    epoch.v2?.lastVoted,
+    epoch.v2.power,
+    epoch.v2.lastVoted,
     ...pools.flatMap((p) => [p.otherVotes, p.ownVotes, p.v2Votes]),
   ].join();
 
@@ -378,7 +377,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       const base = { readAt, time, vote, note, summary, votes: byPool };
       const klimaVote = rivalOf(klimaLane.best);
       const rival = klimaVote && { sender: klimaSender(chain), vote: klimaVote };
-      return prepare(base, best, state.epoch.v2?.lastVoted ?? 0n, v2Sender(chain), proposer, rival);
+      return prepare(base, best, state.epoch.v2.lastVoted, v2Sender(chain), proposer, rival);
     },
   };
 
@@ -411,7 +410,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       priced = await run.prices(tokensOf(run), flipMs - PRICES_BY_MS);
       // Prices that value no reward fail here, and are fetched again.
       usd = valueRewards(run, rewards, priced, false);
-      valued = chain.v2 ? pricedPools(rewards, chain.v2.priced) : [];
+      valued = pricedPools(rewards, chain.v2.priced);
       break;
     } catch (error) {
       const retry = Date.now() + RETRY_DELAY_MS < flipMs - PRICES_BY_MS;
@@ -481,7 +480,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
       const { klima: alone, freshest } = picked;
       const ageMs = (plan: Plan | undefined) => plan && Date.now() - plan.readAt;
       log.warning("not voting for v2 in this block: no vote of it was checked after the Klima conduit's", {
-        conduit: chain.v2?.conduit,
+        conduit: chain.v2.conduit,
         ...at,
         // Its freshest plan answered a vote that isn't sent, so the Klima conduit sends an older one.
         ...(alone !== freshest ? { klimaAgeMs: ageMs(alone), freshestKlimaAgeMs: ageMs(freshest) } : {}),
@@ -498,7 +497,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   }
   await Promise.all(sending);
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
-  const voters = [...(conduits.v2 ? [chain.v2!.conduit] : []), ...(conduits.klima ? [chain.conduit] : [])];
+  const voters = [...(conduits.v2 ? [chain.v2.conduit] : []), ...(conduits.klima ? [chain.conduit] : [])];
   const outcomes = await outcome(run, flip, [...sent.values()], voters);
   await lastVotes(run, flip).catch((error: unknown) =>
     log.warning("votes before the flip unread", { error: errorMessage(error) }),
@@ -506,15 +505,16 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   return failures + outcomes;
 }
 
-type Landed = { timestamp: bigint; gasUsed?: bigint; gasLimit?: bigint; baseFeePerGas?: bigint | null };
+type Landed = { gasUsed?: bigint; gasLimit?: bigint; baseFeePerGas?: bigint | null };
 type Receipted = { transactionIndex?: number; gasUsed?: bigint; effectiveGasPrice?: bigint };
 
 /** Where a transaction landed: its block's time from the flip (ms), its place in the block, and the tip it paid. */
 function landing(flipMs: number, block: Landed, receipt: Receipted) {
   const { baseFeePerGas: baseFee, gasUsed: blockGasUsed, gasLimit: blockGasLimit } = block;
   const { transactionIndex: index, gasUsed, effectiveGasPrice: price } = receipt;
+  const ms = msOf(block);
   return {
-    msToFlip: msAt(block) - flipMs,
+    msToFlip: ms === undefined ? undefined : ms - flipMs,
     index,
     gasUsed,
     tip: price !== undefined && baseFee != null ? price - baseFee : undefined,
@@ -541,7 +541,7 @@ export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   for (const { transactionHash, args } of events) {
     votes.set(transactionHash, { voter: args.voter, pools: (votes.get(transactionHash)?.pools ?? 0) + 1 });
   }
-  const ours = new Set([chain.conduit, ...(chain.v2 ? [chain.v2.conduit] : [])].map(lower));
+  const ours = new Set([chain.conduit, chain.v2.conduit].map(lower));
   const blocks = new Map<bigint, ReturnType<Client["getBlock"]>>();
   const blockOf = (blockNumber: bigint) => {
     if (!blocks.has(blockNumber)) blocks.set(blockNumber, client.getBlock({ blockNumber }));
@@ -551,10 +551,11 @@ export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
     [...votes].map(async ([hash, { voter: by, pools }]) => {
       const receipt = await client.getTransactionReceipt({ hash });
       const where = landing(Number(flip) * 1000, await blockOf(receipt.blockNumber), receipt);
-      return { hash, voter: by, ours: by !== undefined && ours.has(lower(by)), from: receipt.from, pools, ...where };
+      const { from, blockNumber: block } = receipt;
+      return { hash, voter: by, ours: by !== undefined && ours.has(lower(by)), from, pools, block, ...where };
     }),
   );
-  rows.sort((a, b) => a.msToFlip - b.msToFlip || (a.index ?? 0) - (b.index ?? 0));
+  rows.sort((a, b) => (a.block === b.block ? (a.index ?? 0) - (b.index ?? 0) : a.block < b.block ? -1 : 1));
   for (const row of rows) log.info("vote before the flip", row);
   log.info("votes before the flip", {
     seconds: WATCHED_S,
@@ -590,12 +591,12 @@ export async function outcome(
       const { timestamp } = landedIn;
       // To tune the timing: how far from its target block a vote lands, how long after it was sent, and how crowded.
       const where = landing(flipMs, landedIn, receipt);
-      const ms = msAt(landedIn);
+      const ms = msOf(landedIn);
       log.info("vote landed", {
         ...fields,
         ...where,
-        ...(target !== undefined ? { msAfterTarget: ms - target } : {}),
-        ...(sentAt !== undefined ? { msAfterSend: ms - sentAt } : {}),
+        ...(ms !== undefined && target !== undefined ? { msAfterTarget: ms - target } : {}),
+        ...(ms !== undefined && sentAt !== undefined ? { msAfterSend: ms - sentAt } : {}),
         gasLimit: gas,
       });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);

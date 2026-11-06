@@ -10,6 +10,7 @@ gcloud iam service-accounts get-iam-policy --project=hydrex-keeper-test hydrex-k
 gcloud projects get-iam-policy hydrex-keeper-test --format=json
 curl https://mainnet.base.org eth_call [{"to":"0x750973E0CB728C3112561Bc8E9b235afA9B17E81","data":"0x862a179e"},"latest"]
 curl https://mainnet.base.org eth_getBalance ["0x625cf6663d9d090535fbd57680bffe6fa0262434","latest"]
+curl https://mainnet.base.org eth_getBalance ["0x000000000000000000000000000000000000bEEF","latest"]
 gcloud beta monitoring channels list --project=hydrex-keeper-test --format=json
 gcloud monitoring policies list --project=hydrex-keeper-test --format=json
 exit=1
@@ -19,7 +20,7 @@ ok: job task timeout is 5400
 ok: job max retries is 3
 ok: job task count is 1
 ok: job containers is 1
-ok: job env is KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1,MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81
+ok: job env is CONDUIT=0x692c323B425A9DfeebE302F56168a7798D93EAC5,KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-keeper-v1/cryptoKeyVersions/1,MODULE=0x750973E0CB728C3112561Bc8E9b235afA9B17E81,PROPOSER=0x000000000000000000000000000000000000bEEF,PROPOSER_KMS_KEY_VERSION=projects/hydrex-keeper-key-test/locations/us/keyRings/hydrex-keeper/cryptoKeys/hydrex-proposer-v1/cryptoKeyVersions/1
 ok: job secrets is ALCHEMY_API_KEY=alchemy-api-key:latest,BASE_RPC_URLS=base-rpc-url:latest
 ok: job IAM policy matches template
 ok: schedule is 50 23 * * 2,3
@@ -38,5 +39,6 @@ ok: nobody can act as hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com
 ok: hydrex-keeper@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
 ok: hydrex-keeper-scheduler@hydrex-keeper-test.iam.gserviceaccount.com has no project-level role
 ok: keeper 0x625cf6663d9d090535fbd57680bffe6fa0262434 holds 0.0050 ETH
+ok: proposer 0x000000000000000000000000000000000000bEEF holds 0.0050 ETH
 ERROR: (gcloud.monitoring.policies.list) PERMISSION_DENIED
 error: cannot list alert policies
