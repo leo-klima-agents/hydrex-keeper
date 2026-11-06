@@ -17,12 +17,13 @@ import type { Chain, Client } from "../src/chain.ts";
 import {
   broadcastTx,
   castVote,
+  heldAt,
+  immutableSender,
   klimaSender,
   markMined,
   nonceTaken,
   pendingVote,
   prepareVote,
-  immutableSender,
   votedAt,
   VoteSent,
 } from "../src/vote.ts";
@@ -171,6 +172,35 @@ test("a re-vote under the same nonce pays a quarter more than the pending one", 
   const later = fakeChain({ nonce: 4 });
   await castVote(later.chain, signer, vote, false, far);
   assert.equal(parseTransaction(later.sent[0]!).maxFeePerGas, 1_000n, "a new nonce starts from the estimate");
+});
+
+test("a vote prepared with the fees read with the votes reads none of its own", async () => {
+  const { chain } = fakeChain({ nonce: 3 });
+  let feeReads = 0;
+  const { estimateMaxPriorityFeePerGas, getFeeHistory } = chain.client;
+  chain.client.estimateMaxPriorityFeePerGas = (async () => (feeReads++, estimateMaxPriorityFeePerGas())) as never;
+  chain.client.getFeeHistory = (async (args: never) => (feeReads++, getFeeHistory(args))) as never;
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const fees = { baseFee: 600n, tip: 70n, congested: false };
+  const { tx } = await prepareVote(chain, signer, vote, false, target, klimaSender(chain), undefined, fees);
+  assert.deepEqual([tx.maxFeePerGas, tx.maxPriorityFeePerGas, feeReads], [1_270n, 70n, 0]);
+  const read = await prepareVote(chain, signer, vote, false, target);
+  assert.deepEqual([read.tx.maxFeePerGas, feeReads], [1_000n, 2], "without them, it reads them");
+});
+
+test("a transaction this process sent is held while a node has it, and never once in a block or at another nonce", async () => {
+  const held = async (b: Behaviour, nonce = 3, mined = false) => {
+    const { chain } = fakeChain({ nonce: 3, receipt: "timeout", ...b });
+    await castVote(chain, signer, vote, false, far);
+    if (mined) markMined(chain, 3);
+    return heldAt(chain, signer.address, nonce);
+  };
+  assert.equal(await held({}), true);
+  assert.equal(await held({ held: false }), false, "no node has it");
+  assert.equal(await held({ held: "unanswered" }), undefined, "no node answers");
+  assert.equal(await held({}, 4), false, "another nonce");
+  assert.equal(await held({}, 3, true), false, "in a block");
+  assert.equal(await heldAt(fakeChain().chain, signer.address, 3), false, "nothing sent");
 });
 
 test("a receipt that does not arrive in time is left to the next pass", async () => {

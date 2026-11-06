@@ -11,7 +11,7 @@ import {
 import { blockAtLeast, call, lower, readEach, readMany, WETH, type Call, type Chain } from "./chain.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Run } from "./pass.ts";
-import { broadcastTx, confirmTx, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
+import { broadcastTx, confirmTx, heldAt, prepareTx, signTx, type From, type TxCall } from "./vote.ts";
 
 /** Safe's Allowance Module, version 1.0.0. */
 export const ALLOWANCE_MODULE: Address = "0x691f59471Bfd2B7d639DCF74671a2d648ED1E331";
@@ -305,9 +305,9 @@ function simulator({ chain }: Run, state: State): Executor {
   let [keeper, proposer] = [state.keeper, state.proposer];
   return {
     send: async ({ what, call, gains = 0n }) => {
-      const options = { what: `the ${what}`, before: done, blockNumber: state.at, checkQueued: true };
+      const options = { what: `the ${what}`, before: done, blockNumber: state.at };
       const prepared = await prepareTx(chain, state.sender, call, options);
-      payable(prepared, call, state.sender.from, proposer);
+      await payable(chain, prepared, call, state.sender.from, proposer);
       done.push(call);
       const value = call.value ?? 0n;
       proposer += gains - prepared.expectedCost - value;
@@ -324,13 +324,16 @@ function simulator({ chain }: Run, state: State): Executor {
  * Fails if a transaction this run sent from the proposer may still land at its nonce, because it may be a vote and a
  * top-up must never replace one, or if `balance` can't pay for the call's gas and value.
  */
-function payable(
-  { tx, cost, queued }: { tx: { nonce: number }; cost: bigint; queued: boolean },
+async function payable(
+  chain: Chain,
+  { tx, cost }: { tx: { nonce: number }; cost: bigint },
   call: TxCall,
   from: Address,
   balance: bigint,
-): void {
-  if (queued) throw new Error(`a transaction of the proposer is pending at nonce ${tx.nonce}`);
+): Promise<void> {
+  if ((await heldAt(chain, from, tx.nonce)) !== false) {
+    throw new Error(`a transaction of the proposer is pending at nonce ${tx.nonce}`);
+  }
   const needed = cost + (call.value ?? 0n);
   if (balance < needed) throw new Error(`fund the proposer: ${from} has ${balance} wei, needs ${needed}`);
 }
@@ -344,8 +347,8 @@ async function sendTx(
   until: number,
 ): Promise<bigint> {
   const { from } = sender;
-  const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at, checkQueued: true });
-  payable(prepared, call, from, prepared.balance);
+  const prepared = await prepareTx(chain, sender, call, { what: `the ${what}`, blockNumber: at });
+  await payable(chain, prepared, call, from, prepared.balance);
   const { tx } = prepared;
   const { signed, ...ready } = await signTx(signer, tx, false, from);
   if (!signed) throw new Error("no key signs for the proposer");

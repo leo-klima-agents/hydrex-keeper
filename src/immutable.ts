@@ -1,6 +1,7 @@
 import type { Address } from "viem";
 import { immutableAbi } from "./abi.ts";
 import { call, lower, readMany, type Chain, type Client } from "./chain.ts";
+import { warnOnce } from "./log.ts";
 import type { PoolRewards, State } from "./read.ts";
 import {
   asVoted,
@@ -50,6 +51,10 @@ export async function readValues(
   const values = await readMany<bigint>(client, calls, { chunk: VALUE_CHUNK, concurrency: VALUE_CONCURRENCY });
   return new Map(pools.map((pool, i) => [lower(pool), usd(values[i]!)]));
 }
+
+/** For a score the conduit couldn't give with the votes: warns once per run of the function it returns. */
+export const unscored = (conduit: Address) =>
+  warnOnce("the immutable conduit can't score its vote in force; its simulation checks the vote", { conduit });
 
 /** The conduit's checks at `values`, with its score of the vote in force as read with the votes, if it could score. */
 export function onchainOf(state: State, values: Map<Address, number> | undefined): Onchain | undefined {

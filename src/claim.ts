@@ -22,6 +22,7 @@ import {
   broadcastTx,
   confirmTx,
   klimaSender,
+  heldAt,
   prepareCall,
   signTx,
   Unconfirmed,
@@ -469,14 +470,14 @@ async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {
       for (const refusal of built) refuse(ctx, nft, refusal);
       continue;
     }
-    const { tx, cost, expectedCost, balance, queued, simulated } = await prepareCall(chain, built.call, {
+    const { tx, cost, expectedCost, balance, simulated } = await prepareCall(chain, built.call, {
       before: nft.prepared,
       at,
       sender,
-      checkQueued: true,
     });
-    // A transaction this run sent at this nonce may still land and may be a vote, and a claim must never replace one.
-    if (queued) throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);
+    if ((await heldAt(chain, sender.from, tx.nonce)) !== false) {
+      throw new Stop(`a transaction of the ${sender.name} is pending at nonce ${tx.nonce}: the claims stop`);
+    }
     if (simulated.gasUsed > MAX_GAS_USED) {
       if (++replans === REPLANS)
         throw new Error(`no claim fits in ${MAX_GAS_USED} gas: ${REPLANS} smaller plans did not`);

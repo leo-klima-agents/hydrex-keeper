@@ -26,23 +26,26 @@ import {
   onchainOf,
   pricedPools,
   readValues,
+  unscored,
   type ImmutableDecision,
   type Onchain,
 } from "./immutable.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
-import { tokensOf, UNSCORED, valueRewards, type Run } from "./pass.ts";
+import { tokensOf, valueRewards, type Run } from "./pass.ts";
 import type { Prices } from "./prices.ts";
 import { assertFresh, readRewards, readVotes, type PoolRewards, type State } from "./read.ts";
 import { select, summarize, type Vote } from "./select.ts";
 import {
   broadcastTx,
+  immutableSender,
   klimaSender,
   lastVotedAt,
-  immutableSender,
   markMined,
   nonceTaken,
   prepareVote,
+  readFees,
   verifyVote,
+  type Fees,
   type Prepared,
   type Rival,
   type Sender,
@@ -112,8 +115,8 @@ export function keep<P extends { readAt: number }>(lane: Lane<P>, plan: P): void
 }
 
 /**
- * Deadlines come from block timing alone, so a hung poll or plan delays nothing. Lanes plan separately, so a lane that
- * fails or lags holds up no other.
+ * Deadlines come from block timing alone, so a hung poll or plan delays nothing. Each lane plans on its own schedule,
+ * so a lane whose plans fail or hang holds up no other.
  */
 export async function race<P extends { readAt: number }>(
   flip: number,
@@ -266,8 +269,8 @@ export function pick(
 
 /**
  * Gives the last value `read` returned. It reads again in the background on the first call with a new `key`, and
- * REREAD_MS after a failed read, one read at a time. Only calls made before there is any value wait for one, and for at
- * most `wait` ms, so a hung read holds back no plan.
+ * REREAD_MS after a failed read, one read at a time. Until there is a value, calls wait for one, but only until `wait`
+ * ms after the first call, so a read that hangs or keeps failing holds back no later plan.
  */
 export function refreshed<T>(
   read: () => Promise<T>,
@@ -276,6 +279,7 @@ export function refreshed<T>(
 ): (key: number) => Promise<{ value: T; version: number } | undefined> {
   let last: { value: T; version: number } | undefined;
   let reading: { key: number; done: Promise<void>; settled: boolean; failedAt?: number } | undefined;
+  let waitUntil: number | undefined;
   return async (key) => {
     const failedAt = reading?.failedAt;
     const due =
@@ -296,9 +300,11 @@ export function refreshed<T>(
       );
       reading = entry;
     }
-    if (!last) {
+    waitUntil ??= Date.now() + wait;
+    const left = waitUntil - Date.now();
+    if (!last && left > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([reading!.done, new Promise<void>((resolve) => (timer = setTimeout(resolve, wait)))]);
+      await Promise.race([reading!.done, new Promise<void>((resolve) => (timer = setTimeout(resolve, left)))]);
       clearTimeout(timer);
     }
     return last;
@@ -342,6 +348,121 @@ const keyOf = ({ epoch, pools, score }: State) =>
 
 const voteKey = (vote: Vote | undefined) => (vote ? `${vote.pools.join()}:${vote.weights.join()}` : "-");
 
+// The tip, and the power of two the base fee is under: as long as the base fee stays under it, twice the base fee a
+// vote was prepared with still covers it with the tip on top, so the vote pays its tip in full.
+const feeKey = ({ tip, baseFee }: Fees) => `${tip}:${baseFee.toString(2).length}`;
+
+/** What the lanes plan from: the votes and the fees, read once for the lanes that plan at about the same time. */
+export type Snapshot = { readAt: number; time: number; read: Promise<{ state: State; fees: Fees }> };
+
+type Values = { value: Map<Address, number>; version: number };
+
+export type Planning = {
+  chain: Chain;
+  conduits: { klima: boolean; immutable: boolean };
+  dryRun: boolean;
+  account: LocalAccount | undefined;
+  proposer: LocalAccount | undefined;
+  /** The rewards of the pools whose votes are read, in USD. */
+  usd: () => number[];
+  snapshot: () => Snapshot;
+  /** The immutable conduit's values of the pools, by the second of a read. */
+  values: (key: number) => Promise<Values | undefined>;
+  sent: Map<Hex, Sent>;
+  prepareVote?: typeof prepareVote;
+};
+
+/**
+ * The two conduits' lanes. Both decide both votes from the snapshot they share, so neither waits for the other's
+ * plans, and the plans made from one snapshot pair up in `pick`. Plans with the same inputs share one preparation,
+ * finished or under way, so that a plan reads and decides, but only waits for a simulation and a signature when
+ * something changed. A vote that landed since may have taken the nonce of one prepared before, so `lastVoted` is one of
+ * the inputs, and so are the fees, so that the tip follows the blocks.
+ */
+export function lanesOf(planning: Planning): { klima: Lane<Plan>; immutable: Lane<Plan> } {
+  const { chain, conduits, dryRun, account, proposer, sent } = planning;
+  const prepareWith = planning.prepareVote ?? prepareVote;
+  const preparing = oncePer<Prepared>();
+  const prepare = async (
+    base: Plan,
+    lastVoted: bigint,
+    fees: Fees,
+    sender: Sender,
+    signer: LocalAccount | undefined,
+    rival?: Rival,
+  ): Promise<Plan> => {
+    const { time } = base;
+    if (!base.vote) return base;
+    if (votedInSecond(lastVoted, time)) return { ...base, note: "already voted in this second" };
+    const second = BigInt(Math.floor(time / 1000));
+    const key = [sender.from, second, lastVoted, voteKey(base.vote), voteKey(rival?.vote), feeKey(fees)].join("|");
+    const target = { time: second, lastVoted };
+    const { vote } = base;
+    const prepared = await preparing(key, () => prepareWith(chain, signer, vote, dryRun, target, sender, rival, fees));
+    return { ...base, prepared, rival: rival?.vote };
+  };
+
+  const warnUnscored = unscored(chain.immutable.conduit);
+  // Whether the immutable conduit's last plan failed or can't be sent, so that the Klima conduit answers its votes in
+  // force rather than a vote that won't go out.
+  let immutableFailing = false;
+  const [plainImmutable, decided] = [memo<ImmutableDecision>(), memo<Decisions>()];
+  const decisionsOf = async ({ readAt, time }: Snapshot, state: State): Promise<Decisions> => {
+    const usd = planning.usd();
+    const key = keyOf(state);
+    let onchain: Onchain | undefined;
+    let version = 0;
+    if (conduits.immutable && plainImmutable(key, () => decideImmutable(state, usd, undefined)).vote) {
+      const values = await planning.values(Math.floor(readAt / 1000));
+      if (state.score === undefined) warnUnscored(new Error("currentScore reverted"));
+      onchain = onchainOf(state, values?.value);
+      if (onchain) version = values!.version;
+    }
+    const trusted = !immutableFailing;
+    return decided(`${key}|${version}|${time}|${trusted}`, () =>
+      decideBoth(state, time, usd, onchain, { ...conduits, trusted }),
+    );
+  };
+
+  const immutable: Lane<Plan> = {
+    name: "immutable",
+    plan: async () => {
+      try {
+        const snapshot = planning.snapshot();
+        const { state, fees } = await snapshot.read;
+        assertFresh(state.epoch);
+        for (const nonce of landed(state, sent.values())) markMined(chain, nonce, immutableSender(chain).from);
+        const { immutable, rival } = await decisionsOf(snapshot, state);
+        const { vote, note, summary, byPool } = immutable;
+        const base = { readAt: snapshot.readAt, time: snapshot.time, vote, note, summary, votes: byPool };
+        const against = rival && { sender: klimaSender(chain), vote: rival };
+        const { lastVoted } = state.epoch.immutable;
+        const plan = await prepare(base, lastVoted, fees, immutableSender(chain), proposer, against);
+        immutableFailing = plan.prepared !== undefined && plan.prepared.signed === undefined && !dryRun;
+        return plan;
+      } catch (error) {
+        immutableFailing = true;
+        throw error;
+      }
+    },
+  };
+
+  const klima: Lane<Plan> = {
+    name: "klima",
+    plan: async () => {
+      const snapshot = planning.snapshot();
+      const { state, fees } = await snapshot.read;
+      assertFresh(state.epoch);
+      const { klima, answered } = await decisionsOf(snapshot, state);
+      const { vote, reason, summary } = klima;
+      const base = { readAt: snapshot.readAt, time: snapshot.time, vote, note: reason, summary, answered };
+      return prepare(base, state.epoch.lastVoted, fees, klimaSender(chain), account);
+    },
+  };
+
+  return { klima, immutable };
+}
+
 export async function lastBlocks(
   run: Run,
   flip: bigint,
@@ -366,38 +487,18 @@ export async function lastBlocks(
   let usd: number[] = [];
   let valued: Address[] = [];
 
-  // Plans with the same inputs share one preparation, finished or under way, so that a plan reads the votes and decides
-  // but only waits for a simulation and a signature when something changed. A vote that landed since may have taken the
-  // nonce of one prepared before, so `lastVoted` is one of the inputs.
-  const preparing = oncePer<Prepared>();
-  const prepare = async (
-    base: Plan,
-    lastVoted: bigint,
-    sender: Sender,
-    signer: LocalAccount | undefined,
-    rival?: Rival,
-  ): Promise<Plan> => {
-    const { time, vote } = base;
-    if (!vote) return base;
-    if (votedInSecond(lastVoted, time)) return { ...base, note: "already voted in this second" };
-    const second = BigInt(Math.floor(time / 1000));
-    const key = [sender.from, second, lastVoted, voteKey(vote), voteKey(rival?.vote)].join("|");
-    const target = { time: second, lastVoted };
-    const prepared = await preparing(key, () => prepareVote(chain, signer, vote, dryRun, target, sender, rival));
-    return { ...base, prepared, rival: rival?.vote };
-  };
-
   // Two signatures of the same transaction differ, so copies are matched by the unsigned hash.
   const sent = new Map<Hex, Sent>();
 
-  // The latest block's votes, read once for the lanes that plan at about the same time. A plan is for the block of the
-  // next vote as of when its read started.
-  type Snapshot = { readAt: number; time: number; state: Promise<State> };
+  // The latest block's votes, and the fees, read once for the lanes that plan at about the same time. A plan is for the
+  // block of the next vote as of when its read started.
   let votes: Snapshot | undefined;
   const votesNow = () => {
     const now = Date.now();
     if (!votes || now - votes.readAt >= SHARED_READ_MS) {
-      votes = { readAt: now, time: blocks.upcoming(flipMs, now) ?? now, state: readVotes(chain, rewards) };
+      const read = Promise.all([readVotes(chain, rewards), readFees(chain.client)]);
+      const time = blocks.upcoming(flipMs, now) ?? now;
+      votes = { readAt: now, time, read: read.then(([state, fees]) => ({ state, fees })) };
     }
     return votes;
   };
@@ -409,63 +510,17 @@ export async function lastBlocks(
     () => readValues(chain, chain.bulk, valued),
     warnOnce("the immutable conduit's values unread; its simulation checks the vote"),
   );
-  let scored = true;
-  // Whether the immutable conduit's last plan failed or can't be sent, so that the Klima conduit answers its votes in
-  // force rather than a vote that won't go out.
-  let immutableFailing = false;
-  const [plainImmutable, decided] = [memo<ImmutableDecision>(), memo<Decisions>()];
-  // Both lanes decide both votes from the read they share, so neither waits for the other's plans.
-  const decisionsOf = async ({ readAt, time }: Snapshot, state: State): Promise<Decisions> => {
-    const key = keyOf(state);
-    let onchain: Onchain | undefined;
-    let version = 0;
-    if (conduits.immutable && plainImmutable(key, () => decideImmutable(state, usd, undefined)).vote) {
-      const values = await valuesNow(Math.floor(readAt / 1000));
-      if (state.score === undefined && scored) log.warning(UNSCORED, { conduit: chain.immutable.conduit });
-      scored = state.score !== undefined;
-      onchain = onchainOf(state, values?.value);
-      if (onchain) version = values!.version;
-    }
-    const trusted = !immutableFailing;
-    return decided(`${key}|${version}|${time}|${trusted}`, () =>
-      decideBoth(state, time, usd, onchain, { ...conduits, trusted }),
-    );
-  };
-
-  const immutableLane: Lane<Plan> = {
-    name: "immutable",
-    plan: async () => {
-      try {
-        const snapshot = votesNow();
-        const state = await snapshot.state;
-        assertFresh(state.epoch);
-        for (const nonce of landed(state, sent.values())) markMined(chain, nonce, immutableSender(chain).from);
-        const { immutable, rival } = await decisionsOf(snapshot, state);
-        const { vote, note, summary, byPool } = immutable;
-        const base = { readAt: snapshot.readAt, time: snapshot.time, vote, note, summary, votes: byPool };
-        const against = rival && { sender: klimaSender(chain), vote: rival };
-        const plan = await prepare(base, state.epoch.immutable.lastVoted, immutableSender(chain), proposer, against);
-        immutableFailing = plan.prepared !== undefined && plan.prepared.signed === undefined && !dryRun;
-        return plan;
-      } catch (error) {
-        immutableFailing = true;
-        throw error;
-      }
-    },
-  };
-
-  const klimaLane: Lane<Plan> = {
-    name: "klima",
-    plan: async () => {
-      const snapshot = votesNow();
-      const state = await snapshot.state;
-      assertFresh(state.epoch);
-      const { klima, answered } = await decisionsOf(snapshot, state);
-      const { vote, reason, summary } = klima;
-      const base = { readAt: snapshot.readAt, time: snapshot.time, vote, note: reason, summary, answered };
-      return prepare(base, state.epoch.lastVoted, klimaSender(chain), account);
-    },
-  };
+  const { klima: klimaLane, immutable: immutableLane } = lanesOf({
+    chain,
+    conduits,
+    dryRun,
+    account,
+    proposer,
+    usd: () => usd,
+    snapshot: votesNow,
+    values: valuesNow,
+    sent,
+  });
 
   const lanes = [...(conduits.immutable ? [immutableLane] : []), ...(conduits.klima ? [klimaLane] : [])];
   if (lanes.length === 0) {
@@ -495,8 +550,9 @@ export async function lastBlocks(
     }
   }
   // Logs each pool with its votes as the first plans see them. If that read fails, those plans fail and log it.
-  const { state: first } = votesNow();
-  void first.then(({ pools }) => valueRewards(run, pools, priced, true)).catch(() => undefined);
+  void votesNow()
+    .read.then(({ state }) => valueRewards(run, state.pools, priced, true))
+    .catch(() => undefined);
   // Each lane's first plan is retried until one comes back, while the race starts. It is sent if no later plan is.
   void Promise.all(
     lanes.map(async (lane) => {
@@ -601,8 +657,9 @@ function landing(flipMs: number, block: Landed, receipt: Receipted) {
 /**
  * Logs each vote anyone cast in the last WATCHED_S seconds before the flip, ours included, to see how close to the
  * flip other voters vote, and where their votes land in a block. `call` names the function a transaction to the Voter
- * called, so that a poke, which casts a voter's last vote again, shows as one. A transaction through another contract
- * shows the selector it called on its `to`.
+ * called, so that a poke, which casts a voter's last vote again, shows as one, and `others` counts the votes of others
+ * but their pokes. A transaction through another contract shows the selector it called on its `to`, and one that can't
+ * be read shows no `call`.
  */
 export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   const { client, voter } = chain;
@@ -636,13 +693,13 @@ export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   };
   const rows = await Promise.all(
     [...votes].map(async ([hash, { voter: by, pools }]) => {
-      const [receipt, tx] = await Promise.all([
+      const [receipt, call] = await Promise.all([
         client.getTransactionReceipt({ hash }),
-        client.getTransaction({ hash }),
+        client.getTransaction({ hash }).then(callOf, () => undefined),
       ]);
       const where = landing(Number(flip) * 1000, await blockOf(receipt.blockNumber), receipt);
       const { from, to, blockNumber: block } = receipt;
-      const row = { hash, voter: by, ours: by !== undefined && ours.has(lower(by)), from, to, call: callOf(tx) };
+      const row = { hash, voter: by, ours: by !== undefined && ours.has(lower(by)), from, to, call };
       return { ...row, pools, block, ...where };
     }),
   );
@@ -651,7 +708,7 @@ export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
   log.info("votes before the flip", {
     seconds: WATCHED_S,
     votes: rows.length,
-    others: rows.filter((r) => !r.ours).length,
+    others: rows.filter((r) => !r.ours && r.call !== "poke").length,
     pokes: rows.filter((r) => r.call === "poke").length,
   });
 }

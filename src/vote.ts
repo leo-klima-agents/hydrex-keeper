@@ -111,7 +111,7 @@ function sentBy(client: Client): Map<Address, LastSent> {
   return sent;
 }
 
-/** With a `rival`, the vote must also succeed after the rival's. */
+/** With a `rival`, the vote must also succeed after the rival's. Without `fees`, they are read. */
 export async function prepareVote(
   chain: Chain,
   account: LocalAccount | undefined,
@@ -120,8 +120,10 @@ export async function prepareVote(
   target?: Target,
   sender: Sender = klimaSender(chain),
   rival?: Rival,
+  fees?: Fees,
 ): Promise<Prepared> {
-  const { tx, cost, balance, tip, congested } = await prepareCall(chain, voteCall(vote), { target, sender, rival });
+  const options = { target, sender, rival, fees };
+  const { tx, cost, balance, tip, congested } = await prepareCall(chain, voteCall(vote), options);
   // A vote before the last blocks must leave enough ETH to vote again in them.
   const needed = (target ? 1n : 2n) * cost;
   const { name, from, conduit } = sender;
@@ -141,13 +143,13 @@ type CallOptions = {
   at?: bigint;
   sender?: Sender;
   rival?: Rival | undefined;
-  checkQueued?: boolean | undefined;
+  fees?: Fees | undefined;
 };
 
 export async function prepareCall(
   chain: Chain,
   call: ModuleCall,
-  { target, before = [], at, sender = klimaSender(chain), rival, checkQueued }: CallOptions = {},
+  { target, before = [], at, sender = klimaSender(chain), rival, fees }: CallOptions = {},
 ) {
   // Votes are simulated just after the latest block, at a time kept inside the epoch. The latest block may already be
   // in the second a last-block vote is for, the last one before the flip, and the immutable conduit refuses votes from
@@ -171,7 +173,7 @@ export async function prepareCall(
       calls: [txCallOf(rival.sender, voteCall(rival.vote))],
     },
     landed: later,
-    checkQueued,
+    fees,
   });
 }
 
@@ -187,9 +189,28 @@ type TxOptions = {
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
-  /** Whether to ask the nodes if a transaction this process sent at the nonce may still land (`queued`). */
-  checkQueued?: boolean | undefined;
+  /** Read with `readFees` if not given. */
+  fees?: Fees | undefined;
 };
+
+/** The next block's base fee, and the tip to pay: `congested` when any of the last FEE_BLOCKS blocks was. */
+export type Fees = { baseFee: bigint; tip: bigint; congested: boolean };
+
+/**
+ * The tip is the suggested one, or if any of the last FEE_BLOCKS blocks was congested, the 99th percentile of their
+ * tips, up to MAX_TIP.
+ */
+export async function readFees(client: Client): Promise<Fees> {
+  const [suggested, history] = await Promise.all([
+    client.estimateMaxPriorityFeePerGas(),
+    client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
+  ]);
+  const baseFee = history.baseFeePerGas.at(-1); // the next block's
+  if (baseFee === undefined) throw new Error("no base fee");
+  const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
+  const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
+  return { baseFee, tip: congested ? max(suggested, min(top, MAX_TIP)) : suggested, congested };
+}
 
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
   abi ? encodeFunctionData({ abi, functionName, args } as never) : "0x";
@@ -205,13 +226,11 @@ const simulatedAs =
   });
 
 /**
- * Throws if the transaction would revert. The max fee is twice the base fee plus the tip. If any of the last
- * FEE_BLOCKS blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. Costs are in wei,
- * include the L1 fee and leave out the value sent. With `checkQueued`, `queued` means a transaction this process sent at
- * the same nonce may still land: a node has it, or no node answered.
+ * Throws if the transaction would revert. The max fee is twice the base fee plus the tip (see `readFees`). Costs are in
+ * wei, include the L1 fee and leave out the value sent.
  */
 export async function prepareTx(chain: Chain, { from, client }: From, call: TxCall, options: TxOptions) {
-  const { what, before = [], blockNumber, time, rival, landed = false, checkQueued = false } = options;
+  const { what, before = [], blockNumber, time, rival, landed = false } = options;
   const { to, value } = call;
   const data = dataOf(call);
   const on = blockNumber === undefined ? {} : { blockNumber };
@@ -219,18 +238,13 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const calls = [...before, call].map(simulatedAs(from));
   const simulate = (prior: readonly unknown[]) =>
     client.simulateBlocks({ ...on, blocks: [{ ...blockOverrides, calls: [...prior, ...calls] as never[] }] });
-  const lastSent = sentBy(chain.client).get(lower(from));
-  const mined = lastSent?.mined === true || landed;
-  const unmined = checkQueued && lastSent && !mined ? lastSent.hashes : [];
-  const [[block], afterRival, suggested, history, latest, balance, l1Fee, known] = await allOrFirstFailure([
+  const [[block], afterRival, fees, latest, balance, l1Fee] = await allOrFirstFailure([
     simulate([]),
     rival ? simulate(rival.calls.map(simulatedAs(rival.from))) : Promise.resolve(undefined),
-    client.estimateMaxPriorityFeePerGas(),
-    client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
+    options.fees ? Promise.resolve(options.fees) : readFees(client),
     client.getTransactionCount({ address: from }),
     client.getBalance({ address: from }),
     client.estimateL1Fee({ account: from, to, data, ...(value ? { value } : {}) }),
-    chain.known(unmined),
   ]);
   const simulated = block!.calls.at(-1)!;
   if (simulated.status !== "success") throw simulated.error ?? new Error(`${what} would revert`);
@@ -239,18 +253,15 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     const reason = second.error ? errorMessage(second.error) : "no reason given";
     throw new Error(`${what} would revert after the ${rival!.name}'s: ${reason}`);
   }
-  const baseFee = history.baseFeePerGas.at(-1); // the next block's
-  if (baseFee === undefined) throw new Error("no base fee");
-  const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
-  const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
+  const { baseFee, tip, congested } = fees;
   // The confirmed nonce, so that a transaction this process sent and hasn't seen in a block is replaced rather than
   // queued behind, at a quarter more than its fees, or twice them if nodes refused it as underpriced. The last
   // transaction counts as mined, whatever the node says, once its receipt was seen, once the Voter shows its votes (see
   // `landed` in last.ts), or when the caller knows it is in a block.
+  const lastSent = sentBy(chain.client).get(lower(from));
+  const mined = lastSent?.mined === true || landed;
   const nonce = Math.max(latest, mined && lastSent ? lastSent.nonce + 1 : 0);
   const own = lastSent?.nonce === nonce ? lastSent : undefined;
-  const queued = own !== undefined && known !== false;
   const bump = (fee: bigint, sent?: bigint) =>
     sent === undefined ? fee : max(fee, own?.underpriced ? sent * 2n : (sent * 5n) / 4n);
   const tx = {
@@ -274,7 +285,6 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     balance,
     tip,
     congested,
-    queued,
     simulated: { gasUsed, logs: logs ?? [] },
   };
 }
@@ -324,12 +334,13 @@ export async function broadcastTx(
 }
 
 /**
- * Whether a transaction this process sent from `from` at `nonce` is in a block or still held by a node. Only a node's
- * answer counts: when none answers, this says no.
+ * Whether a transaction this process sent from `from` at `nonce`, and hasn't seen in a block, may still land: a node
+ * holds it. Undefined when no node answers. A claim or a top-up must not replace one, since it may be a vote.
  */
-async function sentAt(chain: Chain, from: Address, nonce: number): Promise<boolean> {
+export async function heldAt(chain: Chain, from: Address, nonce: number): Promise<boolean | undefined> {
   const last = sentBy(chain.client).get(lower(from));
-  return last?.nonce === nonce && (await chain.known(last.hashes)) === true;
+  if (!last || last.mined || last.nonce !== nonce) return false;
+  return chain.known(last.hashes);
 }
 
 export function markMined({ client, keeper }: Chain, nonce: number, from: Address = keeper): void {
@@ -364,9 +375,9 @@ export async function confirmTx(chain: Chain, from: Address, hash: Hex, nonce: n
 export async function nonceTaken(chain: Chain, nonce: number, from: Address = chain.keeper): Promise<boolean> {
   const [next, held] = await Promise.all([
     chain.client.getTransactionCount({ address: from }).catch(() => undefined),
-    sentAt(chain, from, nonce),
+    heldAt(chain, from, nonce),
   ]);
-  return (next !== undefined && next > nonce) || held;
+  return (next !== undefined && next > nonce) || held === true;
 }
 
 export async function castVote(
@@ -454,14 +465,14 @@ export async function pendingVote(chain: Chain, { from, to, abi, client }: Sende
   if (!last || last.mined || !isAddressEqual(last.to, to)) return undefined;
   const { functionName, args } = decodeFunctionData({ abi, data: last.data });
   if (functionName !== "vote") return undefined;
-  const [free, known] = await Promise.all([
+  const [free, held] = await Promise.all([
     client.getTransactionCount({ address: from }).then(
       (latest) => latest <= last.nonce,
       () => true,
     ),
-    chain.known(last.hashes),
+    heldAt(chain, from, last.nonce),
   ]);
-  const landing = free && known !== false;
+  const landing = free && held !== false;
   const [pools, weights] = args as readonly [readonly Address[], readonly bigint[]];
   return landing ? { pools: [...pools], weights: [...weights] } : undefined;
 }

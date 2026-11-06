@@ -3,11 +3,12 @@ import { test, type TestContext } from "node:test";
 import { encodeFunctionData, TransactionReceiptNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { voterAbi } from "../src/abi.ts";
 import { Blocks, sleep, watch } from "../src/blocks.ts";
-import { lastBlockBefore, type Chain as Connection, type Client } from "../src/chain.ts";
+import { lastBlockBefore, now, WEEK, type Chain as Connection, type Client } from "../src/chain.ts";
 import {
   decideBoth,
   keep,
   landed,
+  lanesOf,
   lastVotes,
   oncePer,
   outcome,
@@ -20,7 +21,7 @@ import {
 } from "../src/last.ts";
 import type { Run } from "../src/pass.ts";
 import type { State } from "../src/read.ts";
-import { immutableSender, klimaSender, type Tx } from "../src/vote.ts";
+import { immutableSender, klimaSender, type Fees, type Prepared, type prepareVote, type Tx } from "../src/vote.ts";
 import { logged } from "./helpers.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
@@ -350,6 +351,14 @@ test("the immutable conduit's values: the last read, read again in the backgroun
   assert.equal(reads, 4, "read again shortly after");
 });
 
+/** The value of `promise` if it settles without any timer firing, as it must when nothing waits. */
+async function settled<T>(promise: Promise<T>): Promise<T> {
+  const pending = Symbol("pending");
+  const result = await Promise.race([promise, new Promise<symbol>((resolve) => setImmediate(() => resolve(pending)))]);
+  assert.notEqual(result, pending, "waited");
+  return result as T;
+}
+
 test("plans wait for the immutable conduit's first values only so long, and go without while they are read", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   let answer: (value: number) => void = () => {};
@@ -359,14 +368,28 @@ test("plans wait for the immutable conduit's first values only so long, and go w
     3_000,
   );
   const first = values(1);
-  t.mock.timers.tick(3_000);
-  assert.equal(await first, undefined, "a read that hangs holds back no plan");
+  t.mock.timers.tick(1_000);
   const second = values(1);
-  t.mock.timers.tick(3_000);
-  assert.equal(await second, undefined, "nor any later one before it answers");
+  t.mock.timers.tick(2_000);
+  assert.deepEqual([await first, await second], [undefined, undefined], "a read that hangs holds back no plan");
+  assert.equal(await settled(values(1)), undefined, "nor any later one, which doesn't wait at all");
   answer(7);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(await values(1), { value: 7, version: 1 }, "the values once read");
+});
+
+test("once the first values have had their time, reads that keep failing hold back no plan", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  let reads = 0;
+  const values = refreshed(
+    () => (reads++, new Promise<number>(() => {})),
+    () => {},
+    3_000,
+  );
+  void values(1);
+  t.mock.timers.tick(3_000);
+  assert.equal(await settled(values(2)), undefined, "no wait for a read under way");
+  assert.equal(reads, 1, "one read at a time");
 });
 
 test("both votes come from one read, so that the plans made from it pair up, the Klima one answering the other", () => {
@@ -413,6 +436,116 @@ test("both votes come from one read, so that the plans made from it pair up, the
   const stale = plans(inForce, 400);
   const mixed = pick(time, fresh.klima, stale.immutable);
   assert.deepEqual(readAts(mixed), { klima: 500, immutable: undefined, unchecked: true }, "not across reads");
+});
+
+/** The two lanes on a fixed read that both conduits vote on, preparing with `prepareWith`. */
+function lanesOn(prepareWith?: (from: Address) => void) {
+  const E = 10n ** 18n;
+  const [KLIMA_CONDUIT, CONDUIT, PROPOSER, KEEPER] = [addr(1), addr(2), addr(8), addr(5)];
+  const chain = {
+    client: {},
+    proposerClient: {},
+    keeper: KEEPER,
+    module: addr(4),
+    conduit: KLIMA_CONDUIT,
+    immutable: { conduit: CONDUIT, proposer: PROPOSER, priced: [] },
+  } as unknown as Connection;
+  const time = flip - 400;
+  const read = {
+    state: {
+      epoch: {
+        start: (now() / WEEK) * WEEK,
+        flip: 0n,
+        power: 1000n * E,
+        lastVoted: 0n,
+        votedThisEpoch: true,
+        immutable: { power: 1000n * E, lastVoted: 0n, votedThisEpoch: false },
+      },
+      pools: [
+        { pool: addr(20), rewards: [], otherVotes: 2000n * E, ownVotes: 0n, immutableVotes: 0n },
+        { pool: addr(21), rewards: [], otherVotes: 100n * E, ownVotes: 0n, immutableVotes: 0n },
+      ],
+      score: 0n,
+    } as State,
+    fees: { baseFee: 5_000_000n, tip: 1_000_000n, congested: false } as Fees,
+  };
+  const prepared: { from: Address; fees: Fees | undefined }[] = [];
+  const prepare = (async (_c, _a, _v, _d, _t, sender, _r, fees): Promise<Prepared> => {
+    prepared.push({ from: sender!.from, fees });
+    await new Promise((resolve) => setImmediate(resolve));
+    prepareWith?.(sender!.from);
+    return { tx: {} as Tx, from: sender!.from, signed: "0x01" };
+  }) as typeof prepareVote;
+  const valueReads: number[] = [];
+  const lanes = lanesOf({
+    chain,
+    conduits: { klima: true, immutable: true },
+    dryRun: false,
+    account: undefined,
+    proposer: undefined,
+    usd: () => [300, 100],
+    snapshot: () => ({ readAt: time - 300, time, read: Promise.resolve(read) }),
+    values: async (key) => (valueReads.push(key), undefined),
+    sent: new Map(),
+    prepareVote: prepare,
+  });
+  return { ...lanes, read, time, prepared, valueReads, PROPOSER, KEEPER };
+}
+
+test("the lanes decide both votes from the read they share, so their plans pair up", async () => {
+  const { klima, immutable, time } = lanesOn();
+  const [k, v] = await Promise.all([klima.plan(), immutable.plan()]);
+  assert.ok(k.vote && v.vote && v.prepared && k.prepared);
+  assert.equal(k.answered, true, "the Klima conduit counts the immutable conduit's vote");
+  assert.deepEqual(v.rival, k.vote, "which is checked after the Klima conduit's");
+  assert.deepEqual(readAts(pick(time, laneOf(k), laneOf(v))), { klima: k.readAt, immutable: v.readAt });
+});
+
+test("while the immutable conduit's plans fail, the Klima conduit answers its votes in force", async () => {
+  let failing = true;
+  const { klima, immutable, PROPOSER } = lanesOn((from) => {
+    if (failing && from === PROPOSER) throw new Error("would revert after the keeper's");
+  });
+  await assert.rejects(immutable.plan(), /would revert/);
+  assert.equal((await klima.plan()).answered, false, "after a failure");
+  failing = false;
+  const v = await immutable.plan();
+  const inForce = await klima.plan();
+  assert.equal(inForce.answered, true, "after a success");
+  assert.notDeepEqual(v.rival, inForce.vote, "that plan was checked after the vote that answered the votes in force");
+});
+
+test("plans share a preparation until the tip, the base fee's power of two or the last vote changes", async () => {
+  const { klima, read, prepared, KEEPER } = lanesOn();
+  const preparations = () => prepared.filter(({ from }) => from === KEEPER).length;
+  await Promise.all([klima.plan(), klima.plan()]);
+  await klima.plan();
+  assert.equal(preparations(), 1, "under way, then finished");
+  read.fees = { ...read.fees, baseFee: 8_000_000n };
+  await klima.plan();
+  assert.equal(preparations(), 1, "a base fee under the same power of two");
+  read.fees = { ...read.fees, baseFee: 9_000_000n };
+  await klima.plan();
+  assert.equal(preparations(), 2, "past it");
+  read.fees = { ...read.fees, tip: 100_000_000n, congested: true };
+  await klima.plan();
+  assert.equal(preparations(), 3, "a tip raised by congestion");
+  assert.deepEqual(prepared.at(-1)!.fees, read.fees, "prepared with the fees read with the votes");
+  read.state = { ...read.state, epoch: { ...read.state.epoch, lastVoted: 1n } };
+  await klima.plan();
+  assert.equal(preparations(), 4, "a vote that landed");
+});
+
+test("the immutable conduit's values are asked for by the second of the read, and a missing score warned of once", async (t) => {
+  const { klima, immutable, read, valueReads, time } = lanesOn();
+  read.state = { ...read.state, score: undefined };
+  const lines = await logged(t, async () => {
+    await klima.plan();
+    await immutable.plan();
+  });
+  assert.deepEqual(new Set(valueReads), new Set([Math.floor((time - 300) / 1000)]), "by the second of the read");
+  const warnings = lines.filter((l) => l.message.startsWith("the immutable conduit can't score"));
+  assert.equal(warnings.length, 1);
 });
 
 test("plans with the same inputs share one preparation, finished or under way, and a failed one is made again", async () => {
@@ -512,10 +645,11 @@ function outcomeChain(
   inputs: Record<Hex, Hex> = {},
 ) {
   const client = {
-    getTransaction: async ({ hash }: { hash: Hex }) => ({
-      to: receipts[hash]?.to ?? null,
-      input: inputs[hash] ?? "0x",
-    }),
+    getTransaction: async ({ hash }: { hash: Hex }) => {
+      const input = inputs[hash];
+      if (!input) throw new Error(`transaction ${hash} not found`);
+      return { to: receipts[hash]?.to ?? null, input };
+    },
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
       const receipt = receipts[hash];
       if (!receipt) throw new TransactionReceiptNotFoundError({ hash });
@@ -639,7 +773,7 @@ test("each vote that landed is logged against the block it was sent for, when it
   );
 });
 
-test("every vote of the last 10 s before the flip is logged, anyone's, in the order it landed", async (t) => {
+test("every vote of the last 10 s before the flip is logged, anyone's, in the order it landed, pokes apart", async (t) => {
   const OTHER = addr(9);
   const receipts: Record<Hex, Receipt> = {
     "0x01": {
@@ -660,14 +794,24 @@ test("every vote of the last 10 s before the flip is logged, anyone's, in the or
       gasUsed: 6_000_000n,
       effectiveGasPrice: BASE_FEE + 20_000_000n,
     },
+    "0x03": {
+      status: "success",
+      blockNumber: LAST - 2n,
+      transactionIndex: 0,
+      from: addr(11),
+      to: VOTER,
+      gasUsed: 3_000_000n,
+      effectiveGasPrice: BASE_FEE + 1_000_000n,
+    },
   };
   const events: Voted[] = [
     { transactionHash: "0x02", args: { voter: KLIMA } },
     { transactionHash: "0x01", args: { voter: OTHER } },
     { transactionHash: "0x01", args: { voter: OTHER } },
+    { transactionHash: "0x03", args: { voter: addr(11) } },
   ];
   const ranges: [bigint, bigint][] = [];
-  // A poke straight to the Voter, and the keeper's vote through the module.
+  // A poke straight to the Voter, and the keeper's vote through the module. The third can't be read.
   const inputs: Record<Hex, Hex> = {
     "0x01": encodeFunctionData({ abi: voterAbi, functionName: "poke" }),
     "0x02": "0xdeadbeef0000",
@@ -690,11 +834,12 @@ test("every vote of the last 10 s before the flip is logged, anyone's, in the or
       ]),
     [
       ["0x01", OTHER, false, "poke", 2, -800, 7, "6000000"],
+      ["0x03", addr(11), false, undefined, 1, -600, 0, "1000000"],
       ["0x02", KLIMA, true, "0xdeadbeef", 1, -400, 2, "20000000"],
     ],
   );
   const summary = lines.find((l) => l.message === "votes before the flip");
-  const counts = { seconds: "10", votes: 2, others: 1, pokes: 1 };
+  const counts = { seconds: "10", votes: 3, others: 1, pokes: 1 };
   assert.deepEqual(summary, { severity: "INFO", message: "votes before the flip", ...counts });
 });
 

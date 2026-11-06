@@ -5,17 +5,21 @@ import { broadcastTx } from "../src/vote.ts";
 
 export type Line = { severity: string; message: string; error?: string } & Record<string, unknown>;
 
-/** The JSON lines logged while `act` runs, leaving out what the test runner writes to stdout meanwhile. */
+const isLine = (chunk: unknown): chunk is string => typeof chunk === "string" && chunk.startsWith("{");
+
+/**
+ * The JSON lines logged while `act` runs. What the test runner writes to stdout meanwhile, such as the result of the
+ * test before, still goes out.
+ */
 export async function logged(t: { mock: TestContext["mock"] }, act: () => unknown): Promise<Line[]> {
-  const write = t.mock.method(process.stdout, "write", () => true);
+  const original = process.stdout.write.bind(process.stdout) as (...args: unknown[]) => boolean;
+  const write = t.mock.method(process.stdout, "write", (...args: unknown[]) => isLine(args[0]) || original(...args));
   try {
     await act();
   } finally {
     write.mock.restore();
   }
-  return write.mock.calls.flatMap(({ arguments: [chunk] }) =>
-    typeof chunk === "string" && chunk.startsWith("{") ? [JSON.parse(chunk) as Line] : [],
-  );
+  return write.mock.calls.flatMap(({ arguments: [chunk] }) => (isLine(chunk) ? [JSON.parse(chunk) as Line] : []));
 }
 
 /**

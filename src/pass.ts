@@ -1,6 +1,6 @@
 import { formatUnits, type Address, type LocalAccount } from "viem";
 import { readMany, voterCall, type Chain } from "./chain.ts";
-import { decideImmutable, onchainOf, pricedPools, readValues } from "./immutable.ts";
+import { decideImmutable, onchainOf, pricedPools, readValues, unscored } from "./immutable.ts";
 import { log, warnOnce } from "./log.ts";
 import type { priceFeed, Prices } from "./prices.ts";
 import { readRewards, readVotes, type PoolRewards } from "./read.ts";
@@ -38,8 +38,6 @@ export function valueRewards(run: Run, pools: Pool[], priced: Prices, verbose: b
     return usd;
   });
 }
-
-export const UNSCORED = "the immutable conduit can't score its vote in force; its simulation checks the vote";
 
 export type DayBefore = { pools: PoolRewards[]; priced: Prices };
 
@@ -104,7 +102,7 @@ export async function passImmutable(
       warnOnce("the immutable conduit's values unread; its simulation checks the vote", { conduit }),
     ),
   ]);
-  if (state.score === undefined) log.warning(UNSCORED, { conduit });
+  if (state.score === undefined) unscored(conduit)(new Error("currentScore reverted"));
   const onchain = onchainOf(state, values);
   const { vote, note, summary } = decideImmutable(state, valueRewards(run, state.pools, priced, false), onchain, true);
   if (!vote) return log.info(note, { conduit, ...summary });
