@@ -7,7 +7,6 @@ export type Vote = { pools: Address[]; weights: bigint[] };
 const BPS = 10_000;
 export const MIN_GAIN_USD = 1; // a new vote must add this much expected reward
 const MIN_SHARE = 0.001; // smaller shares are dropped to save gas
-const MAX_POOLS = 40; // more pools could go over Base's gas limit per transaction
 
 /** Expected USD reward of voting fractions `x` of `power`: the sum of B·x/(V + x) over the pools. */
 export function expected(candidates: Candidate[], x: number[], power: bigint): number {
@@ -24,7 +23,7 @@ function kept(x: number[], maxPools: number): boolean[] {
   return x.map((xi, i) => xi >= MIN_SHARE && largest.has(i));
 }
 
-export function proportional(rewards: number[], maxPools = MAX_POOLS): number[] | null {
+export function proportional(rewards: number[], maxPools: number): number[] | null {
   const normalize = (xs: number[]) => {
     const total = xs.reduce((a, b) => a + b, 0);
     return total > 0 ? xs.map((x) => x / total) : null;
@@ -40,7 +39,7 @@ export function proportional(rewards: number[], maxPools = MAX_POOLS): number[] 
  * same marginal reward λ. Then x = max(0, √(B·V/λ) − V), with λ set so that the x add up to the voting power. Shares
  * too small to keep are dropped, and the rest is solved again.
  */
-export function waterFill(candidates: Candidate[], power: bigint, maxPools = MAX_POOLS): number[] | null {
+export function waterFill(candidates: Candidate[], power: bigint, maxPools: number): number[] | null {
   let x = solve(candidates, power);
   while (x) {
     const keep = kept(x, maxPools);
@@ -101,7 +100,7 @@ export function summarize(candidates: Candidate[], fractions: number[] | null, p
 export function select(
   candidates: Candidate[],
   power: bigint,
-  maxPools = MAX_POOLS,
+  maxPools: number,
 ): { fractions: number[] | null; vote: Vote | null } {
   const fractions = waterFill(candidates, power, maxPools);
   if (!fractions) return { fractions, vote: null };
@@ -128,7 +127,7 @@ export function waterFillAbove(
   power: bigint,
   values: number[],
   bar: number,
-  maxPools = MAX_POOLS,
+  maxPools: number,
   ours?: number[] | null,
 ): number[] | null {
   const blend = (mu: number) =>

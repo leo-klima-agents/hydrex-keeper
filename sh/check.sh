@@ -92,11 +92,12 @@ check_balance() {
   fi
 }
 
-# 0x862a179e calls the module's KEEPER().
-keeper=$(rpc eth_call "[{\"to\":\"$MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
+# Each conduit's key: the Klima conduit's keeper, which 0x862a179e reads as the module's KEEPER(), and the immutable
+# conduit's proposer.
+keeper=$(rpc eth_call "[{\"to\":\"$KLIMA_MODULE\",\"data\":\"0x862a179e\"},\"latest\"]")
 keeper=0x$(printf '%s' "$keeper" | tail -c 40)
-check_balance keeper "$keeper" "$MIN_KEEPER_WEI"
-check_balance proposer "$PROPOSER" "$MIN_PROPOSER_WEI"
+check_balance keeper "$keeper" "$MIN_KEY_WEI"
+check_balance proposer "$IMMUTABLE_PROPOSER" "$MIN_KEY_WEI"
 
 channel=$(find_channel "$KEEPER_PROJECT")
 [ -n "$channel" ] || fail "no email channel for $ALERT_EMAIL"

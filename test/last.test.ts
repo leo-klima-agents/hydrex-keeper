@@ -3,9 +3,9 @@ import { test, type TestContext } from "node:test";
 import { encodeFunctionData, TransactionReceiptNotFoundError, zeroAddress, type Address, type Hex } from "viem";
 import { voterAbi } from "../src/abi.ts";
 import { Blocks, sleep, watch } from "../src/blocks.ts";
-import { lastBlockBefore, now, WEEK, type Chain as Connection, type Client } from "../src/chain.ts";
+import { lastBlockBefore, now, WEEK, type ByConduit, type Chain as Connection, type Client } from "../src/chain.ts";
 import {
-  decideBoth,
+  decideTogether,
   keep,
   landed,
   lanesOf,
@@ -18,11 +18,12 @@ import {
   votedInSecond,
   type Lane,
   type Plan,
+  type Roles,
 } from "../src/last.ts";
 import type { Run } from "../src/pass.ts";
 import type { State } from "../src/read.ts";
-import { immutableSender, klimaSender, type Fees, type Prepared, type prepareVote, type Tx } from "../src/vote.ts";
-import { logged } from "./helpers.ts";
+import type { Fees, Prepared, prepareVote, Tx } from "../src/vote.ts";
+import { conduitsOf, logged, type Places } from "./helpers.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 
@@ -231,88 +232,95 @@ const [voteA, voteB] = [
   { pools: [addr(10)], weights: [1n] },
   { pools: [addr(11)], weights: [1n] },
 ];
-const planned = (readAt: number, vote: typeof voteA | null, rival?: typeof voteA, time = 9): Plan => ({
+/** A plan for the block at `time`. A checking conduit's prepared plan names the `rival` it was checked after, or null. */
+const planned = (readAt: number, vote: typeof voteA | null, rival?: typeof voteA | null, time = 9): Plan => ({
   readAt,
   time,
   vote,
   note: "",
   summary: {},
   ...(vote ? { prepared: prepared("0x01") } : {}),
-  ...(rival ? { rival } : {}),
+  ...(rival !== undefined ? { rival } : {}),
 });
 const laneOf = (...plans: Plan[]) => {
   const lane: Lane<Plan> = { name: "", plan: () => new Promise(() => {}) };
   for (const plan of plans) keep(lane, plan);
   return lane;
 };
-const readAts = ({ klima, immutable, unchecked }: ReturnType<typeof pick>) => ({
-  klima: klima?.readAt,
-  immutable: immutable?.readAt,
-  ...(unchecked ? { unchecked } : {}),
+/** The lane of a conduit that checks votes on chain. */
+const checking = (...plans: Plan[]) => ({ ...laneOf(...plans), checks: true });
+const readAts = ({ plans, unpaired }: ReturnType<typeof pick>) => ({
+  klima: plans.klima?.readAt,
+  immutable: plans.immutable?.readAt,
+  ...(unpaired ? { unpaired } : {}),
 });
 
-test("each conduit sends its freshest plan for the block when the immutable conduit's was checked after the Klima conduit's", () => {
+test("each conduit sends its freshest plan for the block when the checking conduit's was checked after the other's", () => {
   const klima = laneOf(planned(100, voteA), planned(300, voteA));
-  const immutable = laneOf(planned(200, voteB, voteA), planned(400, voteB, voteA));
-  assert.deepEqual(readAts(pick(9, klima, immutable)), { klima: 300, immutable: 400 });
+  const immutable = checking(planned(200, voteB, voteA), planned(400, voteB, voteA));
+  assert.deepEqual(readAts(pick(9, { klima, immutable })), { klima: 300, immutable: 400 });
   const keeping = laneOf(planned(300, null));
   assert.deepEqual(
-    readAts(pick(9, keeping, immutable)),
+    readAts(pick(9, { klima: keeping, immutable })),
     { klima: 300, immutable: 400 },
     "the Klima conduit keeps its vote",
   );
-  const immutableKeeps = laneOf(planned(400, null));
+  const immutableKeeps = checking(planned(400, null));
   assert.deepEqual(
-    readAts(pick(9, klima, immutableKeeps)),
+    readAts(pick(9, { klima, immutable: immutableKeeps })),
     { klima: 300, immutable: 400 },
     "the immutable conduit keeps its own",
   );
   assert.deepEqual(
-    readAts(pick(9, undefined, immutable)),
+    readAts(pick(9, { immutable })),
     { klima: undefined, immutable: 400 },
-    "no Klima conduit to vote for",
+    "no vote for the Klima conduit",
   );
   assert.deepEqual(
-    readAts(pick(9, laneOf(), immutable)),
+    readAts(pick(9, { klima: laneOf(), immutable })),
     { klima: undefined, immutable: 400 },
     "nothing planned for the Klima one",
   );
   assert.deepEqual(
-    readAts(pick(9, klima, undefined)),
+    readAts(pick(9, { klima })),
     { klima: 300, immutable: undefined },
     "no vote for the immutable conduit",
   );
 });
 
-test("the immutable conduit's vote goes only with a Klima conduit's vote it was checked after", () => {
+test("the checking conduit's vote goes only with a vote of the other's it was checked after", () => {
   // The Klima conduit switched to voteB at 300, and no immutable conduit plan has been checked after that vote yet.
   const klima = laneOf(planned(100, voteA), planned(300, voteB));
-  const immutable = laneOf(planned(50, voteB), planned(350, voteB, voteA));
+  const immutable = checking(planned(50, voteB, null), planned(350, voteB, voteA));
   assert.deepEqual(
-    readAts(pick(9, klima, immutable)),
+    readAts(pick(9, { klima, immutable })),
     { klima: 100, immutable: 350 },
     "the freshest pair checked together",
   );
   const changed = laneOf(planned(300, voteB));
-  assert.deepEqual(readAts(pick(9, changed, immutable)), { klima: 300, immutable: undefined, unchecked: true }, "none");
+  assert.deepEqual(
+    readAts(pick(9, { klima: changed, immutable })),
+    { klima: 300, immutable: undefined, unpaired: true },
+    "none",
+  );
   const before = laneOf(planned(50, voteA, undefined, 7));
   assert.deepEqual(
-    readAts(pick(9, before, immutable)),
+    readAts(pick(9, { klima: before, immutable })),
     { klima: 50, immutable: 350 },
     "a Klima vote of an earlier block counts",
   );
 });
 
-test("alone, the Klima conduit sends its freshest plan that answered the immutable conduit's votes in force", () => {
+test("alone, the other conduit sends its freshest plan that answered the checking conduit's votes in force", () => {
   // The immutable conduit's only plan was checked after a Klima vote from an earlier block, so it isn't sent. The Klima
   // plan at 300 answered that plan, and the one at 100 answered the votes already in force.
-  const immutable = laneOf(planned(250, voteB, voteB));
+  const immutable = checking(planned(250, voteB, voteB));
   const answering = { ...planned(300, voteA), answered: true };
-  const picked = pick(9, laneOf({ ...planned(100, voteA), answered: false }, answering), immutable);
-  assert.deepEqual(readAts(picked), { klima: 100, immutable: undefined, unchecked: true });
-  assert.equal(picked.freshest?.readAt, 300, "its freshest, reported");
-  const allAnswering = pick(9, laneOf({ ...planned(100, voteA), answered: true }, answering), immutable);
-  assert.deepEqual(readAts(allAnswering), { klima: 300, immutable: undefined, unchecked: true }, "else its freshest");
+  const picked = pick(9, { klima: laneOf({ ...planned(100, voteA), answered: false }, answering), immutable });
+  assert.deepEqual(readAts(picked), { klima: 100, immutable: undefined, unpaired: true });
+  assert.equal(picked.freshest?.klima?.readAt, 300, "its freshest, reported");
+  const allAnswering = pick(9, { klima: laneOf({ ...planned(100, voteA), answered: true }, answering), immutable });
+  assert.deepEqual(readAts(allAnswering), { klima: 300, immutable: undefined, unpaired: true }, "else its freshest");
 });
 
 test("the immutable conduit's values: the last read, read again in the background once per key", async (t) => {
@@ -392,7 +400,7 @@ test("once the first values have had their time, reads that keep failing hold ba
   assert.equal(reads, 1, "one read at a time");
 });
 
-test("both votes come from one read, so that the plans made from it pair up, the Klima one answering the other", () => {
+test("both votes come from one read, so that the plans made from it pair up, the other answering the checking conduit", () => {
   const E = 10n ** 18n;
   const [a, b] = [addr(20), addr(21)];
   const time = flip - 400;
@@ -401,95 +409,109 @@ test("both votes come from one read, so that the plans made from it pair up, the
     epoch: {
       start: 0n,
       flip: 0n,
-      power: 1000n * E,
-      lastVoted: klimaVoted,
-      votedThisEpoch: true,
-      immutable: { power: 1000n * E, lastVoted: immutableVoted, votedThisEpoch: false },
+      votes: {
+        klima: { power: 1000n * E, lastVoted: klimaVoted, votedThisEpoch: true },
+        immutable: { power: 1000n * E, lastVoted: immutableVoted, votedThisEpoch: false },
+      },
     },
     pools: [
-      { pool: a, rewards: [], otherVotes: 2000n * E, ownVotes: 0n, immutableVotes: 0n },
-      { pool: b, rewards: [], otherVotes: 100n * E, ownVotes: 0n, immutableVotes: 0n },
+      { pool: a, rewards: [], weight: 2000n * E, votes: { klima: 0n, immutable: 0n } },
+      { pool: b, rewards: [], weight: 100n * E, votes: { klima: 0n, immutable: 0n } },
     ],
+    scores: {},
   });
   const usd = [300, 100];
-  const conduits = { klima: true, immutable: true, trusted: true };
-  const both = decideBoth(state(), time, usd, undefined, conduits);
+  type Role = Roles["klima"];
+  const roles = (changed: Partial<ByConduit<Partial<Role>>> = {}): Roles => ({
+    klima: { voting: true, checks: false, trusted: true, ...changed.klima },
+    immutable: { voting: true, checks: true, trusted: true, ...changed.immutable },
+  });
+  const both = decideTogether(state(), time, usd, {}, roles());
   assert.ok(both.immutable.vote && both.klima.vote);
-  assert.equal(both.answered, true);
-  assert.deepEqual(both.rival, both.klima.vote, "the immutable conduit's vote is checked after the Klima one");
-  const inForce = decideBoth(state(), time, usd, undefined, { ...conduits, trusted: false });
-  assert.equal(inForce.answered, false, "while the immutable conduit's plans fail");
+  assert.equal(both.klima.answered, true);
+  assert.deepEqual(
+    both.immutable.rival,
+    both.klima.vote,
+    "the immutable conduit's vote is checked after the Klima one",
+  );
+  const inForce = decideTogether(state(), time, usd, {}, roles({ immutable: { trusted: false } }));
+  assert.equal(inForce.klima.answered, false, "while the immutable conduit's plans fail");
   assert.notDeepEqual(inForce.klima.vote, both.klima.vote, "the Klima conduit then answers the votes in force");
-  assert.deepEqual(inForce.rival, inForce.klima.vote);
-  const voted = decideBoth(state({ immutableVoted: second }), time, usd, undefined, conduits);
-  assert.equal(voted.answered, false, "the immutable conduit already voted in the block's second");
-  const klimaVoted = decideBoth(state({ klimaVoted: second }), time, usd, undefined, conduits);
-  assert.equal(klimaVoted.rival, undefined, "no Klima vote goes out in that second");
-  assert.equal(decideBoth(state(), time, usd, undefined, { ...conduits, klima: false }).rival, undefined);
+  assert.deepEqual(inForce.immutable.rival, inForce.klima.vote);
+  const voted = decideTogether(state({ immutableVoted: second }), time, usd, {}, roles());
+  assert.equal(voted.klima.answered, false, "the immutable conduit already voted in the block's second");
+  const klimaVoted = decideTogether(state({ klimaVoted: second }), time, usd, {}, roles());
+  assert.equal(klimaVoted.immutable.rival, undefined, "no Klima vote goes out in that second");
+  const klimaIdle = decideTogether(state(), time, usd, {}, roles({ klima: { voting: false } }));
+  assert.equal(klimaIdle.immutable.rival, undefined);
+  const swapped = decideTogether(
+    state(),
+    time,
+    usd,
+    {},
+    roles({ klima: { checks: true }, immutable: { checks: false } }),
+  );
+  assert.equal(swapped.immutable.answered, true, "whichever conduit checks");
+  assert.deepEqual(swapped.klima.rival, swapped.immutable.vote);
   // Plans made from the same read, by either lane, pair up.
   const plans = (d: typeof both, readAt: number) => ({
-    klima: laneOf({ ...planned(readAt, d.klima.vote, undefined, time), answered: d.answered }),
-    immutable: laneOf(planned(readAt, d.immutable.vote, d.rival, time)),
+    klima: laneOf({ ...planned(readAt, d.klima.vote, undefined, time), answered: d.klima.answered }),
+    immutable: checking(planned(readAt, d.immutable.vote, d.immutable.rival ?? null, time)),
   });
   const fresh = plans(both, 500);
-  assert.deepEqual(readAts(pick(time, fresh.klima, fresh.immutable)), { klima: 500, immutable: 500 });
+  assert.deepEqual(readAts(pick(time, fresh)), { klima: 500, immutable: 500 });
   const stale = plans(inForce, 400);
-  const mixed = pick(time, fresh.klima, stale.immutable);
-  assert.deepEqual(readAts(mixed), { klima: 500, immutable: undefined, unchecked: true }, "not across reads");
+  const mixed = pick(time, { klima: fresh.klima, immutable: stale.immutable });
+  assert.deepEqual(readAts(mixed), { klima: 500, immutable: undefined, unpaired: true }, "not across reads");
 });
 
 /** The two lanes on a fixed read that both conduits vote on, preparing with `prepareWith`. */
 function lanesOn(prepareWith?: (from: Address) => void) {
   const E = 10n ** 18n;
-  const [KLIMA_CONDUIT, CONDUIT, PROPOSER, KEEPER] = [addr(1), addr(2), addr(8), addr(5)];
-  const chain = {
-    client: {},
-    proposerClient: {},
-    keeper: KEEPER,
-    module: addr(4),
-    conduit: KLIMA_CONDUIT,
-    immutable: { conduit: CONDUIT, proposer: PROPOSER, priced: [] },
-  } as unknown as Connection;
+  const places: Places = {
+    klima: { address: addr(1), from: addr(5), module: addr(4) },
+    immutable: { address: addr(2), from: addr(8), priced: [] },
+  };
+  const chain = { client: {}, conduits: conduitsOf(places, {} as Client) } as unknown as Connection;
   const time = flip - 400;
   const read = {
     state: {
       epoch: {
         start: (now() / WEEK) * WEEK,
         flip: 0n,
-        power: 1000n * E,
-        lastVoted: 0n,
-        votedThisEpoch: true,
-        immutable: { power: 1000n * E, lastVoted: 0n, votedThisEpoch: false },
+        votes: {
+          klima: { power: 1000n * E, lastVoted: 0n, votedThisEpoch: true },
+          immutable: { power: 1000n * E, lastVoted: 0n, votedThisEpoch: false },
+        },
       },
       pools: [
-        { pool: addr(20), rewards: [], otherVotes: 2000n * E, ownVotes: 0n, immutableVotes: 0n },
-        { pool: addr(21), rewards: [], otherVotes: 100n * E, ownVotes: 0n, immutableVotes: 0n },
+        { pool: addr(20), rewards: [], weight: 2000n * E, votes: { klima: 0n, immutable: 0n } },
+        { pool: addr(21), rewards: [], weight: 100n * E, votes: { klima: 0n, immutable: 0n } },
       ],
-      score: 0n,
+      scores: { immutable: 0n },
     } as State,
     fees: { baseFee: 5_000_000n, tip: 1_000_000n, congested: false } as Fees,
   };
   const prepared: { from: Address; fees: Fees | undefined }[] = [];
-  const prepare = (async (_c, _a, _v, _d, _t, sender, _r, fees): Promise<Prepared> => {
-    prepared.push({ from: sender!.from, fees });
+  const prepare = (async (_chain, conduit, _signer, _vote, _dryRun, options): Promise<Prepared> => {
+    prepared.push({ from: conduit.from, fees: options?.fees });
     await new Promise((resolve) => setImmediate(resolve));
-    prepareWith?.(sender!.from);
-    return { tx: {} as Tx, from: sender!.from, signed: "0x01" };
+    prepareWith?.(conduit.from);
+    return { tx: {} as Tx, from: conduit.from, signed: "0x01" };
   }) as typeof prepareVote;
   const valueReads: number[] = [];
   const lanes = lanesOf({
     chain,
-    conduits: { klima: true, immutable: true },
+    voting: { klima: true, immutable: true },
     dryRun: false,
-    account: undefined,
-    proposer: undefined,
+    signers: { klima: undefined, immutable: undefined },
     usd: () => [300, 100],
     snapshot: () => ({ readAt: time - 300, time, read: Promise.resolve(read) }),
-    values: async (key) => (valueReads.push(key), undefined),
+    values: { immutable: async (key) => (valueReads.push(key), undefined) },
     sent: new Map(),
     prepareVote: prepare,
   });
-  return { ...lanes, read, time, prepared, valueReads, PROPOSER, KEEPER };
+  return { ...lanes, read, time, prepared, valueReads, PROPOSER: places.immutable.from, KEEPER: places.klima.from };
 }
 
 test("the lanes decide both votes from the read they share, so their plans pair up", async () => {
@@ -498,13 +520,16 @@ test("the lanes decide both votes from the read they share, so their plans pair 
   assert.ok(k.vote && v.vote && v.prepared && k.prepared);
   assert.equal(k.answered, true, "the Klima conduit counts the immutable conduit's vote");
   assert.deepEqual(v.rival, k.vote, "which is checked after the Klima conduit's");
-  assert.deepEqual(readAts(pick(time, laneOf(k), laneOf(v))), { klima: k.readAt, immutable: v.readAt });
+  assert.deepEqual(readAts(pick(time, { klima: laneOf(k), immutable: checking(v) })), {
+    klima: k.readAt,
+    immutable: v.readAt,
+  });
 });
 
 test("while the immutable conduit's plans fail, the Klima conduit answers its votes in force", async () => {
   let failing = true;
   const { klima, immutable, PROPOSER } = lanesOn((from) => {
-    if (failing && from === PROPOSER) throw new Error("would revert after the keeper's");
+    if (failing && from === PROPOSER) throw new Error("would revert after klima's vote");
   });
   await assert.rejects(immutable.plan(), /would revert/);
   assert.equal((await klima.plan()).answered, false, "after a failure");
@@ -531,14 +556,18 @@ test("plans share a preparation until the tip, the base fee's power of two or th
   await klima.plan();
   assert.equal(preparations(), 3, "a tip raised by congestion");
   assert.deepEqual(prepared.at(-1)!.fees, read.fees, "prepared with the fees read with the votes");
-  read.state = { ...read.state, epoch: { ...read.state.epoch, lastVoted: 1n } };
+  const { epoch } = read.state;
+  read.state = {
+    ...read.state,
+    epoch: { ...epoch, votes: { ...epoch.votes, klima: { ...epoch.votes.klima, lastVoted: 1n } } },
+  };
   await klima.plan();
   assert.equal(preparations(), 4, "a vote that landed");
 });
 
 test("the immutable conduit's values are asked for by the second of the read, and a missing score warned of once", async (t) => {
   const { klima, immutable, read, valueReads, time } = lanesOn();
-  read.state = { ...read.state, score: undefined };
+  read.state = { ...read.state, scores: {} };
   const lines = await logged(t, async () => {
     await klima.plan();
     await immutable.plan();
@@ -568,34 +597,37 @@ test("plans with the same inputs share one preparation, finished or under way, a
   assert.deepEqual([await prepare("a", make(7)), made], [7, 5], "only the last ones are kept");
 });
 
-test("an immutable conduit's vote is known to be in once the Voter shows its votes on every pool", () => {
+test("an open conduit's vote is known to be in once the Voter shows its votes on every pool", () => {
   const [a, b] = [addr(7), addr(8)];
   const vote = { pools: [a], weights: [1n] };
+  const places: Places = {
+    klima: { address: addr(1), from: addr(5), module: addr(6) },
+    immutable: { address: addr(2), from: addr(9) },
+  };
+  const conduits = conduitsOf(places, {} as Client);
   const sent = (nonce: number, votes: [Address, bigint][]) => ({
     hash: "0x01" as Hex,
     vote,
     nonce,
-    sender: immutableSender({
-      immutable: { conduit: addr(2), proposer: addr(9), priced: [] },
-    } as unknown as Connection),
+    conduit: conduits.immutable,
     votes: new Map(votes),
   });
-  const state = (immutableVotes: [bigint, bigint], votedThisEpoch = true) => ({
+  const state = (immutableVotes: [bigint, bigint], votedThisEpoch = true): State => ({
     epoch: {
       start: 0n,
       flip: 0n,
-      power: 1n,
-      lastVoted: 0n,
-      votedThisEpoch,
-      immutable: { power: 1n, lastVoted: 0n, votedThisEpoch },
+      votes: {
+        klima: { power: 1n, lastVoted: 0n, votedThisEpoch },
+        immutable: { power: 1n, lastVoted: 0n, votedThisEpoch },
+      },
     },
     pools: [a, b].map((pool, i) => ({
       pool,
       rewards: [],
-      otherVotes: 0n,
-      ownVotes: 0n,
-      immutableVotes: immutableVotes[i]!,
+      weight: immutableVotes[i]!,
+      votes: { klima: 0n, immutable: immutableVotes[i]! },
     })),
+    scores: {},
   });
   const votes = [
     sent(7, [[a, 10n]]),
@@ -604,15 +636,12 @@ test("an immutable conduit's vote is known to be in once the Voter shows its vot
       [b, 4n],
     ]),
   ];
-  assert.deepEqual(landed(state([6n, 4n]), votes), [8]);
-  assert.deepEqual(landed(state([10n, 0n]), votes), [7], "a pool it leaves out has no votes");
-  assert.deepEqual(landed(state([5n, 5n]), votes), [], "someone else's vote");
-  assert.deepEqual(landed(state([6n, 4n], false), votes), [], "votes of an earlier epoch");
-  const klima = {
-    ...sent(9, []),
-    sender: klimaSender({ keeper: addr(5), module: addr(6), conduit: addr(1) } as Connection),
-  };
-  assert.deepEqual(landed(state([0n, 0n]), [{ ...klima, votes: undefined }]), [], "not the immutable conduit's");
+  assert.deepEqual(landed(state([6n, 4n]), "immutable", votes), [8]);
+  assert.deepEqual(landed(state([10n, 0n]), "immutable", votes), [7], "a pool it leaves out has no votes");
+  assert.deepEqual(landed(state([5n, 5n]), "immutable", votes), [], "someone else's vote");
+  assert.deepEqual(landed(state([6n, 4n], false), "immutable", votes), [], "votes of an earlier epoch");
+  const klima = { ...sent(9, []), conduit: conduits.klima, votes: undefined };
+  assert.deepEqual(landed(state([0n, 0n]), "immutable", [klima]), [], "not the immutable conduit's");
 });
 
 // As on Base, block n comes at 200n ms, so five blocks share each second and the last one before the flip is 200 ms
@@ -687,15 +716,16 @@ function outcomeChain(
             : 1n,
       ),
   } as unknown as Client;
+  const places: Places = {
+    klima: { address: KLIMA, from: addr(5), module: addr(4) },
+    immutable: { address: IMMUTABLE, from: addr(8) },
+  };
   const chain = {
     client,
     bulk: client,
-    module: addr(4),
-    conduit: KLIMA,
-    keeper: addr(5),
     voter: addr(6),
     ve: addr(7),
-    immutable: { conduit: IMMUTABLE, proposer: addr(8), priced: [] },
+    conduits: conduitsOf(places, client),
   } as unknown as Connection;
   return { chain, dryRun: false } as unknown as Run;
 }
@@ -720,13 +750,13 @@ test("each conduit's vote this epoch is read at the last block before the flip, 
     (conduit, block) => (conduit === IMMUTABLE ? (block > LAST ? FLIP + 1n : timeOf(LAST - 3n)) : timeOf(LAST)),
   );
   const sent = [
-    { hash: klimaHash, vote, nonce: 1, sender: klimaSender(run.chain) },
-    { hash: immutableHash, vote, nonce: 1, sender: immutableSender(run.chain) },
+    { hash: klimaHash, vote, nonce: 1, conduit: run.chain.conduits.klima },
+    { hash: immutableHash, vote, nonce: 1, conduit: run.chain.conduits.immutable },
   ];
   assert.equal(await outcome(run, FLIP, sent, [KLIMA, IMMUTABLE]), 0);
   const reverted = outcomeChain({ [klimaHash]: { status: "reverted", blockNumber: LAST } }, () => timeOf(LAST - 5n));
   assert.equal(
-    await outcome(reverted, FLIP, [{ ...sent[0]!, sender: klimaSender(reverted.chain) }], [KLIMA]),
+    await outcome(reverted, FLIP, [{ ...sent[0]!, conduit: reverted.chain.conduits.klima }], [KLIMA]),
     1,
     "the Klima conduit's revert fails",
   );
@@ -752,8 +782,8 @@ test("each vote that landed is logged against the block it was sent for, when it
   };
   const run = outcomeChain({ [hash]: receipt }, () => timeOf(LAST));
   const flipMs = Number(FLIP) * 1000;
-  const sender = klimaSender(run.chain);
-  const sent = [{ hash, vote, nonce: 1, sender, target: flipMs - 400, sentAt: flipMs - 840, gas: 9_000_000n }];
+  const conduit = run.chain.conduits.klima;
+  const sent = [{ hash, vote, nonce: 1, conduit, target: flipMs - 400, sentAt: flipMs - 840, gas: 9_000_000n }];
   const lines = await logged(t, () => outcome(run, FLIP, sent, [KLIMA]));
   const { msToFlip, msAfterTarget, msAfterSend, index, gasUsed, gasLimit, tip, blockGasUsed, blockGasLimit } =
     lines.find((l) => l.message === "vote landed")!;

@@ -15,6 +15,7 @@ import {
   type Candidate,
 } from "../src/select.ts";
 
+const POOLS = 40; // the most pools in a vote, unless a test says otherwise
 const A = "0x000000000000000000000000000000000000000a" as Address;
 const B = "0x000000000000000000000000000000000000000b" as Address;
 const C = "0x000000000000000000000000000000000000000c" as Address;
@@ -35,39 +36,40 @@ function gridBest(candidates: Candidate[], power: bigint): number {
 test("water-filling matches a brute-force optimum for two pools", () => {
   const candidates = [candidate(A, 4_300, 7_900_000n * 10n ** 18n), candidate(B, 1_500, 1_150_000n * 10n ** 18n)];
   const power = 897_000n * 10n ** 18n;
-  const x = waterFill(candidates, power)!;
+  const x = waterFill(candidates, power, POOLS)!;
   assert.ok(Math.abs(x[0]! + x[1]! - 1) < 1e-9);
   assert.ok(expected(candidates, x, power) >= gridBest(candidates, power) - 0.01);
   assert.ok(x[1]! > x[0]!, "the less crowded pool gets more");
 });
 
 test("all power goes to the only paying pool; nothing pays gives null", () => {
-  assert.deepEqual(waterFill([candidate(A, 0, 10n), candidate(B, 5, 10n)], 100n), [0, 1]);
-  assert.equal(waterFill([candidate(A, 0, 10n)], 100n), null);
-  assert.deepEqual(select([], 100n), { fractions: null, vote: null });
+  assert.deepEqual(waterFill([candidate(A, 0, 10n), candidate(B, 5, 10n)], 100n, POOLS), [0, 1]);
+  assert.equal(waterFill([candidate(A, 0, 10n)], 100n, POOLS), null);
+  assert.deepEqual(select([], 100n, POOLS), { fractions: null, vote: null });
 });
 
 test("equal pools split equally and weights are basis points", () => {
   const candidates = [candidate(A, 10, 100n), candidate(B, 10, 100n), candidate(C, 0, 1n)];
-  const { fractions, vote } = select(candidates, 50n);
+  const { fractions, vote } = select(candidates, 50n, POOLS);
   assert.deepEqual(vote, { pools: [A, B], weights: [5000n, 5000n] });
-  assert.deepEqual(fractions, waterFill(candidates, 50n), "the allocation it voted from");
+  assert.deepEqual(fractions, waterFill(candidates, 50n, POOLS), "the allocation it voted from");
 });
 
 test("a pool nobody voted for gets a small share, not everything", () => {
-  const x = waterFill([candidate(A, 100, 0n), candidate(B, 100, 1000n)], 1000n)!;
+  const x = waterFill([candidate(A, 100, 0n), candidate(B, 100, 1000n)], 1000n, POOLS)!;
   assert.ok(x[0]! > 0 && x[0]! < 0.2, `got ${x[0]}`);
 });
 
 test("shares below a tenth of a percent are dropped and the rest re-solved", () => {
-  assert.deepEqual(waterFill([candidate(A, 1000, 1000n), candidate(B, 1, 1000n)], 1000n), [1, 0]);
-  const y = waterFill([candidate(A, 1000, 1000n), candidate(B, 1000, 1000n), candidate(C, 0.5, 1000n)], 1000n)!;
+  assert.deepEqual(waterFill([candidate(A, 1000, 1000n), candidate(B, 1, 1000n)], 1000n, POOLS), [1, 0]);
+  const y = waterFill([candidate(A, 1000, 1000n), candidate(B, 1000, 1000n), candidate(C, 0.5, 1000n)], 1000n, POOLS)!;
   const percents = y.map((f) => Math.round(f * 100));
   assert.deepEqual(percents, [50, 50, 0]);
 });
 
 test("keeps the current vote unless the gain is at least a dollar", () => {
-  const voted = (a: bigint, b: bigint) => select([candidate(A, 1000, 100n, a), candidate(B, 1000, 100n, b)], 50n).vote;
+  const voted = (a: bigint, b: bigint) =>
+    select([candidate(A, 1000, 100n, a), candidate(B, 1000, 100n, b)], 50n, POOLS).vote;
   assert.equal(voted(25n, 25n), null, "already optimal");
   assert.equal(voted(28n, 22n), null, "within a dollar");
   assert.deepEqual(voted(29n, 21n), { pools: [A, B], weights: [5000n, 5000n] }, "over a dollar");
@@ -79,7 +81,7 @@ const many = (n: number) =>
   Array.from({ length: n }, (_, i) => candidate(`0x${(i + 1).toString(16).padStart(40, "0")}` as Address, i + 1, 100n));
 
 test("a vote names at most the 40 pools with the largest shares", () => {
-  const x = waterFill(many(50), 1_000_000n)!;
+  const x = waterFill(many(50), 1_000_000n, POOLS)!;
   assert.equal(x.filter((xi) => xi > 0).length, 40);
   assert.ok(
     x.slice(0, 10).every((xi) => xi === 0),
@@ -88,6 +90,7 @@ test("a vote names at most the 40 pools with the largest shares", () => {
   const tied = waterFill(
     Array.from({ length: 50 }, () => candidate(A, 1, 100n)),
     1_000n,
+    POOLS,
   )!;
   assert.deepEqual(
     tied.filter((xi) => xi > 0),
@@ -97,10 +100,13 @@ test("a vote names at most the 40 pools with the largest shares", () => {
 });
 
 test("proportional shares follow the rewards alone, without the smallest", () => {
-  assert.deepEqual(proportional([30, 10, 0]), [0.75, 0.25, 0]);
-  assert.deepEqual(proportional([9_995, 5]), [1, 0], "under 0.1% is dropped");
-  assert.equal(proportional([0]), null);
-  const x = proportional(Array.from({ length: 50 }, (_, i) => i + 1))!;
+  assert.deepEqual(proportional([30, 10, 0], POOLS), [0.75, 0.25, 0]);
+  assert.deepEqual(proportional([9_995, 5], POOLS), [1, 0], "under 0.1% is dropped");
+  assert.equal(proportional([0], POOLS), null);
+  const x = proportional(
+    Array.from({ length: 50 }, (_, i) => i + 1),
+    POOLS,
+  )!;
   assert.equal(x.filter((xi) => xi > 0).length, 40);
   assert.ok(Math.abs(x[49]! / x[10]! - 50 / 11) < 1e-9, "the rest keep their proportions");
 });
@@ -135,14 +141,14 @@ test("above a bar, the allocation gives up as little at our prices as the condui
   // Our prices value only A and the conduit's check values only B. Scoring 10 needs a share f on B with
   // 100·f/(1 + f) ≥ 10, so f ≥ 1/9.
   const candidates = [candidate(A, 100, 1000n), candidate(B, 0, 1000n)];
-  const x = waterFillAbove(candidates, 1000n, [0, 100], 10)!;
+  const x = waterFillAbove(candidates, 1000n, [0, 100], 10, POOLS)!;
   assert.ok(score(candidates, [0, 100], x, 1000n) >= 10);
   assert.ok(Math.abs(x[1]! - 1 / 9) < 0.002, `put ${x[1]} on B`);
-  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 0), [1, 0], "no bar: our own best");
-  assert.equal(waterFillAbove(candidates, 1000n, [0, 100], 60), null, "not even all on B scores 60");
-  assert.equal(waterFillAbove(candidates, 1000n, [0, 0], 1), null, "the conduit values nothing");
-  const ours = waterFill(candidates, 1000n);
-  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 10, undefined, ours), x, "our water-filling, given");
+  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 0, POOLS), [1, 0], "no bar: our own best");
+  assert.equal(waterFillAbove(candidates, 1000n, [0, 100], 60, POOLS), null, "not even all on B scores 60");
+  assert.equal(waterFillAbove(candidates, 1000n, [0, 0], 1, POOLS), null, "the conduit values nothing");
+  const ours = waterFill(candidates, 1000n, POOLS);
+  assert.deepEqual(waterFillAbove(candidates, 1000n, [0, 100], 10, POOLS, ours), x, "our water-filling, given");
 });
 
 test("the gain of an allocation is over the vote in force, at our prices", () => {

@@ -8,13 +8,14 @@ import {
   isAddressEqual,
   keccak256,
   shouldThrow,
+  type Abi,
   type Address,
   type Hex,
   type Transport,
 } from "viem";
 import { base } from "viem/chains";
 import { publicActionsL2 } from "viem/op-stack";
-import { conduitAbi, immutableAbi, moduleAbi, voterAbi } from "./abi.ts";
+import { klimaAbi, immutableAbi, klimaModuleAbi, voterAbi } from "./abi.ts";
 import { errorMessage, log } from "./log.ts";
 
 export const WEEK = 7n * 24n * 60n * 60n;
@@ -170,80 +171,143 @@ const bulkTransport = (rpcUrls: string[]) =>
     { retryCount: 0 },
   );
 
+/** The two conduits the job votes and claims for, named after their contracts. */
+export const CONDUITS = ["klima", "immutable"] as const;
+
+export type ConduitName = (typeof CONDUITS)[number];
+
+/** One value for each conduit. */
+export type ByConduit<T> = { [name in ConduitName]: T };
+
+export const byConduit = <T>(make: (name: ConduitName) => T): ByConduit<T> => ({
+  klima: make("klima"),
+  immutable: make("immutable"),
+});
+
+export const otherOf = (name: ConduitName): ConduitName => (name === "klima" ? "immutable" : "klima");
+
+/**
+ * A conduit, and the key that votes and claims for it. `role` is the key's role on chain: the Klima conduit's Safe
+ * module takes votes and claims from its KEEPER, and the immutable conduit from any proposer. `to` and `abi` are where
+ * those transactions go: the module, or the conduit itself.
+ */
+export type Conduit = {
+  name: ConduitName;
+  /** For logs and errors: "the Klima conduit", "the immutable conduit". */
+  label: string;
+  /** What the Voter records the conduit's votes for. */
+  address: Address;
+  role: "keeper" | "proposer";
+  /** The key's address. */
+  from: Address;
+  to: Address;
+  abi: Abi;
+  /** Anyone can vote for an open conduit, so a vote in force may not be the key's. */
+  open: boolean;
+  /**
+   * The conduit's own client for its transactions. Calls sent together through one client share a JSON-RPC batch, which
+   * only answers when its slowest call does.
+   */
+  client: Client;
+  /**
+   * For a conduit that checks votes on chain: the tokens it prices with. It only takes a vote whose score in them beats
+   * the vote in force.
+   */
+  priced?: Address[] | undefined;
+};
+
 export type Chain = {
+  /** For reads. */
   client: Client;
   /** For slow, heavy reads, which go to one URL at a time instead of being hedged. */
   bulk: Client;
-  /**
-   * A separate client for the immutable conduit's votes. Calls sent together through one client share a JSON-RPC batch,
-   * which only answers when its slowest call does.
-   */
-  proposerClient: Client;
   broadcast: ReturnType<typeof broadcaster>;
   known: ReturnType<typeof finder>;
-  module: Address;
-  conduit: Address;
-  keeper: Address;
   voter: Address;
   ve: Address;
-  immutable: ImmutableConduit;
+  conduits: ByConduit<Conduit>;
 };
 
-/** The immutable conduit, the key that proposes its votes, and the tokens it prices with. */
-export type ImmutableConduit = { conduit: Address; proposer: Address; priced: Address[] };
+/** Where to find each conduit: the Klima conduit through its Safe module, the immutable conduit directly. */
+export type Settings = { klima: { module: Address }; immutable: { conduit: Address; proposer: Address } };
 
 const MAX_PRICED_TOKENS = 4; // the immutable conduit's limit
 
-export async function connect(
-  module: Address,
-  rpcUrls: string[],
-  immutable: Omit<ImmutableConduit, "priced">,
-): Promise<Chain> {
+export async function connect(settings: Settings, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));
-  const addresses = await readAddresses(client, module, immutable);
+  const { voter, ve, conduits } = await readAddresses(client, settings);
   return {
     client,
     bulk: makeClient(bulkTransport(rpcUrls)),
-    proposerClient: makeClient(hedged(rpcUrls)),
     broadcast: broadcaster(rpcUrls),
     known: finder(rpcUrls),
-    module,
-    ...addresses,
+    voter,
+    ve,
+    conduits: byConduit((name) => ({ ...conduits[name], client: makeClient(hedged(rpcUrls)) })),
   };
 }
 
 /**
- * The Klima conduit and its keeper, from the module, and the immutable conduit's priced tokens. Both conduits must use
- * the same Voter and VotingEscrow, and the proposer must not be the keeper: the two keys send at the same time, and
- * their nonces are tracked separately.
+ * Both conduits and their keys. The Klima conduit and its keeper are read from its Safe module, and the immutable
+ * conduit's priced tokens from it. Both conduits must use the same Voter and VotingEscrow, and the two keys must differ:
+ * they send at the same time, and their nonces are tracked separately.
  */
-export async function readAddresses(client: Client, module: Address, immutable: Omit<ImmutableConduit, "priced">) {
-  const [conduit, keeper] = (await readMany<Address>(client, [
-    call(module, moduleAbi, "CONDUIT"),
-    call(module, moduleAbi, "KEEPER"),
+export async function readAddresses(client: Client, { klima, immutable }: Settings) {
+  const [klimaConduit, keeper] = (await readMany<Address>(client, [
+    call(klima.module, klimaModuleAbi, "CONDUIT"),
+    call(klima.module, klimaModuleAbi, "KEEPER"),
   ])) as [Address, Address];
   if (isAddressEqual(immutable.proposer, keeper)) {
-    throw new Error(`PROPOSER is the keeper, ${keeper}: each needs nonces of its own`);
+    throw new Error(
+      `the Klima conduit's keeper is the immutable conduit's proposer, ${keeper}: each needs its own key`,
+    );
   }
-  const usedBy = (address: Address, abi: readonly unknown[]) => [
-    call(address, abi, "voter"),
-    call(address, abi, "veToken"),
+  const conduits: ByConduit<Omit<Conduit, "client" | "priced">> = {
+    klima: {
+      name: "klima",
+      label: "the Klima conduit",
+      address: klimaConduit,
+      role: "keeper",
+      from: keeper,
+      to: klima.module,
+      abi: klimaModuleAbi,
+      open: false,
+    },
+    immutable: {
+      name: "immutable",
+      label: "the immutable conduit",
+      address: immutable.conduit,
+      role: "proposer",
+      from: immutable.proposer,
+      to: immutable.conduit,
+      abi: immutableAbi,
+      open: true,
+    },
+  };
+  const abis: ByConduit<readonly unknown[]> = { klima: klimaAbi, immutable: immutableAbi };
+  const usedBy = (name: ConduitName) => [
+    call(conduits[name].address, abis[name], "voter"),
+    call(conduits[name].address, abis[name], "veToken"),
   ];
   const pricedCalls = Array.from({ length: MAX_PRICED_TOKENS }, (_, i) =>
     call(immutable.conduit, immutableAbi, "pricedTokens", [BigInt(i)]),
   );
-  const [[voter, ve, immutableVoter, immutableVe], entries] = await Promise.all([
-    readMany<Address>(client, [...usedBy(conduit, conduitAbi), ...usedBy(immutable.conduit, immutableAbi)]),
+  const [used, entries] = await Promise.all([
+    readMany<Address>(client, CONDUITS.flatMap(usedBy)),
     readEach<readonly [Address, ...unknown[]]>(client, pricedCalls),
   ]);
-  if (!isAddressEqual(immutableVoter!, voter!) || !isAddressEqual(immutableVe!, ve!)) {
-    throw new Error(
-      `${immutable.conduit} uses Voter ${immutableVoter} and VotingEscrow ${immutableVe}, not ${voter} and ${ve}`,
-    );
+  const [voter, ve] = used as [Address, Address];
+  for (const [i, name] of CONDUITS.entries()) {
+    const [otherVoter, otherVe] = used.slice(2 * i) as [Address, Address];
+    if (!isAddressEqual(otherVoter, voter) || !isAddressEqual(otherVe, ve)) {
+      const { address } = conduits[name];
+      throw new Error(`${address} uses Voter ${otherVoter} and VotingEscrow ${otherVe}, not ${voter} and ${ve}`);
+    }
   }
   const priced = entries.flatMap((entry) => (entry ? [entry[0]] : []));
   if (priced.length === 0) throw new Error(`${immutable.conduit} prices no token`);
-  return { conduit, keeper, voter: voter!, ve: ve!, immutable: { ...immutable, priced } };
+  const withPriced: ByConduit<Omit<Conduit, "client">> = { ...conduits, immutable: { ...conduits.immutable, priced } };
+  return { voter, ve, conduits: withPriced };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

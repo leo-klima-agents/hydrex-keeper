@@ -1,15 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address } from "viem";
-import type { Chain, Client } from "../src/chain.ts";
-import {
-  decideImmutable,
-  immutableCandidates,
-  pricedPools,
-  readValues,
-  votesOf,
-  type Onchain,
-} from "../src/immutable.ts";
+import { immutableAbi } from "../src/abi.ts";
+import type { Client, Conduit } from "../src/chain.ts";
+import { pricedPools, readValues, type Onchain } from "../src/check.ts";
+import { candidatesFor, decide, votesOf } from "../src/decide.ts";
 import type { State } from "../src/read.ts";
 import { score } from "../src/select.ts";
 
@@ -17,27 +12,28 @@ const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
 const [A, B, C, USDC, HYDX] = [addr(10), addr(11), addr(12), addr(13), addr(14)] as const;
 const E = 10n ** 18n;
 
+/** The Klima conduit has 500 votes on A, and the immutable conduit `immutableOnB` on B, among 1000 others on each. */
 function state({ immutablePower = 1000n * E, immutableOnB = 0n } = {}): State {
   const reward = (token: Address) => [{ token, amount: 1n, decimals: 6 }];
   return {
     epoch: {
       start: 0n,
       flip: 604_800n,
-      power: 5000n * E,
-      lastVoted: 0n,
-      votedThisEpoch: true,
-      immutable: { power: immutablePower, lastVoted: 0n, votedThisEpoch: immutableOnB > 0n },
+      votes: {
+        klima: { power: 5000n * E, lastVoted: 0n, votedThisEpoch: true },
+        immutable: { power: immutablePower, lastVoted: 0n, votedThisEpoch: immutableOnB > 0n },
+      },
     },
     pools: [
-      { pool: A, rewards: reward(HYDX), otherVotes: 1000n * E, ownVotes: 500n * E, immutableVotes: 0n },
+      { pool: A, rewards: reward(HYDX), weight: 1500n * E, votes: { klima: 500n * E, immutable: 0n } },
       {
         pool: B,
         rewards: reward(USDC),
-        otherVotes: 1000n * E + immutableOnB,
-        ownVotes: 0n,
-        immutableVotes: immutableOnB,
+        weight: 1000n * E + immutableOnB,
+        votes: { klima: 0n, immutable: immutableOnB },
       },
     ],
+    scores: {},
   };
 }
 
@@ -49,14 +45,26 @@ const onchain = (current: number, a: number, b: number): Onchain => ({
   ]),
 });
 
-test("the immutable conduit counts the Klima conduit's votes as others', and not its own", () => {
-  const candidates = immutableCandidates(state({ immutableOnB: 200n * E }), [100, 100]);
+test("each conduit counts the other's votes as others', and not its own", () => {
+  const voted = state({ immutableOnB: 200n * E });
+  const votes = (name: "klima" | "immutable", planned = {}) =>
+    candidatesFor(voted, [100, 100], name, planned).map((c) => [c.otherVotes / E, c.ownVotes / E]);
+  assert.deepEqual(votes("immutable"), [
+    [1500n, 0n],
+    [1000n, 200n],
+  ]);
+  assert.deepEqual(votes("klima"), [
+    [1000n, 500n],
+    [1200n, 0n],
+  ]);
+  const planned = { immutable: new Map([[B.toLowerCase() as Address, 300n * E]]) };
   assert.deepEqual(
-    candidates.map((c) => [c.otherVotes / E, c.ownVotes / E]),
+    votes("klima", planned),
     [
-      [1500n, 0n],
-      [1000n, 200n],
+      [1000n, 500n],
+      [1300n, 0n],
     ],
+    "with the other's planned votes in place of its votes in force",
   );
 });
 
@@ -73,54 +81,72 @@ test("the pools the conduit can value are those paid in a token it prices", () =
 });
 
 test("our best vote is sent when it clears the conduit's check", () => {
-  const decision = decideImmutable(state(), [100, 100], onchain(0, 100, 100));
+  const decision = decide("immutable", state(), [100, 100], { onchain: onchain(0, 100, 100) });
   assert.ok(decision.vote);
   assert.deepEqual(decision.vote.pools, [A, B]);
   const planned = decision.votes.reduce((a, b) => a + b, 0n);
-  assert.ok(planned <= 1000n * E && planned > 1000n * E - 10n, "the Klima conduit plans with all of it");
+  assert.ok(planned <= 1000n * E && planned > 1000n * E - 10n, "the other conduit plans with all of it");
 });
 
 test("when ours does not clear the check, the vote that does at the least cost at our prices", () => {
   // Our prices value only A, the conduit's check values only B, and the vote in force scores 10.
-  const decision = decideImmutable(state(), [100, 0], onchain(10, 0, 100));
+  const decision = decide("immutable", state(), [100, 0], { onchain: onchain(10, 0, 100) });
   assert.ok(decision.vote);
   const x = decision.votes.map((v) => Number(v) / Number(1000n * E));
-  const scored = score(immutableCandidates(state(), [100, 0]), [0, 100], x, 1000n * E);
+  const scored = score(candidatesFor(state(), [100, 0], "immutable"), [0, 100], x, 1000n * E);
   assert.ok(scored >= 11.1 - 0.01, `MIN_GAIN plus the margin, rounded to basis points: ${scored}`);
   assert.ok(x[0]! > 0.7, `most stays on A: ${x}`);
-  const hopeless = decideImmutable(state(), [100, 0], onchain(1000, 0, 100));
+  const hopeless = decide("immutable", state(), [100, 0], { onchain: onchain(1000, 0, 100) });
   assert.equal(hopeless.vote, null);
-  assert.match(hopeless.note, /no vote clears the immutable conduit's check/);
+  assert.match(hopeless.note, /no vote clears the conduit's check/);
 });
 
 test("without the conduit's values, our best vote is left to the simulation", () => {
-  assert.ok(decideImmutable(state(), [100, 0], undefined).vote);
+  assert.ok(decide("immutable", state(), [100, 0]).vote);
 });
 
 test("the last blocks re-vote only for a gain over a dollar; a day before, the vote is always cast", () => {
   const voted = state({ immutableOnB: 1000n * E });
-  const keep = decideImmutable(voted, [0, 100], onchain(0, 0, 100));
+  const keep = decide("immutable", voted, [0, 100], { onchain: onchain(0, 0, 100) });
   assert.equal(keep.vote, null, "all on B already");
-  assert.deepEqual(keep.votes, [0n, 1000n * E], "the Klima conduit plans with the vote in force");
-  const dayBefore = decideImmutable(voted, [0, 100], onchain(0, 0, 100), true);
+  assert.deepEqual(keep.votes, [0n, 1000n * E], "the other conduit plans with the vote in force");
+  const dayBefore = decide("immutable", voted, [0, 100], { onchain: onchain(0, 0, 100), proportionally: true });
   assert.deepEqual(dayBefore.vote, { pools: [B], weights: [10_000n] });
 });
 
 test("a day before, a vote that clears the conduit's check only by losing at our prices keeps the vote in force", () => {
   // The vote in force is all on B and worth $50 at our prices. The conduit's check values only A, so clearing it
   // takes 40% on A.
-  const decision = decideImmutable(state({ immutableOnB: 1000n * E }), [10, 100], onchain(20, 100, 0), true);
+  const checked = { onchain: onchain(20, 100, 0) };
+  const voted = state({ immutableOnB: 1000n * E });
+  const decision = decide("immutable", voted, [10, 100], { ...checked, proportionally: true });
   assert.equal(decision.vote, null);
-  assert.match(decision.note, /no vote that clears the immutable conduit's check gains enough/);
-  const lastBlocks = decideImmutable(state({ immutableOnB: 1000n * E }), [10, 100], onchain(20, 100, 0));
+  assert.match(decision.note, /no vote that clears the conduit's check gains enough/);
+  const lastBlocks = decide("immutable", voted, [10, 100], checked);
   assert.equal(lastBlocks.vote, null, "nor in the last blocks");
-  assert.ok(decideImmutable(state(), [10, 100], onchain(20, 100, 0), true).vote, "it gains on no vote in force");
+  const fresh = decide("immutable", state(), [10, 100], { ...checked, proportionally: true });
+  assert.ok(fresh.vote, "it gains on no vote in force");
 });
 
-test("without voting power, the immutable conduit does not vote", () => {
-  const decision = decideImmutable(state({ immutablePower: 0n }), [100, 100], onchain(0, 100, 100));
+test("without voting power, a conduit does not vote", () => {
+  const decision = decide("immutable", state({ immutablePower: 0n }), [100, 100], { onchain: onchain(0, 100, 100) });
   assert.equal(decision.vote, null);
   assert.match(decision.note, /no voting power/);
+});
+
+test("each conduit's vote keeps at most its number of pools", () => {
+  const pools = Array.from({ length: 60 }, (_, i) => ({
+    pool: addr(100 + i),
+    rewards: [],
+    weight: 1_000n * E,
+    votes: { klima: 0n, immutable: 0n },
+  }));
+  const many: State = { ...state(), pools };
+  const usd = pools.map(() => 100);
+  assert.equal(decide("klima", many, usd).vote!.pools.length, 40);
+  assert.equal(decide("immutable", many, usd).vote!.pools.length, 20);
+  assert.equal(decide("klima", many, usd, { proportionally: true }).vote!.pools.length, 40);
+  assert.equal(decide("immutable", many, usd, { proportionally: true }).vote!.pools.length, 20);
 });
 
 test("the vote clears the conduit's check as the Voter splits it, rounded to basis points", () => {
@@ -133,23 +159,23 @@ test("the vote clears the conduit's check as the Voter splits it, rounded to bas
     const pools = Array.from({ length: 60 }, (_, i) => ({
       pool: addr(100 + i),
       rewards: [],
-      otherVotes: BigInt(Math.floor(1_000 + rand() * 2_000_000)) * E,
-      ownVotes: 0n,
-      immutableVotes: 0n,
+      weight: BigInt(Math.floor(1_000 + rand() * 2_000_000)) * E,
+      votes: { klima: 0n, immutable: 0n },
     }));
+    const { epoch } = state();
     const s: State = {
       ...state(),
       pools,
-      epoch: { ...state().epoch, immutable: { power, lastVoted: 0n, votedThisEpoch: false } },
+      epoch: { ...epoch, votes: { ...epoch.votes, immutable: { power, lastVoted: 0n, votedThisEpoch: false } } },
     };
     const usd = pools.map(() => rand() * 5_000);
     const values = pools.map(() => (rand() < 0.3 ? 0 : rand() * 30_000));
-    const candidates = immutableCandidates(s, usd);
+    const candidates = candidatesFor(s, usd, "immutable");
     const share = (votes: bigint[]) => votes.map((v) => Number(v) / Number(power));
-    const ours = decideImmutable(s, usd, undefined);
+    const ours = decide("immutable", s, usd);
     const current = score(candidates, values, share(ours.votes), power) + rand() * 50;
     const byPool = new Map(pools.map((p, i) => [p.pool.toLowerCase() as Address, values[i]!]));
-    const decision = decideImmutable(s, usd, { current, values: byPool });
+    const decision = decide("immutable", s, usd, { onchain: { current, values: byPool } });
     if (!decision.vote) continue;
     checked++;
     const sent = votesOf(candidates, decision.vote, power);
@@ -170,8 +196,8 @@ test("the conduit's values of pools are read a few heavy calls at a time", async
     },
   } as unknown as Client;
   const pools = Array.from({ length: 167 }, (_, i) => addr(100 + i));
-  const chain = { immutable: { conduit: B, proposer: C, priced: [] } } as unknown as Chain;
-  const values = await readValues(chain, client, pools);
+  const conduit = { address: B, abi: immutableAbi } as unknown as Conduit;
+  const values = await readValues(conduit, client, pools);
   assert.equal(values.size, 167);
   assert.equal(values.get(addr(266)), 266, "in USD");
   assert.equal(most, 3, "7 calls of 25 pools, 3 at once");

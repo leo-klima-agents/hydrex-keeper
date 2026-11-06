@@ -4,8 +4,7 @@ import { getAddress, type Address } from "viem";
 import type { Chain, Client } from "../src/chain.ts";
 import { perAttempt, valueRewards, votedDayBefore, type Run } from "../src/pass.ts";
 import { DAY, HORIZON } from "../src/schedule.ts";
-import { immutableSender, klimaSender } from "../src/vote.ts";
-import { logged } from "./helpers.ts";
+import { conduitsOf, logged } from "./helpers.ts";
 
 test("the day-before reads are shared within a round of attempts, and read again for a retry or after a failure", async () => {
   let reads = 0;
@@ -22,14 +21,14 @@ test("the day-before reads are shared within a round of attempts, and read again
   assert.equal(await read(2), 3, "a retry reads again");
 });
 
-test("each pool is logged with its rewards and votes, the immutable conduit's included", async (t) => {
+test("each pool is logged with its rewards, its weight and each conduit's votes", async (t) => {
   const token = getAddress(`0x${"1".repeat(40)}`);
   const pool = getAddress(`0x${"2".repeat(40)}`);
   const run = { tokens: [{ token, name: "TKN" }] } as unknown as Run;
   const priced = new Map([[token.toLowerCase() as Address, 2]]);
   const rewards = [{ token, amount: 3n * 10n ** 18n, decimals: 18 }];
   let usd: number[] = [];
-  const pools = [{ pool, rewards, otherVotes: 5n, ownVotes: 6n, immutableVotes: 7n }];
+  const pools = [{ pool, rewards, weight: 18n, votes: { klima: 6n, immutable: 7n } }];
   const lines = await logged(t, () => (usd = valueRewards(run, pools, priced, true)));
   assert.deepEqual(usd, [6]);
   assert.deepEqual(lines, [
@@ -38,9 +37,8 @@ test("each pool is logged with its rewards and votes, the immutable conduit's in
       message: "pool",
       pool,
       usd: 6,
-      otherVotes: "5",
-      ownVotes: "6",
-      immutableVotes: "7",
+      weight: "18",
+      votes: { klima: "6", immutable: "7" },
       rewards: [{ token: "TKN", amount: 3, usd: 6 }],
     },
   ]);
@@ -81,16 +79,15 @@ test("a conduit's vote of a day before is in if the Voter shows one now, and for
       return args.proposer === proposer ? [{}] : [];
     },
   } as unknown as Client;
-  const chain = {
+  const conduits = conduitsOf(
+    {
+      klima: { address: KLIMA, from: addr(6), module: addr(7) },
+      immutable: { address: IMMUTABLE, from: PROPOSER },
+    },
     client,
-    proposerClient: client,
-    voter: addr(5),
-    keeper: addr(6),
-    module: addr(7),
-    conduit: KLIMA,
-    immutable: { conduit: IMMUTABLE, proposer: PROPOSER, priced: [] },
-  } as unknown as Chain;
-  const [klima, immutable] = [klimaSender(chain), immutableSender(chain)];
+  );
+  const chain = { client, voter: addr(5), conduits } as unknown as Chain;
+  const { klima, immutable } = conduits;
   lastVoted.set(KLIMA, flip - DAY - HORIZON - 2n);
   assert.equal(await votedDayBefore(chain, klima, flip), false, "voted more than an hour before");
   lastVoted.set(KLIMA, flip - DAY + 30n);

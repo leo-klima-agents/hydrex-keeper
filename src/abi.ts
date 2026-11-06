@@ -1,6 +1,7 @@
 import { parseAbi } from "viem";
 
-export const moduleAbi = parseAbi([
+// KlimaVeTokenConduitExecutor, the Klima conduit's Safe module.
+export const klimaModuleAbi = parseAbi([
   "function CONDUIT() view returns (address)",
   "function KEEPER() view returns (address)",
   "function vote(address[] pools, uint256[] weights)",
@@ -16,7 +17,7 @@ export const moduleAbi = parseAbi([
 ]);
 
 // KlimaVeTokenConduit.
-export const conduitAbi = parseAbi([
+export const klimaAbi = parseAbi([
   "function voter() view returns (address)",
   "function veToken() view returns (address)",
   "function kvcm() view returns (address)",

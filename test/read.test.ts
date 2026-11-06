@@ -4,9 +4,10 @@ import { ContractFunctionExecutionError, ContractFunctionRevertedError, type Add
 import { immutableAbi } from "../src/abi.ts";
 import { now, readMany, WEEK, type Chain, type Client } from "../src/chain.ts";
 import { readEpoch, readRewards, readVotes } from "../src/read.ts";
+import { conduitsOf } from "./helpers.ts";
 
 const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
-const [VOTER, CONDUIT, VE] = [addr(1), addr(2), addr(97)] as const;
+const [VOTER, KLIMA, VE] = [addr(1), addr(2), addr(97)] as const;
 const [POOL_A, POOL_B, POOL_C, POOL_D] = [addr(3), addr(4), addr(5), addr(15)] as const;
 const [GAUGE_A, GAUGE_B, GAUGE_C, GAUGE_D] = [addr(6), addr(7), addr(16), addr(17)] as const;
 const [EXT_A, INT_A, EXT_B, INT_B] = [addr(8), addr(9), addr(10), addr(11)] as const;
@@ -46,15 +47,17 @@ function fakeChain(answer: (call: Call) => unknown): Chain {
   return {
     client,
     bulk: client,
-    proposerClient: client,
     broadcast,
     known: async () => false,
-    module: addr(99),
-    conduit: CONDUIT,
-    keeper: addr(98),
     voter: VOTER,
     ve: VE,
-    immutable: { conduit: IMMUTABLE, proposer: addr(23), priced: [] },
+    conduits: conduitsOf(
+      {
+        klima: { address: KLIMA, from: addr(98), module: addr(99) },
+        immutable: { address: IMMUTABLE, from: addr(23) },
+      },
+      client,
+    ),
   };
 }
 
@@ -73,8 +76,10 @@ const internalBribes: Record<string, Address> = {
   [GAUGE_D]: INT_D,
 };
 const weights: Record<string, bigint> = { [POOL_A]: 1000n, [POOL_B]: 500n };
-const ownVotes: Record<string, bigint> = { [POOL_A]: 100n, [POOL_B]: 0n };
-const immutableVotes: Record<string, bigint> = { [POOL_A]: 40n, [POOL_B]: 0n };
+const votesOf: Record<string, Record<string, bigint>> = {
+  [KLIMA]: { [POOL_A]: 100n, [POOL_B]: 0n },
+  [IMMUTABLE]: { [POOL_A]: 40n, [POOL_B]: 0n },
+};
 const rewardTokens: Record<string, Address[]> = {
   [EXT_A]: [TOK_1, TOK_2],
   [INT_A]: [],
@@ -84,7 +89,7 @@ const rewardTokens: Record<string, Address[]> = {
   [INT_D]: [],
 };
 const amounts: Record<string, bigint> = { [EXT_A + TOK_1]: 7n, [EXT_A + TOK_2]: 0n, [INT_B + TOK_1]: 3n };
-const voterState = { start: 1000n, lastVoted: 1000n, immutableLastVoted: 1000n };
+const voterState = { start: 1000n, lastVoted: { [KLIMA]: 1000n, [IMMUTABLE]: 1000n } as Record<string, bigint> };
 const E = 10n ** 18n;
 let scoring: "yes" | "reverts" = "yes";
 const reverted = ({ address, functionName }: Call) =>
@@ -105,7 +110,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
       case "_epochTimestamp":
         return voterState.start;
       case "lastVoted":
-        return arg === IMMUTABLE ? voterState.immutableLastVoted : voterState.lastVoted;
+        return voterState.lastVoted[arg];
       case "length":
         return BigInt(pools.length);
       case "pools":
@@ -121,7 +126,7 @@ function table({ address, functionName, args = [] }: Call): unknown {
       case "weights":
         return weights[arg];
       case "votes":
-        return (arg === IMMUTABLE ? immutableVotes : ownVotes)[args[1] as string];
+        return votesOf[arg]![args[1] as string];
     }
   }
   if (functionName === "rewardsListLength") return BigInt(rewardTokens[address]!.length);
@@ -138,8 +143,14 @@ function table({ address, functionName, args = [] }: Call): unknown {
   throw new Error(`unexpected call ${functionName} on ${address}`);
 }
 
-const immutable = { power: 7n, lastVoted: 1000n, votedThisEpoch: true };
-const epoch = { start: 1000n, flip: 1000n + WEEK, power: 10n, lastVoted: 1000n, votedThisEpoch: true, immutable };
+const epoch = {
+  start: 1000n,
+  flip: 1000n + WEEK,
+  votes: {
+    klima: { power: 10n, lastVoted: 1000n, votedThisEpoch: true },
+    immutable: { power: 7n, lastVoted: 1000n, votedThisEpoch: true },
+  },
+};
 
 test("readRewards keeps the pools with live gauges and rewards in whitelisted tokens, and those rewards alone", async () => {
   const rewards = await readRewards(fakeChain(table), [TOK_1, TOK_2]);
@@ -156,39 +167,33 @@ test("readVotes reads the epoch and both conduits' votes on each pool, in one mu
   assert.deepEqual(await readVotes(chain, rewards), {
     epoch,
     pools: [
-      { ...rewards[0]!, otherVotes: 900n, ownVotes: 100n, immutableVotes: 40n },
-      { ...rewards[1]!, otherVotes: 500n, ownVotes: 0n, immutableVotes: 0n },
+      { ...rewards[0]!, weight: 1000n, votes: { klima: 100n, immutable: 40n } },
+      { ...rewards[1]!, weight: 500n, votes: { klima: 0n, immutable: 0n } },
     ],
-    score: 5n * E,
+    scores: { immutable: 5n * E },
   });
   await readVotes(chain, Array<(typeof rewards)[number]>(331).fill(rewards[0]!));
   assert.equal(multicalls, 2);
   assert.deepEqual(await readMany(chain.client, []), []);
   assert.equal(multicalls, 2, "no calls make no request");
-  voterState.lastVoted = 999n;
-  try {
-    const { epoch: stale, pools } = await readVotes(chain, rewards);
-    assert.equal(stale.votedThisEpoch, false);
-    assert.deepEqual(
-      [pools[0]!.otherVotes, pools[0]!.ownVotes],
-      [1000n, 0n],
-      "last epoch's own votes are neither subtracted nor counted",
-    );
-  } finally {
-    voterState.lastVoted = 1000n;
-  }
 });
 
-test("the immutable conduit's votes count only once it voted this epoch", async () => {
+test("each conduit's votes count only once it voted this epoch", async () => {
   const chain = fakeChain(table);
   const rewards = await readRewards(chain, [TOK_1]);
-  voterState.immutableLastVoted = 999n;
-  try {
-    const { epoch: stale, pools } = await readVotes(chain, rewards);
-    assert.deepEqual(stale.immutable, { power: 7n, lastVoted: 999n, votedThisEpoch: false });
-    assert.equal(pools[0]!.immutableVotes, 0n, "last epoch's votes of the immutable conduit do not count");
-  } finally {
-    voterState.immutableLastVoted = 1000n;
+  for (const [name, address, power] of [
+    ["klima", KLIMA, 10n],
+    ["immutable", IMMUTABLE, 7n],
+  ] as const) {
+    voterState.lastVoted[address] = 999n;
+    try {
+      const { epoch: stale, pools } = await readVotes(chain, rewards);
+      assert.deepEqual(stale.votes[name], { power, lastVoted: 999n, votedThisEpoch: false });
+      assert.equal(pools[0]!.votes[name], 0n, `last epoch's votes of ${name} do not count`);
+      assert.equal(pools[0]!.weight, 1000n, "the pool's weight is as it is");
+    } finally {
+      voterState.lastVoted[address] = 1000n;
+    }
   }
 });
 
@@ -199,8 +204,8 @@ test("the immutable conduit's score is read with the votes, and left out while i
   scoring = "reverts";
   try {
     const state = await readVotes(chain, rewards);
-    assert.equal(state.score, undefined);
-    assert.equal(state.pools[0]!.immutableVotes, 40n);
+    assert.deepEqual(state.scores, {});
+    assert.equal(state.pools[0]!.votes.immutable, 40n);
     assert.equal(multicalls, 1);
   } finally {
     scoring = "yes";

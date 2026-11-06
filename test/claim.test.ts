@@ -19,7 +19,7 @@ import {
   type LocalAccount,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { conduitAbi, immutableAbi, moduleAbi, veAbi } from "../src/abi.ts";
+import { klimaAbi, immutableAbi, klimaModuleAbi, veAbi } from "../src/abi.ts";
 import type { Chain, Client } from "../src/chain.ts";
 import {
   claims,
@@ -32,10 +32,10 @@ import {
 } from "../src/claim.ts";
 import { BadSwap, SwapRefused, type Swapper } from "../src/kyber.ts";
 import type { Run } from "../src/pass.ts";
-import { sentNotMined } from "./helpers.ts";
+import { conduitsOf, sentNotMined } from "./helpers.ts";
 
 const addr = (n: number) => getAddress(`0x${n.toString(16).padStart(40, "0")}`);
-const [MODULE, CONDUIT, VOTER, VE] = [addr(1), addr(2), addr(3), addr(4)];
+const [KLIMA_MODULE, KLIMA, VOTER, VE] = [addr(1), addr(2), addr(3), addr(4)];
 const [ROUTER, AGGREGATOR, CREDIT, CLASS] = [addr(5), addr(6), addr(7), addr(8)];
 const IMMUTABLE = addr(10);
 const [I1, E1, I2, E2] = [addr(15), addr(16), addr(17), addr(18)];
@@ -73,7 +73,7 @@ const owners: Record<string, Address> = {
 const powers: Record<string, bigint> = { 1: 7n, 2: 100n, 3: 800n, 4: 1n, 5: 99n, 6: 10n, 7: 300n, 8: 20n };
 const unapproved = new Set(["6"]);
 const delegateOf = (id: unknown, immutable: boolean): Address =>
-  ({ 1: OTHER, 7: immutable ? IMMUTABLE : OTHER, 8: immutable ? IMMUTABLE : OTHER })[String(id)] ?? CONDUIT;
+  ({ 1: OTHER, 7: immutable ? IMMUTABLE : OTHER, 8: immutable ? IMMUTABLE : OTHER })[String(id)] ?? KLIMA;
 
 /** A pool's fee contract and its bribe contract, each with the reward tokens it lists. */
 type Pool = [[Address, Address[]], [Address, Address[]]];
@@ -249,9 +249,9 @@ function fakeChain(w: World = world()) {
           ]),
         }
       : {
-          address: CONDUIT,
+          address: KLIMA,
           topics: encodeEventTopics({
-            abi: conduitAbi,
+            abi: klimaAbi,
             eventName: "ClaimSwapAndDistributeCompleted",
             args: { tokenId: id, owner, recipient: owner },
           }),
@@ -306,23 +306,23 @@ function fakeChain(w: World = world()) {
         return powers[String(a)];
       case `${VE}.getFirstEscrowPoint`:
         return [{ bias: 0n, slope: 0n, permanent: 0n }, Number(START - 100n * WEEK)];
-      case `${CONDUIT}.kvcm`:
+      case `${KLIMA}.kvcm`:
         return KVCM;
-      case `${CONDUIT}.retireBps`:
+      case `${KLIMA}.retireBps`:
         return RETIRE_BPS;
-      case `${CONDUIT}.retirementAggregator`:
+      case `${KLIMA}.retirementAggregator`:
         return AGGREGATOR;
-      case `${CONDUIT}.creditToken`:
+      case `${KLIMA}.creditToken`:
         return CREDIT;
-      case `${CONDUIT}.creditTokenId`:
+      case `${KLIMA}.creditTokenId`:
         return 0n;
-      case `${CONDUIT}.carbonClass`:
+      case `${KLIMA}.carbonClass`:
         return CLASS;
-      case `${CONDUIT}.distributionTokens`:
+      case `${KLIMA}.distributionTokens`:
         if (a === 0n) return KVCM;
         if (a === 1n) return AZUSD;
         throw reverts("distributionTokens");
-      case `${CONDUIT}.isApprovedRouter`:
+      case `${KLIMA}.isApprovedRouter`:
         return a === ROUTER;
       case `${AGGREGATOR}.quoteRetireCreditViaKlima`: {
         const tonnes = args[2] as bigint;
@@ -333,7 +333,7 @@ function fakeChain(w: World = world()) {
       case "decimals":
         return address === USDC ? 6 : 18;
       case "balanceOfOwnerAt":
-        assert.ok(a === CONDUIT || a === IMMUTABLE);
+        assert.ok(a === KLIMA || a === IMMUTABLE);
         return listed.has(address) && b === ENDED ? 50n : 0n;
       case "rewardsListLength":
         return BigInt(listed.get(address)!.length);
@@ -431,22 +431,24 @@ function fakeChain(w: World = world()) {
   const broadcast = async (signed: Hex) => {
     sent.push(signed);
     const { to, data } = parseTransaction(signed);
-    const { args } = decodeFunctionData({ abi: isImmutable(to) ? immutableAbi : moduleAbi, data: data! });
+    const { args } = decodeFunctionData({ abi: isImmutable(to) ? immutableAbi : klimaModuleAbi, data: data! });
     inFlight.set(keccak256(signed), { to: to!, args: args! });
     return keccak256(signed);
   };
   const chain: Chain = {
     client,
     bulk: client,
-    proposerClient: client,
     broadcast,
     known: async () => false,
-    module: MODULE,
-    conduit: CONDUIT,
-    keeper: signer.address,
     voter: VOTER,
     ve: VE,
-    immutable: { conduit: IMMUTABLE, proposer: proposer.address, priced: [USDC] },
+    conduits: conduitsOf(
+      {
+        klima: { address: KLIMA, from: signer.address, module: KLIMA_MODULE },
+        immutable: { address: IMMUTABLE, from: proposer.address, priced: [USDC] },
+      },
+      client,
+    ),
   };
   return { chain, sent, earnedFor, called };
 }
@@ -478,7 +480,7 @@ function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
   const asked: Address[] = [];
   const swapper: Swapper = async ({ tokenIn, tokenOut, amountIn, account, slippageBps }) => {
     assert.equal(tokenOut, KVCM);
-    assert.equal(account, CONDUIT, "the conduit sells and buys");
+    assert.equal(account, KLIMA, "the conduit sells and buys");
     asked.push(tokenIn);
     if (typeof refuse === "function" ? refuse(tokenIn, amountIn) : refuse.includes(tokenIn)) {
       throw new SwapRefused("KyberSwap: route not found");
@@ -495,11 +497,11 @@ function fakeSwapper({ refuse = [], bad, lossy }: Swaps = {}) {
 
 function runOf(chain: Chain, { dryRun = false, account = signer as LocalAccount } = {}): Run {
   const tokens = [USDC, KVCM, WETH, HYDX, ...ODD].map((token) => ({ token, name: token.slice(0, 6) }));
-  return { chain, tokens, prices: async () => prices, account, proposer, dryRun };
+  return { chain, tokens, prices: async () => prices, signers: { klima: account, immutable: proposer }, dryRun };
 }
 
 const decode = (signed: Hex) => {
-  const { args, functionName } = decodeFunctionData({ abi: moduleAbi, data: parseTransaction(signed).data! });
+  const { args, functionName } = decodeFunctionData({ abi: klimaModuleAbi, data: parseTransaction(signed).data! });
   assert.equal(functionName, "claimSwapAndDistribute");
   const [id, targets, , fees, bribes, tokens, tonnes, maxKvcmIn] = args as readonly [
     bigint,
@@ -544,8 +546,9 @@ test("claims each delegator's most valuable rewards, swapped to kVCM, and retire
   assert.deepEqual([...earnedFor].sort(), ["2", "4"], "3 is the Foundation's, 5 is burned, 6 is not approved");
 });
 
-test("the Klima Foundation's veNFTs are excluded", () => {
-  assert.equal(EXCLUDED_OWNERS.get(FOUNDATION.toLowerCase()), "Klima Foundation");
+test("the Klima Foundation's veNFTs are excluded from the Klima conduit's claims, and nobody's from the other's", () => {
+  assert.equal(EXCLUDED_OWNERS.klima.get(FOUNDATION.toLowerCase()), "Klima Foundation");
+  assert.equal(EXCLUDED_OWNERS.immutable.size, 0);
 });
 
 test("the immutable conduit's delegators are claimed for too, by the proposer, Klima Foundation included", async () => {
@@ -661,11 +664,11 @@ test("a contract still owing after a claim, as for more than 50 epochs, is claim
 
 test("a claim never replaces a transaction this run sent that may still land, which may be a vote: the claims stop", async () => {
   const { chain, sent } = fakeChain(world());
-  await sentNotMined(chain, chain.keeper, 7);
+  await sentNotMined(chain, chain.conduits.klima.from, 7);
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 1);
   assert.equal(sent.length, 0);
   const both = fakeChain(world({ immutable: true }));
-  await sentNotMined(both.chain, both.chain.keeper, 7);
+  await sentNotMined(both.chain, both.chain.conduits.klima.from, 7);
   await sentNotMined(both.chain, proposer.address, 7);
   assert.equal(await claims(runOf(both.chain), START, until(), fakeSwapper().swapper), 2, "the proposer's too");
   assert.equal(both.sent.length, 0);
@@ -673,7 +676,7 @@ test("a claim never replaces a transaction this run sent that may still land, wh
 
 test("a claim replaces a transaction this run sent that no node holds any more", async () => {
   const { chain, sent } = fakeChain(world());
-  await sentNotMined(chain, chain.keeper, 7, false);
+  await sentNotMined(chain, chain.conduits.klima.from, 7, false);
   assert.equal(await claims(runOf(chain), START, until(), fakeSwapper().swapper), 0);
   assert.equal(sent.length, 1);
   assert.equal(parseTransaction(sent[0]!).nonce, 7, "at the nonce the dropped one held");
@@ -869,38 +872,39 @@ test("no claim starts in the last minute of the claims, and claims left then fai
 const pair = (bribe: Address, token: Address, usd: number, fees = false): Pair => ({ bribe, fees, token, usd });
 
 const swapped = (token: Address) => token !== KVCM;
+const SWAPPING_GAS = 1_300_000n; // the base gas of a claim that swaps and retires
 
 test("a plan asks the bribe contracts that pay most for the tokens that pay most, as many as the gas allows", () => {
   const pairs = [pair(E1, USDC, 60), pair(I1, USDC, 10, true), pair(I1, KVCM, 30, true), pair(E2, HYDX, 10)];
-  const plan = planClaim(pairs, 10_000_000n, 0, swapped)!;
+  const plan = planClaim(pairs, 10_000_000n, 0, swapped, SWAPPING_GAS)!;
   assert.deepEqual([plan.tokens, plan.fees, plan.bribes, plan.usd], [[USDC, KVCM, HYDX], [I1], [E1, E2], 110]);
   // 1.3M base, 0.8M per swap and 0.3M per contract and token pair
   assert.equal(plan.gas, 1_300_000n + 2n * 800_000n + 3n * 900_000n);
-  const tight = planClaim(pairs, 3_000_000n, 0, swapped)!;
+  const tight = planClaim(pairs, 3_000_000n, 0, swapped, SWAPPING_GAS)!;
   assert.deepEqual([tight.tokens, tight.bribes, tight.fees], [[USDC], [E1], [I1]], "one token, two contracts fit");
-  assert.equal(planClaim(pairs, 2_000_000n, 0, swapped), undefined, "nothing fits");
-  const unswapped = planClaim(pairs, 3_000_000n, 0, () => false, new Map(), 400_000n)!;
+  assert.equal(planClaim(pairs, 2_000_000n, 0, swapped, SWAPPING_GAS), undefined, "nothing fits");
+  const unswapped = planClaim(pairs, 3_000_000n, 0, () => false, 400_000n)!;
   assert.deepEqual([unswapped.tokens, unswapped.gas], [[USDC, KVCM], 1_600_000n], "cheaper claims fit more");
-  assert.equal(planClaim([], 10_000_000n, 0, swapped), undefined);
-  const capped = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[USDC, 35]]))!;
+  assert.equal(planClaim([], 10_000_000n, 0, swapped, SWAPPING_GAS), undefined);
+  const capped = planClaim(pairs, 10_000_000n, 0, swapped, SWAPPING_GAS, new Map([[USDC, 35]]))!;
   assert.deepEqual([capped.fees, capped.bribes, capped.usd], [[I1], [E2], 50], "E1 owes more USDC than the cap");
 });
 
 test("a contract that owes more of a capped token than its cap is still claimed for its other tokens", () => {
   const pairs = [pair(E1, HYDX, 1000), pair(E1, USDC, 50), pair(E2, USDC, 20)];
-  const plan = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[HYDX, 500]]))!;
+  const plan = planClaim(pairs, 10_000_000n, 0, swapped, SWAPPING_GAS, new Map([[HYDX, 500]]))!;
   assert.deepEqual([plan.tokens, plan.bribes, plan.usd], [[USDC], [E1, E2], 70]);
 });
 
 test("a cap counts what a claim swaps, not what it makes claimable past the 50 epochs earned() reads", () => {
   const pairs = [{ ...pair(E1, HYDX, 400), later: 300 }, pair(E2, HYDX, 200)];
-  const plan = planClaim(pairs, 10_000_000n, 0, swapped, new Map([[HYDX, 500]]))!;
+  const plan = planClaim(pairs, 10_000_000n, 0, swapped, SWAPPING_GAS, new Map([[HYDX, 500]]))!;
   assert.deepEqual([plan.tokens, plan.bribes, plan.usd], [[HYDX], [E1], 700], "E1 swaps $400, under the cap");
 });
 
 test("a bribe contract that does not pay for its gas is left out", () => {
   const usdPerGas = 1e-8; // a contract's 300k gas costs $0.003, so it must pay at least $0.06
-  const plan = planClaim([pair(E1, USDC, 0.07), pair(E2, USDC, 0.05)], 10_000_000n, usdPerGas, swapped)!;
+  const plan = planClaim([pair(E1, USDC, 0.07), pair(E2, USDC, 0.05)], 10_000_000n, usdPerGas, swapped, SWAPPING_GAS)!;
   assert.deepEqual(plan.bribes, [E1]);
 });
 
