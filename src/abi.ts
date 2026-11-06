@@ -73,6 +73,7 @@ export const voterAbi = parseAbi([
   "function votes(address voter, address pool) view returns (uint256)",
   "function poolVote(address voter, uint256 index) view returns (address)",
   "function lastVoted(address voter) view returns (uint256)",
+  "event Voted(address indexed voter, uint256 weight)", // one per pool voted for
 ]);
 
 export const veAbi = parseAbi([

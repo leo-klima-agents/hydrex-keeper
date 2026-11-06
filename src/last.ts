@@ -6,8 +6,9 @@ import {
   type Hex,
   type LocalAccount,
 } from "viem";
+import { voterAbi } from "./abi.ts";
 import { Blocks, sleep, watch } from "./blocks.ts";
-import { lastBlockBefore, lower, msOf, readMany, voterCall, WEEK, type Chain } from "./chain.ts";
+import { lastBlockBefore, lower, msOf, readMany, voterCall, WEEK, type Chain, type Client } from "./chain.ts";
 import { decideV2, pricedPools, readScore, readValues } from "./immutable.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
@@ -42,8 +43,19 @@ const FIRST_READ_WAIT_MS = 3_000;
 const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last blocks
 const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
+const WATCHED_S = 10n; // anyone's votes in this many seconds before the flip are logged
 
-export type Sent = { hash: Hex; vote: Vote; nonce: number; sender: Sender; votes?: Map<Address, bigint> | undefined };
+/** `target` is the time (ms) of the block a last-block vote was sent for, and `sentAt` when it was sent. */
+export type Sent = {
+  hash: Hex;
+  vote: Vote;
+  nonce: number;
+  sender: Sender;
+  votes?: Map<Address, bigint> | undefined;
+  target?: number;
+  sentAt?: number;
+  gas?: bigint;
+};
 
 /** What one conduit sends in the block at `time` (ms), planned from a read at `readAt` (ms). */
 export type Plan = {
@@ -420,7 +432,7 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   );
 
   const sending: Promise<void>[] = [];
-  const sendOne = (plan: Plan | undefined, sender: Sender, at: Record<string, unknown>) => {
+  const sendOne = (plan: Plan | undefined, sender: Sender, time: number, at: Record<string, unknown>) => {
     const { conduit } = sender;
     if (!plan) {
       failures++;
@@ -434,7 +446,9 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
     if (dryRun) return log.info("dry run: signed, not sent", fields);
     const id = keccak256(serializeTransaction(tx));
     if (sent.has(id)) return log.info("already sent", { conduit, ...at });
-    sent.set(id, { hash: keccak256(signed), vote: plan.vote!, nonce: tx.nonce, sender, votes: plan.votes });
+    const { nonce, gas } = tx;
+    const record = { hash: keccak256(signed), vote: plan.vote!, nonce, sender, votes: plan.votes, gas };
+    sent.set(id, { ...record, target: time, sentAt: Date.now() });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
       broadcastTx(chain, { ...prepared, signed }, flipMs).then(
@@ -463,8 +477,8 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
         // Its freshest plan answered a vote that isn't sent, so the Klima conduit sends an older one.
         ...(alone !== freshest ? { klimaAgeMs: ageMs(alone), freshestKlimaAgeMs: ageMs(freshest) } : {}),
       });
-    } else if (conduits.v2) sendOne(picked.v2, v2Sender(chain), at);
-    if (conduits.klima) sendOne(picked.klima, klimaSender(chain), at);
+    } else if (conduits.v2) sendOne(picked.v2, v2Sender(chain), time, at);
+    if (conduits.klima) sendOne(picked.klima, klimaSender(chain), time, at);
   };
 
   const sends = await race(flipMs, { blocks, lanes, send });
@@ -476,7 +490,79 @@ export async function lastBlocks(run: Run, flip: bigint, conduits: { klima: bool
   await Promise.all(sending);
   await sleep(Math.max(0, flipMs + SETTLE_MS - Date.now()));
   const voters = [...(conduits.v2 ? [chain.v2!.conduit] : []), ...(conduits.klima ? [chain.conduit] : [])];
-  return failures + (await outcome(run, flip, [...sent.values()], voters));
+  const outcomes = await outcome(run, flip, [...sent.values()], voters);
+  await lastVotes(run, flip).catch((error: unknown) =>
+    log.warning("votes before the flip unread", { error: errorMessage(error) }),
+  );
+  return failures + outcomes;
+}
+
+type Landed = { timestamp: bigint; gasUsed?: bigint; gasLimit?: bigint; baseFeePerGas?: bigint | null };
+type Receipted = { transactionIndex?: number; gasUsed?: bigint; effectiveGasPrice?: bigint };
+
+/** Where a transaction landed: its block's time from the flip (ms), its place in the block, and the tip it paid. */
+function landing(flipMs: number, block: Landed, receipt: Receipted) {
+  const { baseFeePerGas: baseFee, gasUsed: blockGasUsed, gasLimit: blockGasLimit } = block;
+  const { transactionIndex: index, gasUsed, effectiveGasPrice: price } = receipt;
+  return {
+    msToFlip: (msOf(block) ?? Number(block.timestamp) * 1000) - flipMs,
+    index,
+    gasUsed,
+    tip: price !== undefined && baseFee != null ? price - baseFee : undefined,
+    blockGasUsed,
+    blockGasLimit,
+  };
+}
+
+/**
+ * Logs each vote anyone cast in the last WATCHED_S seconds before the flip, ours included, to see how close to the
+ * flip other voters vote, and where their votes land in a block.
+ */
+export async function lastVotes({ chain }: Run, flip: bigint): Promise<void> {
+  const { client, voter } = chain;
+  const [first, last] = await Promise.all([lastBlockBefore(client, flip - WATCHED_S), lastBlockBefore(client, flip)]);
+  const events = await client.getContractEvents({
+    address: voter,
+    abi: voterAbi,
+    eventName: "Voted",
+    fromBlock: first + 1n,
+    toBlock: last,
+  });
+  const votes = new Map<Hex, { voter: Address | undefined; pools: number }>();
+  for (const { transactionHash, args } of events) {
+    votes.set(transactionHash, { voter: args.voter, pools: (votes.get(transactionHash)?.pools ?? 0) + 1 });
+  }
+  const ours = new Set([chain.conduit, ...(chain.v2 ? [chain.v2.conduit] : [])].map(lower));
+  const blocks = new Map<bigint, ReturnType<Client["getBlock"]>>();
+  const blockOf = (blockNumber: bigint) => {
+    if (!blocks.has(blockNumber)) blocks.set(blockNumber, client.getBlock({ blockNumber }));
+    return blocks.get(blockNumber)!;
+  };
+  const rows = await Promise.all(
+    [...votes].map(async ([hash, { voter: by, pools }]) => {
+      const [receipt, tx] = await Promise.all([
+        client.getTransactionReceipt({ hash }),
+        client.getTransaction({ hash }),
+      ]);
+      const block = await blockOf(receipt.blockNumber);
+      const where = landing(Number(flip) * 1000, block, receipt);
+      return {
+        voter: by,
+        ours: by !== undefined && ours.has(lower(by)),
+        from: receipt.from,
+        pools,
+        gasLimit: tx.gas,
+        ...where,
+      };
+    }),
+  );
+  rows.sort((a, b) => a.msToFlip - b.msToFlip || (a.index ?? 0) - (b.index ?? 0));
+  for (const row of rows) log.info("vote before the flip", row);
+  log.info("votes before the flip", {
+    seconds: WATCHED_S,
+    votes: rows.length,
+    others: rows.filter((r) => !r.ours).length,
+  });
 }
 
 export async function outcome(
@@ -487,7 +573,8 @@ export async function outcome(
 ): Promise<number> {
   let failures = 0;
   const last = new Map<Address, { hash: Hex; vote: Vote; block: bigint; timestamp: bigint }>();
-  for (const { hash, vote, nonce, sender } of sent) {
+  const flipMs = Number(flip) * 1000;
+  for (const { hash, vote, nonce, sender, target, sentAt, gas } of sent) {
     const conduit = lower(sender.conduit);
     try {
       const receipt = await chain.client.getTransactionReceipt({ hash }).catch((error: unknown) => {
@@ -501,7 +588,18 @@ export async function outcome(
       markMined(chain, nonce, sender.from); // so that the claims after the flip don't reuse its nonce
       const block = receipt.blockNumber;
       const fields = { conduit, hash, block, status: receipt.status };
-      const { timestamp } = await chain.client.getBlock({ blockNumber: block });
+      const landedIn = await chain.client.getBlock({ blockNumber: block });
+      const { timestamp } = landedIn;
+      // To tune the timing: how far from its target block a vote lands, how long after it was sent, and how crowded.
+      const where = landing(flipMs, landedIn, receipt);
+      const ms = where.msToFlip + flipMs;
+      log.info("vote landed", {
+        ...fields,
+        ...where,
+        ...(target !== undefined ? { msAfterTarget: ms - target } : {}),
+        ...(sentAt !== undefined ? { msAfterSend: ms - sentAt } : {}),
+        gasLimit: gas,
+      });
       if (timestamp >= flip) log.warning("vote landed after the flip", fields);
       else if (receipt.status !== "success") {
         // The Voter takes one vote per second for a conduit, and anyone can vote for an open one.

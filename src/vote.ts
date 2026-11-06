@@ -20,6 +20,11 @@ export const RECEIPT_TIMEOUT_MS = 60_000;
 const CONGESTED = 0.9; // in blocks this full, the builder orders by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
+// Votes in the last blocks tip at least this, more than other voters paid at the flip of 5 November 2026 (0.016 gwei at
+// most), so that the builder puts them ahead when voters crowd a block. Usually, transactions tipping this much use
+// under 6M of a block's 40M gas.
+const LAST_TIP = parseGwei("0.02");
+const FEE_BLOCKS = 20; // four seconds of blocks
 const MAX_GAS = 16_777_216n; // Base's gas limit per transaction since its Azul upgrade
 
 /** The vote was already sent, so retrying would send a second one. */
@@ -150,6 +155,7 @@ export async function prepareCall(
     before: before.map((c) => txCallOf(sender, c)),
     blockNumber: head?.number ?? at,
     time: time === undefined ? undefined : min(time + 1n, (time / WEEK + 1n) * WEEK - 1n),
+    minTip: target ? LAST_TIP : 0n,
     rival: rival && {
       name: rival.sender.name,
       from: rival.sender.from,
@@ -171,6 +177,7 @@ type TxOptions = {
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
+  minTip?: bigint;
 };
 
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
@@ -187,12 +194,13 @@ const simulatedAs =
   });
 
 /**
- * Throws if the transaction would revert. The max fee is twice the base fee plus the tip. If either of the last two
- * blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. Costs are in wei, include
- * the L1 fee and leave out the value sent. `queued` means another transaction of the sender is pending at its nonce.
+ * Throws if the transaction would revert. The max fee is twice the base fee plus the tip. If any of the last
+ * FEE_BLOCKS blocks was congested, the tip rises to the 99th percentile of their tips, up to MAX_TIP. It is at least
+ * `minTip`. Costs are in wei, include the L1 fee and leave out the value sent. `queued` means another transaction of
+ * the sender is pending at its nonce.
  */
 export async function prepareTx(chain: Chain, { from, client }: From, call: TxCall, options: TxOptions) {
-  const { what, before = [], blockNumber, time, rival, landed = false } = options;
+  const { what, before = [], blockNumber, time, rival, landed = false, minTip = 0n } = options;
   const { to, value } = call;
   const data = dataOf(call);
   const on = blockNumber === undefined ? {} : { blockNumber };
@@ -204,7 +212,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     simulate([]),
     rival ? simulate(rival.calls.map(simulatedAs(rival.from))) : Promise.resolve(undefined),
     client.estimateMaxPriorityFeePerGas(),
-    client.getFeeHistory({ blockCount: 2, rewardPercentiles: [TIP_PERCENTILE] }),
+    client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
     client.getTransactionCount({ address: from, blockTag: "latest" }),
     // Base no longer has a pending block, but a node may still count the transactions in its mempool here.
     client.getTransactionCount({ address: from, blockTag: "pending" }),
@@ -222,7 +230,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  const tip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
+  const tip = max(congested ? max(suggested, min(top, MAX_TIP)) : suggested, minTip);
   // The confirmed nonce, so that a pending transaction is replaced rather than queued behind. A replacement pays a
   // quarter more than the one this process sent, or twice the fees when the pending one's fees are unknown. The last
   // transaction counts as mined, whatever the node says, once its receipt was seen, once the Voter shows its votes (see

@@ -21,8 +21,10 @@ Wednesdays at 23:50 UTC.
   on a pool that has `V` votes from others and `usd` of rewards earn `usd × x / (V + x)`. Base makes five blocks a
   second, but the Voter takes one vote per conduit per second. So the job votes in each of the last two seconds, in the
   block before that second's last, so that a vote that lands a block late still counts. It reads the votes in the latest
-  block, and sends each vote about 0.4 s before its block's time. It only replaces the vote in force when the new one
-  earns at least $1 more. After the flip, it checks that its votes landed, then claims.
+  block, and sends each vote about 0.4 s before its block's time, with a tip of at least 0.02 gwei so that it goes ahead
+  of other voters in a crowded block. It only replaces the vote in force when the new one earns at least $1 more. After
+  the flip, it checks that its votes landed, logs where they landed and every vote cast in the last 10 seconds, then
+  claims.
 
 Rewards are this epoch's bribes and fees in pools with a live gauge, counted only in the tokens of `tokens.json` and
 priced in USD. A vote leaves out pools that would get under 0.1% of the votes, and keeps at most 40 pools, because each

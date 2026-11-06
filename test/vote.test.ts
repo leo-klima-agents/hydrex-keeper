@@ -5,6 +5,7 @@ import {
   decodeErrorResult,
   encodeFunctionData,
   encodeAbiParameters,
+  parseGwei,
   parseTransaction,
   toFunctionSelector,
   WaitForTransactionReceiptTimeoutError,
@@ -131,6 +132,8 @@ function fakeChain(b: Behaviour = {}) {
 }
 
 const vote = { pools: [POOL], weights: [100n] };
+// The max fee of a vote in the last blocks: twice the base fee plus its tip floor.
+const LAST_FEE = 2n * 450n + parseGwei("0.02");
 const far = Date.now() + 3_600_000;
 
 test("signs with the confirmed nonce and twice the next base fee plus the tip, then verifies at the receipt block", async () => {
@@ -152,6 +155,15 @@ test("after a congested block, the tip rises to what the top of it paid, up to 0
   const capped = fakeChain({ congested: true, topTip: 10n ** 18n });
   await castVote(capped.chain, signer, vote, false, far);
   assert.equal(parseTransaction(capped.sent[0]!).maxPriorityFeePerGas, 100_000_000n);
+});
+
+test("a vote in the last blocks tips at least 0.02 gwei, and more after a congested block", async () => {
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const calm = await prepareVote(fakeChain().chain, signer, vote, false, target);
+  assert.equal(calm.tx.maxPriorityFeePerGas, parseGwei("0.02"));
+  assert.equal(calm.tx.maxFeePerGas, 2n * 450n + parseGwei("0.02"));
+  const crowded = fakeChain({ congested: true, topTip: parseGwei("0.05") }).chain;
+  assert.equal((await prepareVote(crowded, signer, vote, false, target)).tx.maxPriorityFeePerGas, parseGwei("0.05"));
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {
@@ -218,9 +230,9 @@ test("once the Voter shows a later vote than the sent one was decided on, the no
   const first = await prepareVote(chain, signer, vote, false, { time: 1_790_812_797n, lastVoted: 100n });
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const next = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 1_790_812_797n });
-  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, 1_000n], "next nonce, no bump: the node lags");
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [4, LAST_FEE], "next nonce, no bump: the node lags");
   const still = await prepareVote(chain, signer, vote, false, { time: 1_790_812_799n, lastVoted: 100n });
-  assert.deepEqual([still.tx.nonce, still.tx.maxFeePerGas], [3, 1_250n], "not yet in a block: replaced");
+  assert.deepEqual([still.tx.nonce, still.tx.maxFeePerGas], [3, (LAST_FEE * 5n) / 4n], "not yet in a block: replaced");
   assert.equal(sent.length, 1);
 });
 
@@ -258,14 +270,14 @@ test("a nonce is taken once the keeper's nonce in the block being built is past 
 
 test("before the last blocks, the keeper must be able to pay for a vote twice; in them, once", async () => {
   const cost = 150_000n * 1_000n + 5_000n; // gas limit times max fee, plus the L1 fee
+  const lastCost = 150_000n * LAST_FEE + 5_000n; // a vote in the last blocks tips more
   const target = { time: 1_790_812_799n, lastVoted: 0n };
   const short = fakeChain({ balance: 2n * cost - 1n });
   await assert.rejects(castVote(short.chain, signer, vote, false, far), /fund the keeper: .* needs 300010000:/);
   assert.equal(short.sent.length, 0);
-  await prepareVote(short.chain, signer, vote, false, target);
-  await prepareVote(fakeChain({ balance: cost }).chain, signer, vote, false, target);
+  await prepareVote(fakeChain({ balance: lastCost }).chain, signer, vote, false, target);
   await assert.rejects(
-    prepareVote(fakeChain({ balance: cost - 1n }).chain, signer, vote, false, target),
+    prepareVote(fakeChain({ balance: lastCost - 1n }).chain, signer, vote, false, target),
     /fund the keeper/,
   );
 });
@@ -362,7 +374,7 @@ test("anyone may vote for the immutable conduit, so a later vote of it does not 
   await broadcastTx(chain, { ...first, signed: first.signed! }, far);
   const target = { time: 1_790_812_799n, lastVoted: 1_790_812_797n };
   const next = await prepareVote(chain, proposer, vote, false, target, sender);
-  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [3, 1_250n], "replaced, not queued behind");
+  assert.deepEqual([next.tx.nonce, next.tx.maxFeePerGas], [3, (LAST_FEE * 5n) / 4n], "replaced, not queued behind");
   markMined(chain, 3, proposer.address);
   const after = await prepareVote(chain, proposer, vote, false, target, sender);
   assert.equal(after.tx.nonce, 4, "its receipt still counts");
@@ -380,7 +392,7 @@ test("the immutable conduit's votes are prepared through a client of their own, 
   const next = await prepareVote(chain, proposer, vote, false, { ...target, time: 1_790_812_799n }, v2Sender(chain));
   assert.deepEqual(
     [next.tx.nonce, next.tx.maxFeePerGas],
-    [3, 1_250n],
+    [3, (LAST_FEE * 5n) / 4n],
     "the vote it sent is replaced, not queued behind",
   );
   await prepareVote(chain, signer, vote, false, target);

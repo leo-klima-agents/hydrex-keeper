@@ -6,6 +6,7 @@ import { lastBlockBefore, type Chain as Connection, type Client } from "../src/c
 import {
   keep,
   landed,
+  lastVotes,
   outcome,
   pick,
   race,
@@ -406,11 +407,24 @@ const timeOf = (n: bigint) => n / 5n;
 const [KLIMA, V2, POOL] = [addr(1), addr(2), addr(3)];
 let blockReads = 0;
 
+type Receipt = {
+  status: string;
+  blockNumber: bigint;
+  transactionIndex?: number;
+  from?: Address;
+  gasUsed?: bigint;
+  effectiveGasPrice?: bigint;
+};
+type Voted = { transactionHash: Hex; args: { voter: Address } };
+const BASE_FEE = 5_000_000n;
+
 /** For the first `behind` reads, the latest block is still before the flip. */
 function outcomeChain(
-  receipts: Record<Hex, { status: string; blockNumber: bigint }>,
+  receipts: Record<Hex, Receipt>,
   lastVoted: (conduit: string, block: bigint) => bigint,
   behind = 0,
+  events: Voted[] = [],
+  ranges: [bigint, bigint][] = [],
 ) {
   const client = {
     getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
@@ -418,10 +432,23 @@ function outcomeChain(
       if (!receipt) throw new TransactionReceiptNotFoundError({ hash });
       return { ...receipt, transactionHash: hash };
     },
+    getTransaction: async () => ({ gas: 9_000_000n }),
     getBlock: async (args?: { blockNumber?: bigint }) => {
       blockReads++;
       const number = args?.blockNumber ?? (behind-- > 0 ? LAST - 1n : LAST + 56n); // 11 s after the flip
-      return { number, timestamp: timeOf(number), timestampMs: `0x${(200n * number).toString(16)}` };
+      const timestampMs = `0x${(200n * number).toString(16)}`;
+      return {
+        number,
+        timestamp: timeOf(number),
+        timestampMs,
+        baseFeePerGas: BASE_FEE,
+        gasUsed: 12_000_000n,
+        gasLimit: 40_000_000n,
+      };
+    },
+    getContractEvents: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      ranges.push([fromBlock, toBlock]);
+      return events;
     },
     multicall: async ({
       contracts,
@@ -486,6 +513,92 @@ test("whether each conduit voted this epoch is read again while the node is behi
   await assert.rejects(lastBlockBefore(lagging(1).chain.client, FLIP), /not past/);
   assert.equal(await drive(t, outcome(lagging(2), FLIP, [], [KLIMA])), 0, "read at the third try");
   assert.equal(await drive(t, outcome(lagging(3), FLIP, [], [KLIMA])), 1, "unread");
+});
+
+/** The JSON lines logged while `act` runs. */
+async function logged(t: TestContext, act: () => Promise<unknown>) {
+  const write = t.mock.method(process.stdout, "write", () => true);
+  try {
+    await act();
+  } finally {
+    write.mock.restore();
+  }
+  return write.mock.calls.map((call) => JSON.parse(String(call.arguments[0])) as Record<string, unknown>);
+}
+
+test("each vote that landed is logged against the block it was sent for, when it was sent, and its block", async (t) => {
+  const vote = { pools: [POOL], weights: [1n] };
+  const hash: Hex = "0xaa";
+  const receipt = {
+    status: "success",
+    blockNumber: LAST - 2n,
+    transactionIndex: 3,
+    gasUsed: 6_000_000n,
+    effectiveGasPrice: BASE_FEE + 20_000_000n,
+  };
+  const run = outcomeChain({ [hash]: receipt }, () => timeOf(LAST));
+  const flipMs = Number(FLIP) * 1000;
+  const sender = klimaSender(run.chain);
+  const sent = [{ hash, vote, nonce: 1, sender, target: flipMs - 400, sentAt: flipMs - 840, gas: 9_000_000n }];
+  const lines = await logged(t, () => outcome(run, FLIP, sent, [KLIMA]));
+  const { msToFlip, msAfterTarget, msAfterSend, index, gasUsed, gasLimit, tip, blockGasUsed, blockGasLimit } =
+    lines.find((l) => l.message === "vote landed")!;
+  assert.deepEqual(
+    { msToFlip, msAfterTarget, msAfterSend, index, gasUsed, gasLimit, tip, blockGasUsed, blockGasLimit },
+    {
+      msToFlip: -600,
+      msAfterTarget: -200,
+      msAfterSend: 240,
+      index: 3,
+      gasUsed: "6000000",
+      gasLimit: "9000000",
+      tip: "20000000",
+      blockGasUsed: "12000000",
+      blockGasLimit: "40000000",
+    },
+  );
+});
+
+test("every vote of the last 10 s before the flip is logged, anyone's, in the order it landed", async (t) => {
+  const OTHER = addr(9);
+  const receipts: Record<Hex, Receipt> = {
+    "0x01": {
+      status: "success",
+      blockNumber: LAST - 3n,
+      transactionIndex: 7,
+      from: addr(10),
+      gasUsed: 4_000_000n,
+      effectiveGasPrice: BASE_FEE + 6_000_000n,
+    },
+    "0x02": {
+      status: "success",
+      blockNumber: LAST - 1n,
+      transactionIndex: 2,
+      from: addr(5),
+      gasUsed: 6_000_000n,
+      effectiveGasPrice: BASE_FEE + 20_000_000n,
+    },
+  };
+  const events: Voted[] = [
+    { transactionHash: "0x02", args: { voter: KLIMA } },
+    { transactionHash: "0x01", args: { voter: OTHER } },
+    { transactionHash: "0x01", args: { voter: OTHER } },
+  ];
+  const ranges: [bigint, bigint][] = [];
+  const run = outcomeChain(receipts, () => 0n, 0, events, ranges);
+  const lines = await logged(t, () => lastVotes(run, FLIP));
+  assert.deepEqual(ranges, [[LAST - 49n, LAST]], "the blocks of the last 10 s");
+  assert.deepEqual(
+    lines
+      .filter((l) => l.message === "vote before the flip")
+      .map(({ voter, ours, pools, msToFlip, index, tip }) => [voter, ours, pools, msToFlip, index, tip]),
+    [
+      [OTHER, false, 2, -800, 7, "6000000"],
+      [KLIMA, true, 1, -400, 2, "20000000"],
+    ],
+  );
+  const summary = lines.find((l) => l.message === "votes before the flip");
+  assert.deepEqual(summary, { severity: "INFO", message: "votes before the flip", seconds: "10", votes: 2, others: 1 });
 });
 
 test("a prepared vote is reused only for the same block, votes and rival, and the same last vote on chain", () => {
