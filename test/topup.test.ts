@@ -597,7 +597,7 @@ test("everything goes through the proposer: one that cannot pay tops up neither 
   assert.equal(ethOf(w, KEEPER), eth(0.0014));
 });
 
-/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight would be. */
+/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight is. */
 async function sentNotMined(chain: Chain, from: Address, nonce: number): Promise<void> {
   const { broadcast } = chain;
   chain.broadcast = (async () => {

@@ -21,7 +21,7 @@ const CONGESTED = 0.9; // in blocks this full, the builder orders by tip
 const TIP_PERCENTILE = 99;
 const MAX_TIP = parseGwei("0.1");
 const FEE_BLOCKS = 20; // four seconds of blocks
-const MAX_GAS = 16_777_216n; // Base's gas limit per transaction since its Azul upgrade
+const MAX_GAS = 16_777_216n; // Base's gas limit per transaction
 
 /** The vote was already sent, so retrying would send a second one. */
 export class VoteSent extends Error {}

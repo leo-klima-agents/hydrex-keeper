@@ -35,7 +35,7 @@ case "$FAKE_GCLOUD_SCENARIO" in
 esac
 
 job_json() {
-  if [ "$drift" = yes ]; then # an older version deployed this job and set VOTE_OFFSETS
+  if [ "$drift" = yes ]; then # a job that differs from the config: another service account, no retries, VOTE_OFFSETS
     sa=123456789-compute@developer.gserviceaccount.com retries=0
     env='{"name":"MODULE","value":"'$module'"},{"name":"KMS_KEY_VERSION","value":"'$key'"},{"name":"VOTE_OFFSETS","value":"86400"}'
   else

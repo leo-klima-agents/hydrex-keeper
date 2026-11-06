@@ -444,7 +444,7 @@ test("another conduit's vote is checked after the keeper's while that one may st
 });
 
 test("the immutable conduit's vote in force is the proposer's only if the conduit accepted it from the proposer in that second", async () => {
-  const VOTED = 1_790_812_000n; // timestamp of blocks 100 to 104, 200 ms apart as on Base since Denim
+  const VOTED = 1_790_812_000n; // timestamp of blocks 100 to 104, 200 ms apart as on Base
   type Filter = {
     address: Address;
     eventName: string;

@@ -22,15 +22,15 @@ export const CHUNK = 1_000; // calls per eth_call. publicnode accepts 1,132 and 
 export const HEDGE_DELAY_MS = 250; // a healthy node answers a read in about 125 ms
 const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
-export const BLOCK_MS = 200; // Base's block time since its Denim upgrade
+export const BLOCK_MS = 200; // Base's block time
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 
 export const now = () => BigInt(Math.floor(Date.now() / 1000));
 
 /**
- * A block's time in ms. Since Base's Denim upgrade, five blocks share each second of `timestamp`, and RPCs add the full
- * time as `timestampMs`, which viem passes on as it came.
+ * A block's time in ms. Five blocks share each second of `timestamp`, and RPCs give the full time as `timestampMs`,
+ * which viem passes on as it came.
  */
 export function msOf(block: object): number | undefined {
   const { timestampMs } = block as { timestampMs?: unknown };

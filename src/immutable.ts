@@ -116,7 +116,7 @@ export function decideV2(
     const values = candidates.map((c) => onchain.values.get(lower(c.pool)) ?? 0);
     const bar = onchain.current + MIN_GAIN + MARGIN;
     if (score(candidates, values, asVoted(x), power) < bar) {
-      // The replacement is no longer proportional, so it must gain as much as a last-block vote would.
+      // Unlike a proportional vote, the replacement must gain as much as a last-block vote would.
       x = waterFillAbove(candidates, power, values, bar, MAX_V2_POOLS, proportionally ? undefined : x);
       if (!x) return keep("no vote clears v2's check; keeping its vote", { bar });
       if (gain(candidates, x, power) <= MIN_GAIN_USD) {

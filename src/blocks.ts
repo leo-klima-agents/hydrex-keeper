@@ -13,8 +13,8 @@ const POLL_TIMEOUT_MS = 500;
 type Header = { number: bigint; time: number };
 
 /**
- * In ms. `seal` is how long after its time a block is first seen, at most 0, and `lead` how long before its block's time
- * a vote is sent.
+ * In ms. `seal` is how long after its time a block is first seen, at most 0, and `lead` how long before its block's
+ * time a vote is sent.
  */
 type Timing = { gap: number; seal: number; lead: number };
 
@@ -26,11 +26,11 @@ const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Learns block timing from polls of the latest block. Since Base's Denim upgrade, a block comes every 200 ms, five in
- * each second of `block.timestamp`. The Voter takes one vote per conduit per second, so a vote goes in each of the last
- * SECONDS seconds before the flip, in the block SLACK blocks before that second's last, so that a vote that lands a
- * block late still counts in that second. A vote is sent `lead` ms before its block's time, so that it reaches the
- * sequencer before that block's build starts, when the block before it is sealed.
+ * Learns block timing from polls of the latest block. Base makes a block every 200 ms, five in each second of
+ * `block.timestamp`. The Voter takes one vote per conduit per second, so a vote goes in each of the last SECONDS
+ * seconds before the flip, in the block SLACK blocks before that second's last, so that a vote that lands a block late
+ * still counts in that second. A vote is sent `lead` ms before its block's time, so that it reaches the sequencer
+ * before that block's build starts, when the block before it is sealed.
  */
 export class Blocks {
   #seen = new Map<bigint, Seen>();
@@ -88,7 +88,7 @@ function timingOf(seen: Map<bigint, Seen>): Timing {
   return { gap, seal, lead: gap - seal + SEND_MARGIN_MS };
 }
 
-/** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on the grid of `anchor`. */
+/** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on `anchor`'s grid. */
 function targets(flip: number, anchor: number, gap: number): number[] {
   return Array.from({ length: SECONDS }, (_, i) => {
     const end = flip - (SECONDS - 1 - i) * 1000;

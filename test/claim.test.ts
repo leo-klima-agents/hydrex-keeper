@@ -652,7 +652,7 @@ test("a contract still owing after a claim, as for more than 50 epochs, is claim
   assert.ok(first!.fees.includes(I1) && second!.fees.includes(I1) && second!.tokens.includes(USDC));
 });
 
-/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight would be. */
+/** Leaves a transaction of `from` at `nonce` that this run sent and no block holds yet, as a vote in flight is. */
 async function sentNotMined(chain: Chain, from: Address, nonce: number): Promise<void> {
   const { broadcast } = chain;
   chain.broadcast = (async () => {

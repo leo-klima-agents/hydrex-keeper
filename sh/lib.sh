@@ -221,8 +221,8 @@ rpc() {
   die "$1 failed on every public Base node"
 }
 
-# Older versions named their scheduler jobs $JOB-*. Call this as x=$(stale_schedulers), so that a failed listing
-# stops the script.
+# Scheduler jobs named $JOB-* are stale: deploy.sh deletes them, and check.sh fails on them. Call this as
+# x=$(stale_schedulers), so that a failed listing stops the script.
 stale_schedulers() {
   stale_list=$(gcloud scheduler jobs list --location="$REGION" --project="$KEEPER_PROJECT" --format=json) || die "cannot list scheduler jobs"
   require_json "$stale_list" "scheduler job list"

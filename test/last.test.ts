@@ -29,8 +29,8 @@ const numberOf = (time: number) => 1_000_000 + (time - flip) / 200;
 type Chain = { dead?: number; frozen?: number; past?: number; seal?: number };
 
 /**
- * Fakes Base's timing since Denim: a block every 200 ms, first seen `seal` ms after its time. Polls take 40 ms. They
- * hang from `dead`, stop advancing from `frozen`, and see a block after the flip from `past`.
+ * Fakes Base's timing: a block every 200 ms, first seen `seal` ms after its time. Polls take 40 ms. They hang from
+ * `dead`, stop advancing from `frozen`, and see a block after the flip from `past`.
  */
 function client({ dead = Infinity, frozen = Infinity, past = Infinity, seal = 0 }: Chain): Client {
   const latest = (at: number) => {
@@ -400,8 +400,8 @@ test("an immutable conduit's vote is known to be in once the Voter shows its vot
   assert.deepEqual(landed(state([0n, 0n]), [{ ...klima, votes: undefined }]), [], "not the immutable conduit's");
 });
 
-// As on Base since Denim, block n comes at 200n ms, so five blocks share each second and the last one before the flip
-// is 200 ms before it.
+// As on Base, block n comes at 200n ms, so five blocks share each second and the last one before the flip is 200 ms
+// before it.
 const FLIP = 1_790_812_800n;
 const LAST = FLIP * 5n - 1n;
 const timeOf = (n: bigint) => n / 5n;
@@ -491,7 +491,7 @@ test("each conduit's vote this epoch is read at the last block before the flip, 
   const [klimaHash, v2Hash]: [Hex, Hex] = ["0xaa", "0xbb"];
   const run = outcomeChain(
     { [klimaHash]: { status: "success", blockNumber: LAST }, [v2Hash]: { status: "reverted", blockNumber: LAST - 1n } },
-    // Someone else voted for the immutable conduit two blocks before ours, in the same second, and again after the flip.
+    // Someone else voted for the immutable conduit two blocks before ours, in its second, and again after the flip.
     (conduit, block) => (conduit === V2 ? (block > LAST ? FLIP + 1n : timeOf(LAST - 3n)) : timeOf(LAST)),
   );
   const sent = [
