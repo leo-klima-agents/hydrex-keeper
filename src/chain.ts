@@ -186,35 +186,93 @@ export const byConduit = <T>(make: (name: ConduitName) => T): ByConduit<T> => ({
 
 export const otherOf = (name: ConduitName): ConduitName => (name === "klima" ? "immutable" : "klima");
 
-/**
- * A conduit, and the key that votes and claims for it. `role` is the key's role on chain: the Klima conduit's Safe
- * module takes votes and claims from its KEEPER, and the immutable conduit from any proposer. `to` and `abi` are where
- * those transactions go: the module, or the conduit itself.
- */
-export type Conduit = {
-  name: ConduitName;
+/** What sets a conduit apart, from its contracts. */
+export type Traits = {
   /** For logs and errors: "the Klima conduit", "the immutable conduit". */
   label: string;
-  /** What the Voter records the conduit's votes for. */
-  address: Address;
+  /** Its key's role on chain. */
   role: "keeper" | "proposer";
-  /** The key's address. */
-  from: Address;
-  to: Address;
+  /** The conduit's ABI, for calls to its address. */
   abi: Abi;
-  /** Anyone can vote for an open conduit, so a vote in force may not be the key's. */
+  /** The ABI of `to`, where its key's votes and claims go. */
+  toAbi: Abi;
+  /** Anyone can vote for an open conduit, so a vote in force may not be its key's. */
   open: boolean;
   /**
-   * The conduit's own client for its transactions. Calls sent together through one client share a JSON-RPC batch, which
-   * only answers when its slowest call does.
+   * Whether it checks votes on chain: it only takes a vote whose score, counted in the tokens it prices with, beats the
+   * vote in force.
    */
-  client: Client;
-  /**
-   * For a conduit that checks votes on chain: the tokens it prices with. It only takes a vote whose score in them beats
-   * the vote in force.
-   */
-  priced?: Address[] | undefined;
+  checks: boolean;
+  /** The most pools in a vote. */
+  maxPools: number;
+  /** What it does with the rewards it claims. */
+  payout: "retire" | "as is";
+  /** Rough gas of a claim before its swaps and pairs. The simulation has the final say. */
+  claimGas: bigint;
+  /** Owners whose veNFTs it doesn't claim for, by lowercase address. */
+  excludedOwners: ReadonlyMap<string, string>;
+  /** Whether its treasury pays for both keys' ETH. One conduit's does. */
+  fundsKeys: boolean;
 };
+
+export const TRAITS: ByConduit<Traits> = {
+  klima: {
+    label: "the Klima conduit",
+    role: "keeper", // its Safe module's KEEPER
+    abi: klimaAbi,
+    toAbi: klimaModuleAbi,
+    open: false,
+    checks: false,
+    maxPools: 40, // more pools could go over Base's gas limit per transaction
+    payout: "retire", // swaps rewards to kVCM, retires part of it and pays out the rest
+    claimGas: 1_300_000n,
+    excludedOwners: new Map([["0xa79cd47655156b299762dfe92a67980805ce5a31", "Klima Foundation"]]),
+    fundsKeys: false,
+  },
+  immutable: {
+    label: "the immutable conduit",
+    role: "proposer", // anyone can propose its vote
+    abi: immutableAbi,
+    toAbi: immutableAbi,
+    open: true,
+    checks: true,
+    maxPools: 20, // the conduit's MAX_POOLS
+    payout: "as is", // minus its fee
+    claimGas: 400_000n,
+    excludedOwners: new Map(),
+    fundsKeys: true,
+  },
+};
+
+/** Where a conduit is, and the key that votes and claims for it. */
+export type Place = {
+  /** What the Voter records the conduit's votes for. */
+  address: Address;
+  /** The key's address. */
+  from: Address;
+  /** Where the key's votes and claims go: the Klima conduit's Safe module, or the immutable conduit itself. */
+  to: Address;
+  /** For a conduit that checks votes on chain: the tokens it prices with. Empty for the others. */
+  priced: Address[];
+};
+
+export type Conduit = Traits &
+  Place & {
+    name: ConduitName;
+    /**
+     * The conduit's own client for its transactions. Calls sent together through one client share a JSON-RPC batch,
+     * which only answers when its slowest call does.
+     */
+    client: Client;
+  };
+
+/** The conduit `name` at `place`, with its traits. */
+export const conduitOf = (name: ConduitName, place: Place, client: Client): Conduit => ({
+  name,
+  ...TRAITS[name],
+  ...place,
+  client,
+});
 
 export type Chain = {
   /** For reads. */
@@ -231,11 +289,11 @@ export type Chain = {
 /** Where to find each conduit: the Klima conduit through its Safe module, the immutable conduit directly. */
 export type Settings = { klima: { module: Address }; immutable: { conduit: Address; proposer: Address } };
 
-const MAX_PRICED_TOKENS = 4; // the immutable conduit's limit
+const MAX_PRICED_TOKENS = 4; // a checking conduit's limit
 
 export async function connect(settings: Settings, rpcUrls: string[]): Promise<Chain> {
   const client = makeClient(hedged(rpcUrls));
-  const { voter, ve, conduits } = await readAddresses(client, settings);
+  const { voter, ve, places } = await readAddresses(client, settings);
   return {
     client,
     bulk: makeClient(bulkTransport(rpcUrls)),
@@ -243,71 +301,60 @@ export async function connect(settings: Settings, rpcUrls: string[]): Promise<Ch
     known: finder(rpcUrls),
     voter,
     ve,
-    conduits: byConduit((name) => ({ ...conduits[name], client: makeClient(hedged(rpcUrls)) })),
+    conduits: byConduit((name) => conduitOf(name, places[name], makeClient(hedged(rpcUrls)))),
   };
 }
 
 /**
- * Both conduits and their keys. The Klima conduit and its keeper are read from its Safe module, and the immutable
- * conduit's priced tokens from it. Both conduits must use the same Voter and VotingEscrow, and the two keys must differ:
- * they send at the same time, and their nonces are tracked separately.
+ * Where both conduits and their keys are. The Klima conduit and its keeper are read from its Safe module, and a
+ * checking conduit's priced tokens from it. Both conduits must use the same Voter and VotingEscrow, and the two keys must
+ * differ: they send at the same time, and their nonces are tracked separately.
  */
-export async function readAddresses(client: Client, { klima, immutable }: Settings) {
+export async function readAddresses(
+  client: Client,
+  { klima, immutable }: Settings,
+): Promise<{ voter: Address; ve: Address; places: ByConduit<Place> }> {
   const [klimaConduit, keeper] = (await readMany<Address>(client, [
     call(klima.module, klimaModuleAbi, "CONDUIT"),
     call(klima.module, klimaModuleAbi, "KEEPER"),
   ])) as [Address, Address];
   if (isAddressEqual(immutable.proposer, keeper)) {
-    throw new Error(
-      `the Klima conduit's keeper is the immutable conduit's proposer, ${keeper}: each needs its own key`,
-    );
+    throw new Error(`IMMUTABLE_PROPOSER is the KEEPER of KLIMA_MODULE, ${keeper}: each conduit needs a key of its own`);
   }
-  const conduits: ByConduit<Omit<Conduit, "client" | "priced">> = {
-    klima: {
-      name: "klima",
-      label: "the Klima conduit",
-      address: klimaConduit,
-      role: "keeper",
-      from: keeper,
-      to: klima.module,
-      abi: klimaModuleAbi,
-      open: false,
-    },
-    immutable: {
-      name: "immutable",
-      label: "the immutable conduit",
-      address: immutable.conduit,
-      role: "proposer",
-      from: immutable.proposer,
-      to: immutable.conduit,
-      abi: immutableAbi,
-      open: true,
-    },
+  const located: ByConduit<Omit<Place, "priced">> = {
+    klima: { address: klimaConduit, from: keeper, to: klima.module },
+    immutable: { address: immutable.conduit, from: immutable.proposer, to: immutable.conduit },
   };
-  const abis: ByConduit<readonly unknown[]> = { klima: klimaAbi, immutable: immutableAbi };
-  const usedBy = (name: ConduitName) => [
-    call(conduits[name].address, abis[name], "voter"),
-    call(conduits[name].address, abis[name], "veToken"),
-  ];
-  const pricedCalls = Array.from({ length: MAX_PRICED_TOKENS }, (_, i) =>
-    call(immutable.conduit, immutableAbi, "pricedTokens", [BigInt(i)]),
+  const conduitCall = (name: ConduitName, functionName: string, args?: readonly unknown[]) =>
+    call(located[name].address, TRAITS[name].abi, functionName, args);
+  const checking = CONDUITS.filter((name) => TRAITS[name].checks);
+  const pricedCalls = checking.flatMap((name) =>
+    Array.from({ length: MAX_PRICED_TOKENS }, (_, i) => conduitCall(name, "pricedTokens", [BigInt(i)])),
   );
   const [used, entries] = await Promise.all([
-    readMany<Address>(client, CONDUITS.flatMap(usedBy)),
+    readMany<Address>(
+      client,
+      CONDUITS.flatMap((name) => [conduitCall(name, "voter"), conduitCall(name, "veToken")]),
+    ),
     readEach<readonly [Address, ...unknown[]]>(client, pricedCalls),
   ]);
   const [voter, ve] = used as [Address, Address];
   for (const [i, name] of CONDUITS.entries()) {
     const [otherVoter, otherVe] = used.slice(2 * i) as [Address, Address];
     if (!isAddressEqual(otherVoter, voter) || !isAddressEqual(otherVe, ve)) {
-      const { address } = conduits[name];
+      const { address } = located[name];
       throw new Error(`${address} uses Voter ${otherVoter} and VotingEscrow ${otherVe}, not ${voter} and ${ve}`);
     }
   }
-  const priced = entries.flatMap((entry) => (entry ? [entry[0]] : []));
-  if (priced.length === 0) throw new Error(`${immutable.conduit} prices no token`);
-  const withPriced: ByConduit<Omit<Conduit, "client">> = { ...conduits, immutable: { ...conduits.immutable, priced } };
-  return { voter, ve, conduits: withPriced };
+  const places = byConduit((name): Place => {
+    const k = checking.indexOf(name);
+    if (k < 0) return { ...located[name], priced: [] };
+    const own = entries.slice(k * MAX_PRICED_TOKENS, (k + 1) * MAX_PRICED_TOKENS);
+    const priced = own.flatMap((entry) => (entry ? [entry[0]] : []));
+    if (priced.length === 0) throw new Error(`${located[name].address} prices no token`);
+    return { ...located[name], priced };
+  });
+  return { voter, ve, places };
 }
 
 export type Call = { address: Address; abi: readonly unknown[]; functionName: string; args?: readonly unknown[] };

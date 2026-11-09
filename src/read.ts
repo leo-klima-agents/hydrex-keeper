@@ -154,7 +154,7 @@ export async function readVotes(chain: Chain, pools: PoolRewards[]): Promise<Sta
     voterCall(chain, "weights", [pool]),
     ...CONDUITS.map((name) => voterCall(chain, "votes", [chain.conduits[name].address, pool])),
   ];
-  const checking = CONDUITS.filter((name) => chain.conduits[name].priced);
+  const checking = CONDUITS.filter((name) => chain.conduits[name].checks);
   const scoreOf = (name: ConduitName) => {
     const { address, abi } = chain.conduits[name];
     return call(address, abi, "currentScore");

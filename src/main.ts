@@ -1,22 +1,18 @@
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { connect, CONDUITS, hostOf, now, otherOf, byConduit, type Conduit, type ByConduit } from "./chain.ts";
+import { byConduit, connect, hostOf, now, type Conduit } from "./chain.ts";
 import { claims } from "./claim.ts";
 import { configOf } from "./config.ts";
 import { kmsAccount } from "./kms.ts";
 import { lastBlocks } from "./last.ts";
 import { errorMessage, log } from "./log.ts";
-import { pass, perAttempt, readDayBefore, votedDayBefore, type Run } from "./pass.ts";
+import { dayBefore, votingOf, type Run } from "./pass.ts";
 import { alchemy, coingecko, combined, defillama, priceFeed } from "./prices.ts";
 import { assertFresh, readEpoch } from "./read.ts";
 import { DAY, HORIZON, lastFlip, task } from "./schedule.ts";
-import type { Vote } from "./select.ts";
 import { TOP_UP_MS, topUp } from "./topup.ts";
-import { pendingVote, VoteSent, type Rival } from "./vote.ts";
 import { parseWhitelist } from "./whitelist.ts";
 
-const ATTEMPTS = 3;
-const RETRY_DELAY_MS = 5_000;
 const LAST_MARGIN_MS = 2_000; // no attempt starts this close to the flip
 
 async function main(): Promise<number> {
@@ -66,11 +62,7 @@ async function main(): Promise<number> {
   const topUpFailures = what === "day before" ? await topUp(run, Date.now() + TOP_UP_MS) : 0;
   assertFresh(epoch);
   const { flip } = epoch;
-  const voting = byConduit((name) => epoch.votes[name].power > 0n);
-  for (const name of CONDUITS) {
-    const { label, address } = conduits[name];
-    if (!voting[name]) log.warning(`${label} has no voting power this epoch: not voting for it`, { conduit: address });
-  }
+  const voting = votingOf(chain, epoch);
   if (what === "last blocks") {
     const failures = await lastBlocks(run, flip, voting);
     const claimFailures = await claims(run, flip, Number(flip + HORIZON) * 1000);
@@ -80,47 +72,8 @@ async function main(): Promise<number> {
   const until = Number(flip) * 1000 - LAST_MARGIN_MS;
   log.info("pass", { flip, secondsToFlip: flip - now() });
   // A retry skips a conduit whose day-before vote is already on chain. The first attempt always votes.
-  const voted = async (conduit: Conduit) => recheck && (await votedDayBefore(chain, conduit, flip));
-  const reads = perAttempt(() => readDayBefore(run, until));
-  // A conduit that checks votes on chain votes after the other's vote is in or has failed, so that its check counts the
-  // votes that one moved, and its vote is checked after that one too, which may still be pending. Each conduit retries
-  // on its own, and neither depends on the other.
-  const passed: Partial<ByConduit<Vote>> = {};
-  const rivalOf = async ({ name, priced }: Conduit): Promise<Rival | undefined> => {
-    if (!priced) return undefined;
-    const other = conduits[otherOf(name)];
-    const vote = dryRun ? passed[other.name] : await pendingVote(chain, other);
-    return vote && { conduit: other, vote };
-  };
-  const order = [...CONDUITS].sort((a, b) => Number(!!conduits[a].priced) - Number(!!conduits[b].priced));
-  let failures = topUpFailures;
-  for (const name of order) {
-    const conduit = conduits[name];
-    const attempt = async (n: number) => {
-      if (await voted(conduit)) return;
-      const vote = await pass(run, conduit, await reads(n), until, await rivalOf(conduit));
-      if (vote) passed[name] = vote;
-    };
-    if (voting[name] && !(await attempts(`${name} pass`, attempt, until))) failures++;
-  }
-  return failures > 0 ? 1 : 0;
-}
-
-async function attempts(name: string, pass: (attempt: number) => Promise<void>, until: number): Promise<boolean> {
-  for (let attempt = 1; ; attempt++) {
-    const started = Date.now();
-    try {
-      await pass(attempt);
-      log.info(`${name} done`, { ms: Date.now() - started });
-      return true;
-    } catch (error) {
-      const ms = Date.now() - started;
-      const retry = attempt < ATTEMPTS && !(error instanceof VoteSent) && Date.now() + RETRY_DELAY_MS < until;
-      log.error(`${name} failed${retry ? ", retrying" : ""}`, { attempt, ms, error: errorMessage(error) });
-      if (!retry) return false;
-      await sleep(RETRY_DELAY_MS);
-    }
-  }
+  const failures = await dayBefore(run, flip, voting, { recheck, until });
+  return topUpFailures + failures > 0 ? 1 : 0;
 }
 
 main().then(

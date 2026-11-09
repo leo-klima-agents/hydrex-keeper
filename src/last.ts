@@ -27,7 +27,7 @@ import {
   type ConduitName,
   type ByConduit,
 } from "./chain.ts";
-import { onchainOf, pricedPools, readValues, unscored, type Onchain } from "./check.ts";
+import { onchainOf, pricedPools, readValues, unscored, type Onchain } from "./onchain.ts";
 import { decide, type Decision, type Planned } from "./decide.ts";
 import { errorKind, errorMessage, log, warnOnce } from "./log.ts";
 import { tokensOf, valueRewards, type Run } from "./pass.ts";
@@ -183,7 +183,10 @@ export type Together = ByConduit<
   }
 >;
 
-/** For each conduit: whether it votes, whether it checks votes on chain, and whether its plans succeed. */
+/**
+ * For each conduit: whether it votes, whether it checks votes on chain, and, for one that does, whether its plans
+ * succeed.
+ */
 export type Roles = ByConduit<{ voting: boolean; checks: boolean; trusted: boolean }>;
 
 /**
@@ -410,12 +413,12 @@ export function lanesOf(planning: Planning): ByConduit<Lane<Plan>> {
     const options = { target, rival, fees };
     const signer = signers[conduit.name];
     const prepared = await preparing(key, () => prepareWith(chain, conduit, signer, vote, dryRun, options));
-    return { ...base, prepared, ...(conduit.priced ? { rival: rival?.vote ?? null } : {}) };
+    return { ...base, prepared, ...(conduit.checks ? { rival: rival?.vote ?? null } : {}) };
   };
 
   const warnUnscored = byConduit((name) => unscored(conduits[name]));
-  // Whether a conduit's last plan failed or can't be sent, so that the other conduit counts its votes in force rather
-  // than a vote that won't go out.
+  // Whether a checking conduit's last plan failed or can't be sent, so that the other conduit counts its votes in force
+  // rather than a vote that won't go out.
   const failing = byConduit(() => false);
   const plain = byConduit(() => memo<Decision>());
   const decided = memo<Together>();
@@ -435,10 +438,11 @@ export function lanesOf(planning: Planning): ByConduit<Lane<Plan>> {
     }
     const roles = byConduit((name) => ({
       voting: voting[name],
-      checks: conduits[name].priced !== undefined,
+      checks: conduits[name].checks,
       trusted: !failing[name],
     }));
-    const trusted = CONDUITS.map((name) => roles[name].trusted);
+    // Only whether a checking conduit's plans succeed changes the decisions.
+    const trusted = CONDUITS.filter((name) => roles[name].checks).map((name) => roles[name].trusted);
     return decided(`${key}|${versions.join()}|${time}|${trusted.join()}`, () =>
       decideTogether(state, time, usd, onchain, roles),
     );
@@ -448,7 +452,7 @@ export function lanesOf(planning: Planning): ByConduit<Lane<Plan>> {
     const conduit = conduits[name];
     return {
       name,
-      checks: conduit.priced !== undefined,
+      checks: conduit.checks,
       plan: async () => {
         try {
           const snapshot = planning.snapshot();
@@ -515,12 +519,11 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
   const values: Partial<ByConduit<(key: number) => Promise<Values | undefined>>> = {};
   for (const name of CONDUITS) {
     const conduit = conduits[name];
-    const { priced: tokens } = conduit;
-    if (!tokens) continue;
+    if (!conduit.checks) continue;
     const valuesUnread = warnOnce(`${conduit.label}'s values unread; its simulation checks the vote`, {
       conduit: conduit.address,
     });
-    values[name] = refreshed(() => readValues(conduit, chain.bulk, pricedPools(rewards, tokens)), valuesUnread);
+    values[name] = refreshed(() => readValues(conduit, chain.bulk, pricedPools(rewards, conduit.priced)), valuesUnread);
   }
   const lanesByName = lanesOf({ chain, voting, dryRun, signers, usd: () => usd, snapshot: votesNow, values, sent });
   const lanes = CONDUITS.filter((name) => voting[name]).map((name) => lanesByName[name]);
@@ -601,7 +604,7 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
     );
   };
   // A checking conduit's vote is sent first, so that at equal tips it reaches the builder first.
-  const order = [...CONDUITS].sort((a, b) => Number(!!conduits[b].priced) - Number(!!conduits[a].priced));
+  const order = [...CONDUITS].sort((a, b) => Number(conduits[b].checks) - Number(conduits[a].checks));
   const send = (time: number) => {
     const at = { block: time / 1000, secondsToFlip: (flipMs - Date.now()) / 1000 };
     const voters = byConduit((name) => (voting[name] ? lanesByName[name] : undefined));

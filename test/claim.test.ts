@@ -20,16 +20,8 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { klimaAbi, immutableAbi, klimaModuleAbi, veAbi } from "../src/abi.ts";
-import type { Chain, Client } from "../src/chain.ts";
-import {
-  claims,
-  EXCLUDED_OWNERS,
-  MAX_GAS_SHARE,
-  MIN_CLAIM_USD,
-  planClaim,
-  worthClaiming,
-  type Pair,
-} from "../src/claim.ts";
+import { TRAITS, type Chain, type Client } from "../src/chain.ts";
+import { claims, MAX_GAS_SHARE, MIN_CLAIM_USD, planClaim, worthClaiming, type Pair } from "../src/claim.ts";
 import { BadSwap, SwapRefused, type Swapper } from "../src/kyber.ts";
 import type { Run } from "../src/pass.ts";
 import { conduitsOf, sentNotMined } from "./helpers.ts";
@@ -547,8 +539,8 @@ test("claims each delegator's most valuable rewards, swapped to kVCM, and retire
 });
 
 test("the Klima Foundation's veNFTs are excluded from the Klima conduit's claims, and nobody's from the other's", () => {
-  assert.equal(EXCLUDED_OWNERS.klima.get(FOUNDATION.toLowerCase()), "Klima Foundation");
-  assert.equal(EXCLUDED_OWNERS.immutable.size, 0);
+  assert.equal(TRAITS.klima.excludedOwners.get(FOUNDATION.toLowerCase()), "Klima Foundation");
+  assert.equal(TRAITS.immutable.excludedOwners.size, 0);
 });
 
 test("the immutable conduit's delegators are claimed for too, by the proposer, Klima Foundation included", async () => {

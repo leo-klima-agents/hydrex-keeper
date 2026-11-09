@@ -2,9 +2,27 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { getAddress, type Address } from "viem";
 import type { Chain, Client } from "../src/chain.ts";
-import { perAttempt, valueRewards, votedDayBefore, type Run } from "../src/pass.ts";
+import {
+  dayBefore,
+  pass,
+  perAttempt,
+  valueRewards,
+  votedDayBefore,
+  votingOf,
+  type DayBefore,
+  type Run,
+} from "../src/pass.ts";
+import type { Epoch } from "../src/read.ts";
 import { DAY, HORIZON } from "../src/schedule.ts";
-import { conduitsOf, logged } from "./helpers.ts";
+import type { Vote } from "../src/select.ts";
+import { conduitsOf, logged, type Places } from "./helpers.ts";
+
+const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
+const FLIP = 1_790_812_800n;
+const PLACES: Places = {
+  klima: { address: addr(1), from: addr(6), module: addr(7) },
+  immutable: { address: addr(2), from: addr(3) },
+};
 
 test("the day-before reads are shared within a round of attempts, and read again for a retry or after a failure", async () => {
   let reads = 0;
@@ -45,8 +63,7 @@ test("each pool is logged with its rewards, its weight and each conduit's votes"
 });
 
 test("a conduit's vote of a day before is in if the Voter shows one now, and for the immutable conduit, the proposer's", async () => {
-  const flip = 1_790_812_800n;
-  const addr = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as Address;
+  const flip = FLIP;
   const [KLIMA, IMMUTABLE, PROPOSER, OTHER] = [addr(1), addr(2), addr(3), addr(4)];
   const lastVoted = new Map<Address, bigint>();
   let proposer = PROPOSER;
@@ -97,4 +114,111 @@ test("a conduit's vote of a day before is in if the Voter shows one now, and for
   lastVoted.set(IMMUTABLE, flip - DAY + 300n);
   proposer = OTHER;
   assert.equal(await votedDayBefore(chain, immutable, flip), false, "another's vote since, read when asked");
+});
+
+/** Both conduits on a chain that nothing is read from, and a pass that records what it was given. */
+function dayBeforeOn(fails: Partial<Record<string, boolean>> = {}) {
+  const chain = { conduits: conduitsOf(PLACES, {} as Client) } as unknown as Chain;
+  const run = { chain, dryRun: true } as unknown as Run;
+  const passes: { name: string; read: DayBefore; rival: Vote | undefined }[] = [];
+  const votes = { klima: { pools: [addr(20)], weights: [1n] }, immutable: { pools: [addr(21)], weights: [1n] } };
+  const fakePass = (async (_run, conduit, read, _until, rival) => {
+    passes.push({ name: conduit.name, read, rival: rival?.vote });
+    if (fails[conduit.name]) throw new Error(`${conduit.name} reverted`);
+    return votes[conduit.name];
+  }) as typeof pass;
+  let reads = 0;
+  const read = perAttempt(async (): Promise<DayBefore> => ({ pools: [], usd: [++reads] }));
+  // Too close for a retry.
+  const options = { recheck: false, until: Date.now() + 1_000, read, pass: fakePass };
+  return { chain, run, passes, votes, options };
+}
+
+const epochWith = (klima: bigint, immutable: bigint) =>
+  ({
+    votes: {
+      klima: { power: klima, lastVoted: 0n, votedThisEpoch: false },
+      immutable: { power: immutable, lastVoted: 0n, votedThisEpoch: false },
+    },
+  }) as unknown as Epoch;
+
+test("a day before, the conduit that checks votes on chain votes after the other, and is checked after its vote", async (t) => {
+  const { chain, run, passes, votes, options } = dayBeforeOn();
+  let failures = -1;
+  await logged(t, async () => (failures = await dayBefore(run, FLIP, votingOf(chain, epochWith(1n, 1n)), options)));
+  assert.equal(failures, 0);
+  assert.deepEqual(
+    passes.map(({ name, rival }) => [name, rival]),
+    [
+      ["klima", undefined],
+      ["immutable", votes.klima],
+    ],
+  );
+  assert.equal(passes[0]!.read, passes[1]!.read, "one read for both");
+});
+
+test("a conduit without voting power is only warned about, and the other votes", async (t) => {
+  const { chain, run, passes, options } = dayBeforeOn();
+  let failures = -1;
+  const lines = await logged(t, async () => {
+    const voting = votingOf(chain, epochWith(0n, 1n));
+    assert.deepEqual(voting, { klima: false, immutable: true });
+    failures = await dayBefore(run, FLIP, voting, options);
+  });
+  assert.equal(failures, 0, "no failure");
+  assert.deepEqual(
+    passes.map(({ name, rival }) => [name, rival]),
+    [["immutable", undefined]],
+  );
+  const warnings = lines.filter((l) => l.severity === "WARNING");
+  assert.deepEqual(
+    warnings.map(({ message, conduit }) => [message, conduit]),
+    [["the Klima conduit has no voting power this epoch: not voting for it", PLACES.klima.address]],
+  );
+});
+
+test("a conduit whose day-before vote fails fails the run, and the other still votes, alone", async (t) => {
+  const { chain, run, passes, options } = dayBeforeOn({ klima: true });
+  let failures = -1;
+  const lines = await logged(
+    t,
+    async () => (failures = await dayBefore(run, FLIP, votingOf(chain, epochWith(1n, 1n)), options)),
+  );
+  assert.equal(failures, 1);
+  assert.deepEqual(
+    passes.map(({ name, rival }) => [name, rival]),
+    [
+      ["klima", undefined],
+      ["immutable", undefined],
+    ],
+  );
+  assert.deepEqual(
+    lines.filter((l) => l.severity === "ERROR").map((l) => [l.message, l.error]),
+    [["klima pass failed", "Error: klima reverted"]],
+  );
+});
+
+test("a day before, a conduit without a check votes from the rewards alone, and one with a check reads the votes", async (t) => {
+  let reads = 0;
+  const client = {
+    multicall: async () => {
+      reads++;
+      throw new Error("votes unread");
+    },
+    getBlock: async () => {
+      throw new Error("prepared");
+    },
+  } as unknown as Client;
+  const chain = { client, bulk: client, voter: addr(9), ve: addr(8), conduits: conduitsOf(PLACES, client) };
+  const run = { chain, dryRun: true, signers: { klima: undefined, immutable: undefined } } as unknown as Run;
+  const read: DayBefore = { pools: [addr(20), addr(21)].map((pool) => ({ pool, rewards: [] })), usd: [300, 100] };
+  const until = Date.now() + 60_000;
+  const lines = await logged(t, () => assert.rejects(pass(run, chain.conduits.klima, read, until), /prepared/));
+  assert.equal(reads, 0, "no votes read");
+  assert.deepEqual(lines.find((l) => l.message === "vote")?.plan, [
+    { pool: addr(20), share: 75 },
+    { pool: addr(21), share: 25 },
+  ]);
+  await logged(t, () => assert.rejects(pass(run, chain.conduits.immutable, read, until), /votes unread/));
+  assert.ok(reads > 0, "the votes its check counts");
 });

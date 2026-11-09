@@ -3,8 +3,8 @@ import { test } from "node:test";
 import type { Address } from "viem";
 import { immutableAbi } from "../src/abi.ts";
 import type { Client, Conduit } from "../src/chain.ts";
-import { pricedPools, readValues, type Onchain } from "../src/check.ts";
-import { candidatesFor, decide, votesOf } from "../src/decide.ts";
+import { pricedPools, readValues, type Onchain } from "../src/onchain.ts";
+import { candidatesFor, decide, proportionalVote, votesOf } from "../src/decide.ts";
 import type { State } from "../src/read.ts";
 import { score } from "../src/select.ts";
 
@@ -201,4 +201,18 @@ test("the conduit's values of pools are read a few heavy calls at a time", async
   assert.equal(values.size, 167);
   assert.equal(values.get(addr(266)), 266, "in USD");
   assert.equal(most, 3, "7 calls of 25 pools, 3 at once");
+});
+
+test("a day before, a conduit without a check votes in proportion to rewards, from the rewards alone", () => {
+  const pools = [A, B, C].map((pool) => ({ pool }));
+  const { vote, note, summary } = proportionalVote("klima", pools, [300, 100, 0]);
+  assert.deepEqual(vote, { pools: [A, B], weights: [7_500n, 2_500n] });
+  assert.equal(note, "");
+  assert.deepEqual(summary, {
+    plan: [
+      { pool: A, share: 75 },
+      { pool: B, share: 25 },
+    ],
+  });
+  assert.equal(proportionalVote("klima", pools, [0, 0, 0]).vote, null, "no pool pays anything");
 });

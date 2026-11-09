@@ -3,11 +3,12 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { keccak256, type Address, type Hex } from "viem";
+import { keccak256, type Abi, type Address, type Hex } from "viem";
 import { base } from "viem/chains";
 import {
   broadcaster,
   CHUNK,
+  CONDUITS,
   finder,
   HEDGE_DELAY_MS,
   hedged,
@@ -16,6 +17,7 @@ import {
   lastBlockBefore,
   readAddresses,
   readMany,
+  TRAITS,
   type Call,
   type Client,
 } from "../src/chain.ts";
@@ -299,34 +301,39 @@ test("both conduits are read once their keys are known to differ, and must share
   };
   const settings = (proposer: Address) => ({ klima: { module: MODULE }, immutable: { conduit: IMMUTABLE, proposer } });
   const ok = clientOf(VOTER, 2);
-  const { voter, ve, conduits } = await readAddresses(ok.client, settings(PROPOSER));
+  const { voter, ve, places } = await readAddresses(ok.client, settings(PROPOSER));
   assert.deepEqual([voter, ve], [VOTER, VE]);
-  const fields = ({ address, role, from, to, open, priced }: (typeof conduits)["klima"]) => ({
-    address,
-    role,
-    from,
-    to,
-    open,
-    priced,
-  });
-  assert.deepEqual(fields(conduits.klima), {
-    address: CONDUIT,
-    role: "keeper",
-    from: KEEPER,
-    to: MODULE,
-    open: false,
-    priced: undefined,
-  });
-  assert.deepEqual(fields(conduits.immutable), {
-    address: IMMUTABLE,
-    role: "proposer",
-    from: PROPOSER,
-    to: IMMUTABLE,
-    open: true,
-    priced: [addr(30), addr(31)],
+  assert.deepEqual(places, {
+    klima: { address: CONDUIT, from: KEEPER, to: MODULE, priced: [] },
+    immutable: { address: IMMUTABLE, from: PROPOSER, to: IMMUTABLE, priced: [addr(30), addr(31)] },
   });
   const sameKey = clientOf(VOTER);
-  await assert.rejects(readAddresses(sameKey.client, settings(KEEPER)), /each needs its own key/);
+  await assert.rejects(
+    readAddresses(sameKey.client, settings(KEEPER)),
+    /^Error: IMMUTABLE_PROPOSER is the KEEPER of KLIMA_MODULE, 0x0+3: each conduit needs a key of its own$/,
+  );
   assert.deepEqual(sameKey.reads, ["CONDUIT", "KEEPER"], "nothing more is read");
   await assert.rejects(readAddresses(clientOf(addr(9)).client, settings(PROPOSER)), /uses Voter/);
+});
+
+test("each conduit's ABI has what the job calls on the conduit, by its traits, and its key's what the key sends", () => {
+  const names = (abi: Abi) => new Set(abi.flatMap((item) => ("name" in item ? [item.name] : [])));
+  for (const name of CONDUITS) {
+    const { abi, toAbi, checks, open, fundsKeys, payout } = TRAITS[name];
+    const retires = payout === "retire";
+    const called = [
+      "voter",
+      "veToken",
+      ...(checks ? ["pricedTokens", "poolValue", "currentScore"] : []),
+      ...(open ? ["VoteAccepted"] : []),
+      ...(fundsKeys ? ["TREASURY"] : []),
+      ...(retires ? ["kvcm", "retireBps", "isApprovedRouter", "distributionTokens", "CarbonRetired"] : []),
+    ];
+    const own = names(abi);
+    for (const fn of called) assert.ok(own.has(fn), `${name} conduit: ${fn}`);
+    const sent = names(toAbi);
+    for (const call of ["vote", retires ? "claimSwapAndDistribute" : "claim"])
+      assert.ok(sent.has(call), `${name}: ${call}`);
+  }
+  assert.equal(CONDUITS.filter((name) => TRAITS[name].fundsKeys).length, 1, "one treasury funds both keys");
 });

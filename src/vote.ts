@@ -142,9 +142,9 @@ export async function prepareCall(
   });
 }
 
-const txCallOf = ({ to, abi }: Conduit, { functionName, args }: ConduitCall): TxCall => ({
+const txCallOf = ({ to, toAbi }: Conduit, { functionName, args }: ConduitCall): TxCall => ({
   to,
-  abi,
+  abi: toAbi,
   functionName,
   args,
 });
@@ -429,11 +429,11 @@ export async function votedAt({ client }: Chain, { from, address, abi }: Conduit
  * holds a transaction at its nonce, and while a node still has it. A nonce that can't be read counts as unused, and
  * nodes that don't answer as holding the vote.
  */
-export async function pendingVote(chain: Chain, { from, to, abi, client }: Conduit): Promise<Vote | undefined> {
+export async function pendingVote(chain: Chain, { from, to, toAbi, client }: Conduit): Promise<Vote | undefined> {
   const last = sentBy(chain.client).get(lower(from));
-  // The last transaction may have gone elsewhere, like a top-up's. Then it isn't a vote, and `abi` can't decode it.
+  // The last transaction may have gone elsewhere, like a top-up's. Then it isn't a vote, and `toAbi` can't decode it.
   if (!last || last.mined || !isAddressEqual(last.to, to)) return undefined;
-  const { functionName, args } = decodeFunctionData({ abi, data: last.data });
+  const { functionName, args } = decodeFunctionData({ abi: toAbi, data: last.data });
   if (functionName !== "vote") return undefined;
   const [free, held] = await Promise.all([
     client.getTransactionCount({ address: from }).then(

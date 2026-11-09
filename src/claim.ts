@@ -21,7 +21,6 @@ import {
   readMany,
   WEEK,
   WETH,
-  type ByConduit,
   type Call,
   type Chain,
   type Conduit,
@@ -33,18 +32,6 @@ import type { Prices } from "./prices.ts";
 import { bribeCall, readBribes, readDecimals, readEpoch, readRewardTokens, type Bribe, type Reader } from "./read.ts";
 import { broadcastTx, confirmTx, heldAt, prepareCall, signTx, Unconfirmed, type ConduitCall } from "./vote.ts";
 
-/** Owners whose veNFTs a conduit doesn't claim for. */
-export const EXCLUDED_OWNERS: ByConduit<ReadonlyMap<string, string>> = {
-  klima: new Map([["0xa79cd47655156b299762dfe92a67980805ce5a31", "Klima Foundation"]]),
-  immutable: new Map(),
-};
-
-/**
- * What a conduit does with the rewards it claims: the Klima conduit swaps them to kVCM, retires part of it and pays out
- * the rest, and the immutable conduit pays them out as they are, minus its fee.
- */
-const PAYOUT: ByConduit<"retire" | "as is"> = { klima: "retire", immutable: "as is" };
-
 export const MIN_CLAIM_USD = 5;
 export const MAX_GAS_SHARE = 0.05;
 const LOOKBACK = 12;
@@ -53,8 +40,7 @@ const MAX_SWAP_LOSS = 0.15;
 const RETIRE_PERCENT = 97n;
 const RESERVE = parseEther("0.001"); // kept in each conduit's key for the next votes
 const MARGIN_MS = 60_000;
-// Rough gas costs for planning a claim. The simulation has the final say.
-const BASE_GAS: ByConduit<bigint> = { klima: 1_300_000n, immutable: 400_000n };
+// Rough gas costs for planning a claim, on top of the conduit's `claimGas`. The simulation has the final say.
 const SWAP_GAS = 800_000n;
 const PAIR_GAS = 300_000n;
 const GAS_BUDGET = 10_000_000n;
@@ -151,8 +137,8 @@ const swapped = ({ retiring }: Context, token: Address) => retiring !== undefine
 
 const veCall = ({ ve }: Chain, functionName: string, args?: readonly unknown[]) => call(ve, veAbi, functionName, args);
 
-const retiringCall = ({ address }: Conduit, functionName: string, args?: readonly unknown[]) =>
-  call(address, klimaAbi, functionName, args);
+const retiringCall = ({ address, abi }: Conduit, functionName: string, args?: readonly unknown[]) =>
+  call(address, abi, functionName, args);
 
 const worth = (p: Pair) => p.usd + (p.later ?? 0);
 
@@ -360,15 +346,15 @@ async function readClaims(
 ): Promise<{ ctx: Context; nfts: Nft[] }> {
   const { chain } = run;
   const { conduit } = claimer;
-  const { address, name } = conduit;
+  const { address, payout, excludedOwners } = conduit;
   const ended = start - WEEK;
   const epochs = Array.from({ length: LOOKBACK }, (_, k) => ended - BigInt(k) * WEEK);
   const [retiring, delegators] = await Promise.all([
-    PAYOUT[name] === "retire" ? readRetiring(chain, conduit) : undefined,
+    payout === "retire" ? readRetiring(chain, conduit) : undefined,
     shared.delegatees().then((delegatees) => readDelegators(chain, address, ended, delegatees)),
   ]);
   const nfts = delegators.flatMap(({ id, owner, approved }): Nft[] => {
-    const excluded = owner && EXCLUDED_OWNERS[name].get(lower(owner));
+    const excluded = owner && excludedOwners.get(lower(owner));
     const fields = { conduit: address, tokenId: id };
     if (!owner) log.info("not claimed: burned", fields);
     else if (excluded) log.info("not claimed: excluded owner", { ...fields, owner, name: excluded });
@@ -451,8 +437,8 @@ function nextPlan(ctx: Context, nft: Nft, budget = GAS_BUDGET, reopened = true):
       !nft.unswapped.has(lower(p.token)) &&
       (reopened || !nft.reopened.has(pairKey(p.bribe, p.token))),
   );
-  const baseGas = BASE_GAS[ctx.conduit.name];
-  return planClaim(pairs, budget, ctx.usdPerGas, (token) => swapped(ctx, token), baseGas, nft.caps);
+  const { claimGas } = ctx.conduit;
+  return planClaim(pairs, budget, ctx.usdPerGas, (token) => swapped(ctx, token), claimGas, nft.caps);
 }
 
 async function claimOnce(ctx: Context, nft: Nft): Promise<boolean> {

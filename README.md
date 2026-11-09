@@ -46,7 +46,7 @@ epoch gets no vote, and the job logs a warning. A failed run exits non-zero, whi
 retries it up to three times. A retry only does what is still due. It doesn't vote again for a conduit whose day-before
 vote is already on chain.
 
-### The check on chain
+### The immutable conduit's score
 
 Anyone can propose a vote to the immutable conduit, but it only accepts one that beats the vote in force by $1 on its
 own score. That score counts WETH, cbBTC, USDC and EURC at Chainlink prices, plus some trading fees. The job picks votes
@@ -66,7 +66,7 @@ allow the conduit to claim for them.
 
 - **Klima conduit:** each `claimSwapAndDistribute` collects one veNFT's rewards, swaps them to kVCM through KyberSwap
   with up to 5% slippage, retires about a third of the kVCM as carbon credits, and sends the rest to the owner. The
-  Klima Foundation's veNFTs are skipped for now (`EXCLUDED_OWNERS` in `src/claim.ts`).
+  Klima Foundation's veNFTs are skipped for now (`excludedOwners` in `TRAITS`, `src/chain.ts`).
 - **Immutable conduit:** each `claim` sends one veNFT's rewards to the owner as they are, minus a 1% fee to its
   treasury.
 
@@ -172,14 +172,15 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
 - **RPCs:** a read that fails or takes more than 250 ms is also sent to the next URL. Transactions go to every URL.
 - **Prices:** a price is the median of the sources' quotes, or the lower of two. A token without a price counts as zero.
   If every source fails, the job reuses the last prices it fetched for the same tokens.
-- **Balances:** a key that can't pay for a vote or a claim logs `fund the keeper` or `fund the proposer`. A vote before
-  the last blocks needs twice its maximum cost, and a claim needs its cost plus 0.001 ETH.
+- **Balances:** a key that can't pay for a vote, a claim or a top-up logs `fund the Klima conduit's keeper` or
+  `fund the immutable conduit's proposer`. A vote before the last blocks needs twice its maximum cost, and a claim needs
+  its cost plus 0.001 ETH.
 - **Claims:** claims that fail or don't finish within the hour fail the run. The next week's claims, or
   `sh/run.sh --claim`, take what is left.
-- **Top-ups:** a top-up that fails, for example on `fund the proposer` or on a swap quoted more than 2% under the
-  prices, fails the run after the vote, and the retry tops up again. A treasury with too little USDC, or an allowance
-  that is used up or missing, only logs a warning, unless a key ends with less than 0.002 ETH: then the run fails with
-  the error `sh/check.sh` gives, such as `keeper 0x… holds 0.0015 ETH; fund it`.
+- **Top-ups:** a top-up that fails, for example on `fund the immutable conduit's proposer` or on a swap quoted more than
+  2% under the prices, fails the run after the vote, and the retry tops up again. A treasury with too little USDC, or an
+  allowance that is used up or missing, only logs a warning, unless a key ends with less than 0.002 ETH: then the run
+  fails with the error `sh/check.sh` gives, such as `keeper 0x… holds 0.0015 ETH; fund it`.
 - **Hydrex's minter:** if the Voter's epoch lags the calendar, the job doesn't vote, and the claims wait for the minter
   until an hour after the flip.
 - **Voting power:** a conduit without voting power this epoch gets no vote, and the job logs a warning. The other still

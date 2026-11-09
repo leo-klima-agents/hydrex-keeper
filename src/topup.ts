@@ -9,6 +9,7 @@ import {
   otherOf,
   readEach,
   readMany,
+  TRAITS,
   WETH,
   type ByConduit,
   type Call,
@@ -39,7 +40,7 @@ const MIN_ETH = parseEther("0.002");
  * The conduit whose treasury pays for both keys' ETH. Its key draws USDC under the treasury's allowance, swaps it to
  * ETH, and sends the other conduit's key its share.
  */
-export const FUNDER: ConduitName = "immutable";
+export const FUNDER: ConduitName = CONDUITS.find((name) => TRAITS[name].fundsKeys)!;
 export const TOP_UP_MS = 5 * 60_000; // the scheduled run starts 10 minutes before its vote
 export const MIN_SWAP = 1_000_000n; // 1 USDC
 export const MIN_SEND = parseEther("0.0001");
@@ -206,10 +207,10 @@ function allot(state: State): bigint {
   const available = left < inTreasury ? left : inTreasury;
   if (needed <= available) return needed;
   const fields = { needed, allowanceLeft: left, inTreasury };
-  const { role } = funder;
-  if (allowed === 0n) log.warning(`the treasury does not let the ${role} draw USDC: not topping up`, fields);
+  const key = `${funder.label}'s ${funder.role}`;
+  if (allowed === 0n) log.warning(`the treasury does not let ${key} draw USDC: not topping up`, fields);
   else if (inTreasury < left) log.warning("the treasury holds too little USDC to top up the keys: fund it", fields);
-  else log.warning(`the ${role}'s allowance limits the top-up this week`, fields);
+  else log.warning(`the allowance of ${key} limits the top-up this week`, fields);
   return available;
 }
 
@@ -288,7 +289,7 @@ async function execute(chain: Chain, state: State, draw: bigint, until: number, 
   const eth = await exec.balances();
   const share = shareOf(eth[funded.name], eth[funder.name]);
   const call = { to: funded.from, value: share };
-  if (share >= MIN_SEND) await exec.send({ what: `transfer to the ${funded.role}`, call });
+  if (share >= MIN_SEND) await exec.send({ what: `transfer to ${funded.label}'s ${funded.role}`, call });
 }
 
 function sender(run: Run, state: State, until: number): Executor {
@@ -339,16 +340,16 @@ function simulator({ chain }: Run, state: State): Executor {
  */
 async function payable(
   chain: Chain,
-  { role, from }: Conduit,
+  { label, role, from }: Conduit,
   { tx, cost }: { tx: { nonce: number }; cost: bigint },
   call: TxCall,
   balance: bigint,
 ): Promise<void> {
   if ((await heldAt(chain, from, tx.nonce)) !== false) {
-    throw new Error(`a transaction of the ${role} is pending at nonce ${tx.nonce}`);
+    throw new Error(`a transaction of ${label}'s ${role} is pending at nonce ${tx.nonce}`);
   }
   const needed = cost + (call.value ?? 0n);
-  if (balance < needed) throw new Error(`fund the ${role}: ${from} has ${balance} wei, needs ${needed}`);
+  if (balance < needed) throw new Error(`fund ${label}'s ${role}: ${from} has ${balance} wei, needs ${needed}`);
 }
 
 async function sendTx(
@@ -364,7 +365,7 @@ async function sendTx(
   await payable(chain, funder, prepared, call, prepared.balance);
   const { tx } = prepared;
   const { signed, ...ready } = await signTx(signers[funder.name], tx, false, from);
-  if (!signed) throw new Error(`no key signs for the ${funder.role}`);
+  if (!signed) throw new Error(`no key signs for ${funder.label}'s ${funder.role}`);
   const hash = await broadcastTx(chain, { ...ready, signed }, until);
   log.info("top-up sent", { what, hash, nonce: tx.nonce });
   const { blockNumber } = await confirmTx(chain, from, hash, tx.nonce, `the ${what}`);

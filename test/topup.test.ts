@@ -639,8 +639,8 @@ test("a dry run fails as the run would, on a transaction of the proposer that ma
   broke.eth[low(PROPOSER)] = 1_000n;
   const cannotPay = fakeChain(broke);
   for (const [{ chain, sent }, reason] of [
-    [pending, /a transaction of the proposer is pending at nonce 0/],
-    [cannotPay, /fund the proposer: .* has 1000 wei/],
+    [pending, /a transaction of the immutable conduit's proposer is pending at nonce 0/],
+    [cannotPay, /fund the immutable conduit's proposer: .* has 1000 wei/],
   ] as const) {
     let failures = 0;
     const errors = await errorsOf(t, async () => (failures = await topUp(runOf(chain, true), until())));
@@ -658,5 +658,7 @@ test("a dry run checks each step on what the steps before it leave the proposer"
   const w = world({ eth: { [low(KEEPER)]: eth(0.0014), [low(PROPOSER)]: most + expected + expected / 2n } });
   const { chain } = fakeChain(w);
   const errors = await errorsOf(t, () => topUp(runOf(chain, true), until()));
-  assert.deepEqual(errors, [`Error: fund the proposer: ${PROPOSER} has ${most - expected / 2n} wei, needs ${most}`]);
+  assert.deepEqual(errors, [
+    `Error: fund the immutable conduit's proposer: ${PROPOSER} has ${most - expected / 2n} wei, needs ${most}`,
+  ]);
 });

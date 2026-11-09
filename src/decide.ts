@@ -1,14 +1,8 @@
 import type { Address } from "viem";
-import { CONDUITS, lower, type ConduitName, type ByConduit } from "./chain.ts";
-import { clearCheck, type Onchain } from "./check.ts";
+import { CONDUITS, lower, TRAITS, type ByConduit, type ConduitName } from "./chain.ts";
+import { clearCheck, type Onchain } from "./onchain.ts";
 import { othersOf, type State } from "./read.ts";
-import { proportional, select, summarize, toVote, type Candidate, type Vote } from "./select.ts";
-
-/** The most pools in a vote. */
-export const MAX_POOLS: ByConduit<number> = {
-  klima: 40, // more pools could go over Base's gas limit per transaction
-  immutable: 20, // the conduit's MAX_POOLS
-};
+import { planOf, proportional, select, summarize, toVote, type Candidate, type Vote } from "./select.ts";
 
 /** `votes` are the conduit's votes on each pool once its vote lands, or as they are if it keeps its vote. */
 export type Decision = { vote: Vote | null; note: string; votes: bigint[]; summary: Record<string, unknown> };
@@ -34,6 +28,20 @@ export function votesOf(candidates: { pool: Address }[], vote: Vote, power: bigi
   return candidates.map(({ pool }) => ((weights.get(lower(pool)) ?? 0n) * power) / total);
 }
 
+/**
+ * A day before the flip, the vote of a conduit that doesn't check votes on chain: in proportion to each pool's rewards,
+ * whatever the votes, so they aren't read.
+ */
+export function proportionalVote(
+  name: ConduitName,
+  pools: { pool: Address }[],
+  usd: number[],
+): Pick<Decision, "vote" | "note" | "summary"> {
+  const x = proportional(usd, TRAITS[name].maxPools);
+  if (!x) return { vote: null, note: "no pool pays anything; keeping the vote in force", summary: {} };
+  return { vote: toVote(pools, x), note: "", summary: { plan: planOf(pools, x) } };
+}
+
 export type DecideOptions = {
   /** For a conduit that checks votes on chain: its check, if it could be read. Without it, the simulation checks. */
   onchain?: Onchain | undefined;
@@ -54,7 +62,7 @@ export function decide(
 ): Decision {
   const candidates = candidatesFor(state, usd, name, planned);
   const { power } = state.epoch.votes[name];
-  const maxPools = MAX_POOLS[name];
+  const { maxPools } = TRAITS[name];
   const keep = (note: string, fractions: number[] | null = null, more: Record<string, unknown> = {}): Decision => ({
     vote: null,
     note,

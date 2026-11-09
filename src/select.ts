@@ -88,10 +88,14 @@ export function gain(candidates: Candidate[], fractions: number[], power: bigint
   return expected(candidates, asVoted(fractions), power) - expected(candidates, current, power);
 }
 
-export function summarize(candidates: Candidate[], fractions: number[] | null, power: bigint) {
-  const plan = (fractions ?? [])
-    .map((f, i) => ({ pool: candidates[i]!.pool, share: Math.round(f * 10_000) / 100 }))
+/** Each pool's share of a vote, in percent. */
+export const planOf = (pools: { pool: Address }[], fractions: number[] | null) =>
+  (fractions ?? [])
+    .map((f, i) => ({ pool: pools[i]!.pool, share: Math.round(f * 10_000) / 100 }))
     .filter((p) => p.share > 0);
+
+export function summarize(candidates: Candidate[], fractions: number[] | null, power: bigint) {
+  const plan = planOf(candidates, fractions);
   const expectedUsd = fractions ? expected(candidates, fractions, power) : 0;
   const currentVote = candidates.filter((c) => c.ownVotes > 0n).map((c) => ({ pool: c.pool, votes: c.ownVotes }));
   return { plan, expectedUsd, currentVote, power };
