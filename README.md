@@ -32,10 +32,11 @@ Wednesdays at 23:50 UTC.
 - **Wednesday:** the job votes for each conduit again in the last two seconds before the flip, for the largest expected
   reward. `x` votes on a pool that has `V` votes from others and `usd` of rewards earn `usd × x / (V + x)`. Base makes
   five blocks a second, but the Voter takes one vote per conduit per second. So the job votes in each of the last two
-  seconds, in the block before that second's last, so that a vote that lands a block late still counts. It reads the
-  votes in the latest block, and sends each vote about 0.4 s before its block's time. It only replaces a vote in force
-  when the new one earns at least $1 more. After the flip, it checks that the votes landed, logs where they landed and
-  every vote cast in the last 10 seconds, then claims.
+  seconds, in that second's middle block, so that a vote that lands up to two blocks late still counts. Base puts a
+  transaction in the block being built when it arrives, so the job reads the votes in the latest block and sends each
+  vote as its block starts being built, about 0.2 s before the block's time. It only replaces a vote in force when the
+  new one earns at least $1 more. After the flip, it checks that the votes landed, logs where they landed and every vote
+  cast in the last 10 seconds, then claims.
 
 Rewards are this epoch's bribes and fees in pools with a live gauge, counted only in the tokens of `tokens.json` and
 priced in USD. A vote leaves out pools that would get under 0.1% of the votes, and keeps at most the conduit's number of

@@ -587,11 +587,24 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
     if (sent.has(id)) return log.info("already sent", { conduit: address, ...at });
     const { nonce, gas } = tx;
     const record = { hash: keccak256(signed), vote: plan.vote!, nonce, conduit, votes: plan.votes, gas };
-    sent.set(id, { ...record, target: time, sentAt: Date.now() });
+    const sentAt = Date.now();
+    sent.set(id, { ...record, target: time, sentAt });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
     sending.push(
       broadcastTx(chain, { ...prepared, signed }, flipMs).then(
-        (hash) => log.info("vote sent", { conduit: address, hash }),
+        (hash) => {
+          // The block being built when the first node took the vote, about when that node passes it to the sequencer,
+          // which puts it in the block it is building. It is `block` unless the vote reached the node late.
+          const accepted = Date.now();
+          const building = blocks.building(accepted);
+          log.info("vote sent", {
+            conduit: address,
+            hash,
+            block: time / 1000,
+            acceptedMs: accepted - sentAt,
+            ...(building !== undefined ? { building: building / 1000 } : {}),
+          });
+        },
         async (error: unknown) => {
           const notSent = { conduit: address, nonce: tx.nonce, error: errorMessage(error) };
           if (await nonceTaken(chain, tx.nonce, conduit.from)) {

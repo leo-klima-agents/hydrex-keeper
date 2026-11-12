@@ -22,33 +22,40 @@ function targets(blocks: Blocks, now: number) {
 test("learns Base's timing: a block every 200 ms, each seen just before its time", () => {
   const blocks = new Blocks();
   feed(blocks, every(flip - 10_000, 200, 30), -20);
-  assert.deepEqual(blocks.timing, { gap: 200, seal: -20, lead: 200 + 20 + 200 });
+  assert.deepEqual(blocks.timing, { gap: 200, seal: -20, lead: 200 + 20 });
 });
 
-test("votes once in each of the last two seconds, in the block before each second's last", () => {
+test("votes once in each of the last two seconds, in each second's middle block", () => {
   const blocks = new Blocks();
   const now = feed(blocks, every(flip - 10_000, 200, 30));
-  assert.deepEqual(targets(blocks, now), [-1_400, -400]);
-  assert.deepEqual(targets(blocks, flip - 1_401), [-1_400, -400], "while the first is being built");
-  assert.deepEqual(targets(blocks, flip - 1_400), [-400], "once it is sealed");
+  assert.deepEqual(targets(blocks, now), [-1_600, -600]);
+  assert.deepEqual(targets(blocks, flip - 1_601), [-1_600, -600], "while the first is being built");
+  assert.deepEqual(
+    targets(blocks, flip - 1_401),
+    [-1_600, -600],
+    "and the block after it, where a vote sent now lands a block late",
+  );
+  assert.deepEqual(targets(blocks, flip - 1_400), [-600], "not once a vote would land with no block of slack left");
   assert.deepEqual(targets(blocks, flip - 400), [], "never in a second's last block");
   assert.deepEqual(targets(blocks, flip + 1), [], "after the flip");
 });
 
-test("a vote is sent to reach the sequencer 200 ms before its block's build starts, when the block before is sealed", () => {
+test("a vote is sent as its block's build starts, when the block before it is sealed", () => {
   const blocks = new Blocks();
   feed(blocks, every(flip - 10_000, 200, 30), -100);
   const { gap, seal, lead } = blocks.timing;
-  assert.equal(lead, gap - seal + 200);
-  assert.equal(blocks.upcoming(flip, flip - 1_400 - lead - 1), flip - 1_400);
-  assert.equal(blocks.upcoming(flip, flip - 1_400 - lead), flip - 400, "the first one's deadline passed");
-  assert.equal(blocks.upcoming(flip, flip - 400 - lead), undefined);
+  assert.equal(lead, gap - seal);
+  assert.equal(blocks.building(flip - 1_600 - lead - 1), flip - 1_800, "the block before is still being built");
+  assert.equal(blocks.building(flip - 1_600 - lead), flip - 1_600, "and then sealed");
+  assert.equal(blocks.upcoming(flip, flip - 1_600 - lead - 1), flip - 1_600);
+  assert.equal(blocks.upcoming(flip, flip - 1_600 - lead), flip - 600, "the first one's deadline passed");
+  assert.equal(blocks.upcoming(flip, flip - 600 - lead), undefined);
 });
 
-test("blocks seen late, from a lagging RPC or a sequencer behind its schedule, never make a vote later", () => {
+test("blocks seen late, from a lagging RPC or a sequencer behind its schedule, never move the seal past a block's time", () => {
   const blocks = new Blocks();
   feed(blocks, every(flip - 10_000, 200, 30), 300);
-  assert.deepEqual(blocks.timing, { gap: 200, seal: 0, lead: 400 });
+  assert.deepEqual(blocks.timing, { gap: 200, seal: 0, lead: 200 });
 });
 
 test("when polls stop, the block being built is extrapolated; before any poll, nothing is known", () => {
@@ -59,7 +66,7 @@ test("when polls stop, the block being built is extrapolated; before any poll, n
   feed(blocks, every(flip - 10_000, 200, 30));
   assert.equal(blocks.building(flip - 3_001), flip - 3_000);
   assert.equal(blocks.building(flip - 3_000), flip - 2_800, "sealed");
-  assert.deepEqual(targets(blocks, flip - 3_000), [-1_400, -400]);
+  assert.deepEqual(targets(blocks, flip - 3_000), [-1_600, -600]);
 });
 
 test("a sighting by a slow poll doesn't time the seal: the block could have been seen anywhere in that poll", () => {

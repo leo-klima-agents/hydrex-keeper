@@ -2,9 +2,8 @@ import { BLOCK_MS, msOf, type Client } from "./chain.ts";
 import { warnOnce } from "./log.ts";
 
 const HISTORY = 30;
-const SEND_MARGIN_MS = 200; // covers poll lag and the time a vote takes to reach the sequencer
 const FAST_POLL_MS = 100; // a slower poll could have seen its block anywhere in it, too loosely to time the seal
-const SLACK = 1; // blocks a vote can land late and still be in the second it is for
+const SLACK = 2; // blocks a vote can land late and still be in the second it is for
 const SECONDS = 2; // the last seconds before the flip, each with a vote
 const POLL_MS = 50;
 const POLL_TIMEOUT_MS = 500;
@@ -14,7 +13,7 @@ type Header = { number: bigint; time: number };
 
 /**
  * In ms. `seal` is how long after its time a block is first seen, at most 0, and `lead` how long before its block's
- * time a vote is sent.
+ * time a vote is sent: when that block's build starts.
  */
 type Timing = { gap: number; seal: number; lead: number };
 
@@ -28,9 +27,10 @@ export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
 /**
  * Learns block timing from polls of the latest block. Base makes a block every 200 ms, five in each second of
  * `block.timestamp`. The Voter takes one vote per conduit per second, so a vote goes in each of the last SECONDS
- * seconds before the flip, in the block SLACK blocks before that second's last, so that a vote that lands a block late
- * still counts in that second. A vote is sent `lead` ms before its block's time, so that it reaches the sequencer
- * before that block's build starts, when the block before it is sealed.
+ * seconds before the flip, in the block SLACK blocks before that second's last, so that a vote that lands up to SLACK
+ * blocks late still counts in that second. Base puts a transaction in the block being built when it reaches the
+ * sequencer, so a vote is sent as its block's build starts, when the block before it is sealed: it then has the whole
+ * build to arrive, and can't land in an earlier block.
  */
 export class Blocks {
   #seen = new Map<bigint, Seen>();
@@ -61,12 +61,16 @@ export class Blocks {
     return time;
   }
 
-  /** The first block after `after` that a vote goes in and that isn't sealed at `now`. */
+  /**
+   * The first block after `after` that a vote goes in, while a vote sent at `now` would still keep a block of slack. It
+   * lands in the block being built then, which is the vote's own block or one up to SLACK - 1 blocks after it.
+   */
   next(flip: number, after: number, now: number): number | undefined {
     const timing = this.timing;
     const building = this.building(now, timing);
     if (building === undefined) return undefined;
-    return targets(flip, building, timing.gap).find((time) => time > after && time >= building);
+    const lateness = (SLACK - 1) * timing.gap;
+    return targets(flip, building, timing.gap).find((time) => time > after && time + lateness >= building);
   }
 
   /** The block the next vote goes in: the first whose deadline is still ahead at `now`. */
@@ -81,11 +85,12 @@ function timingOf(seen: Map<bigint, Seen>): Timing {
     return before && time > before.time ? [time - before.time] : [];
   });
   const gap = median(gaps) ?? BLOCK_MS;
-  // The earliest sighting by a fast poll. Blocks seen late, from a lagging RPC, after a pause in the polls, or from a
-  // sequencer behind its schedule, can only make votes go early, never late.
+  // The earliest sighting by a fast poll. A block is sealed before it is seen, so a vote goes out at or after its
+  // block's build starts. Blocks seen late, from a lagging RPC, after a pause in the polls, or from a sequencer behind
+  // its schedule, can't move the seal past a block's time.
   const fast = [...seen.values()].filter(({ took }) => took <= FAST_POLL_MS);
   const seal = Math.min(0, ...fast.map(({ time, at }) => at - time));
-  return { gap, seal, lead: gap - seal + SEND_MARGIN_MS };
+  return { gap, seal, lead: gap - seal };
 }
 
 /** In each of the last SECONDS seconds before `flip`, the block SLACK blocks before its last, on `anchor`'s grid. */

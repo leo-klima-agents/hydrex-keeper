@@ -125,16 +125,16 @@ async function run(
   return sent;
 }
 
-/** Whether a send came at its deadline, 400 ms before its block's time. */
-const inTime = ({ time, at }: { time: number; at: number }) => at >= time - 400 && at <= time - 380;
+/** Whether a send came at its deadline, as its block's build started, 200 ms before its time. */
+const inTime = ({ time, at }: { time: number; at: number }) => at >= time - 200 && at <= time - 180;
 
 const warmUp: Plan = { readAt: 0, time: 0, vote: null, note: "warm-up", summary: {} };
 
-test("votes once in each of the last two seconds, in the block before each second's last, with a fresh plan", async (t) => {
+test("votes once in each of the last two seconds, in each second's middle block, with a fresh plan", async (t) => {
   const sent = await run(t);
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-1400, -400],
+    [-1600, -600],
   );
   for (const s of sent) assert.ok(inTime(s), `sent ${s.at - s.time} ms from its block's time`);
   for (const s of sent) assert.ok(s.at - (s.plan!.readAt - flip) < 300, "a fresh plan");
@@ -145,7 +145,7 @@ test("polls that hang or freeze leave the timing learned before to place the vot
     const sent = await run(t, { chain });
     assert.deepEqual(
       sent.map((s) => s.time),
-      [-1400, -400],
+      [-1600, -600],
     );
     assert.ok(sent.every(inTime));
   }
@@ -155,9 +155,9 @@ test("blocks seen before their time get votes sent earlier, and blocks seen late
   const early = await run(t, { chain: { seal: -100 } });
   assert.deepEqual(
     early.map((s) => s.time),
-    [-1400, -400],
+    [-1600, -600],
   );
-  for (const s of early) assert.ok(s.at >= s.time - 500 && s.at < s.time - 400, `sent ${s.at - s.time} ms before`);
+  for (const s of early) assert.ok(s.at >= s.time - 300 && s.at < s.time - 200, `sent ${s.at - s.time} ms before`);
   const late = await run(t, { chain: { seal: 300 } });
   assert.ok(late.length === 2 && late.every(inTime));
 });
@@ -167,8 +167,8 @@ test("with only the block seen at the start, votes at Base's block time", async 
   assert.deepEqual(
     sent.map((s) => [s.time, s.at]),
     [
-      [-1400, -1800],
-      [-400, -800],
+      [-1600, -1800],
+      [-600, -800],
     ],
   );
 });
@@ -177,20 +177,20 @@ test("a chain seen past the flip gets no more votes", async (t) => {
   const sent = await run(t, { chain: { past: flip - 1_500 } });
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-1400],
+    [-1600],
   );
 });
 
-test("started late, votes at once in a block still open, and never in a sealed one", async (t) => {
+test("started late, votes at once while a vote would still land before its second's last block, and never after", async (t) => {
   const late = await run(t, { raceAt: flip - 1_500 });
   assert.deepEqual(
     late.map((s) => [s.time, s.at]),
     [
-      [-1400, -1500],
-      [-400, -800],
+      [-1600, -1500],
+      [-600, -800],
     ],
   );
-  assert.deepEqual(await run(t, { raceAt: flip - 350 }), [], "the last second's block is sealed");
+  assert.deepEqual(await run(t, { raceAt: flip - 350 }), [], "only the last second's last block is left");
 });
 
 test("a plan that hangs is overtaken; when all hang or fail, the last that came back, or the warm-up's, is sent", async (t) => {
@@ -213,7 +213,7 @@ test("lanes plan apart: one that only fails holds back no plan of the other", as
   const sent = await run(t, { behave: () => "fail", other: () => "ok" });
   assert.deepEqual(
     sent.map((s) => s.time),
-    [-1400, -400],
+    [-1600, -600],
   );
   for (const s of sent) {
     assert.equal(s.plan, undefined, "the failing lane has nothing to send");
@@ -783,7 +783,7 @@ test("each vote that landed is logged against the block it was sent for, when it
   const run = outcomeChain({ [hash]: receipt }, () => timeOf(LAST));
   const flipMs = Number(FLIP) * 1000;
   const conduit = run.chain.conduits.klima;
-  const sent = [{ hash, vote, nonce: 1, conduit, target: flipMs - 400, sentAt: flipMs - 840, gas: 9_000_000n }];
+  const sent = [{ hash, vote, nonce: 1, conduit, target: flipMs - 600, sentAt: flipMs - 840, gas: 9_000_000n }];
   const lines = await logged(t, () => outcome(run, FLIP, sent, [KLIMA]));
   const { msToFlip, msAfterTarget, msAfterSend, index, gasUsed, gasLimit, tip, blockGasUsed, blockGasLimit } =
     lines.find((l) => l.message === "vote landed")!;
@@ -791,7 +791,7 @@ test("each vote that landed is logged against the block it was sent for, when it
     { msToFlip, msAfterTarget, msAfterSend, index, gasUsed, gasLimit, tip, blockGasUsed, blockGasLimit },
     {
       msToFlip: -600,
-      msAfterTarget: -200,
+      msAfterTarget: 0,
       msAfterSend: 240,
       index: 3,
       gasUsed: "6000000",
