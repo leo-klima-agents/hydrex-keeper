@@ -22,6 +22,7 @@ import {
   type Client,
 } from "../src/chain.ts";
 import { errorMessage } from "../src/log.ts";
+import { logged } from "./helpers.ts";
 
 type Answer = { delay?: number; hang?: boolean; status?: number; error?: { code: number; message: string } };
 
@@ -90,6 +91,39 @@ test("broadcast counts 'already known' as accepted, and fails only when no node 
       /^no RPC accepted the transaction: 127\.0\.0\.1:\d+: .*nonce too low.*; 127\.0\.0\.1:/s.test(e.message) &&
       !e.message.includes("secret-key"),
   );
+});
+
+test("broadcast logs how long each node took to answer, accepted or not, and by host only", async (t) => {
+  const nodes = [
+    await rpc(
+      ([tx]) => keccak256(tx as Hex),
+      () => ({ delay: 120 }),
+    ),
+    await refuses("nonce too low"),
+  ];
+  t.after(() => nodes.forEach((n) => n.close()));
+  const lines = await logged(t, async () => {
+    await broadcaster(nodes.map((n) => n.url))(signed, Date.now() + 60_000);
+    await sleep(50);
+  });
+  const { hash, accepted, rejected } = lines.find((l) => l.message === "broadcast") as unknown as {
+    hash: Hex;
+    accepted: { host: string; ms: number }[];
+    rejected: { host: string; ms: number; error: string }[];
+  };
+  assert.equal(hash, keccak256(signed));
+  assert.deepEqual(
+    accepted.map(({ host }) => host),
+    [new URL(nodes[0]!.url).host],
+  );
+  assert.ok(accepted[0]!.ms >= 120 && accepted[0]!.ms < 1_000, `accepted after ${accepted[0]!.ms} ms`);
+  assert.deepEqual(
+    rejected.map(({ host }) => host),
+    [new URL(nodes[1]!.url).host],
+  );
+  assert.ok(rejected[0]!.ms < accepted[0]!.ms, "the refusal came first");
+  assert.match(rejected[0]!.error, /nonce too low/);
+  assert.ok(!JSON.stringify(lines).includes("secret-key"), "no URL path, where keys go");
 });
 
 test("a transaction is known while any node has it, and unknown only when no node answers", async (t) => {

@@ -96,34 +96,45 @@ export function hedged(rpcUrls: string[]): Transport {
 }
 
 /** Sends to every URL at once, so that inclusion doesn't depend on one node. */
+/** A node's answer to a transaction sent to every URL, `ms` after it was sent. */
+type Answer = { host: string; ms: number; error?: string };
+
 export function broadcaster(rpcUrls: string[]) {
   // Not batched, so that a transaction never waits behind reads to the same URL.
   const nodes = rpcUrls.map((url) => ({ host: hostOf(url), transport: http(url) }));
   return (signed: Hex, until: number): Promise<Hex> => {
     const hash = keccak256(signed);
-    const timeout = Math.max(1, Math.min(TIMEOUT_MS, until - Date.now()));
-    const sends = nodes.map(async ({ host, transport }) => {
+    const started = Date.now();
+    const timeout = Math.max(1, Math.min(TIMEOUT_MS, until - started));
+    const answers = nodes.map(async ({ host, transport }): Promise<Answer> => {
       try {
         const node = transport({ chain: base, retryCount: 0, timeout });
         await node.request({ method: "eth_sendRawTransaction", params: [signed] });
       } catch (error) {
         const message = errorMessage(error);
-        if (!/already known|known transaction|already imported/i.test(message)) throw new Error(`${host}: ${message}`);
+        if (!/already known|known transaction|already imported/i.test(message)) {
+          return { host, ms: Date.now() - started, error: message };
+        }
       }
-      return host;
+      return { host, ms: Date.now() - started };
     });
-    const reasons = (errors: unknown[]) => errors.map((e) => (e as Error).message);
-    void Promise.allSettled(sends).then((results) =>
+    // How long each node took, to time the votes: the first to accept forwards the transaction to the sequencer.
+    void Promise.all(answers).then((all) =>
       log.info("broadcast", {
         hash,
-        accepted: results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : [])),
-        rejected: reasons(results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []))),
+        accepted: all.filter((a) => a.error === undefined).map(({ host, ms }) => ({ host, ms })),
+        rejected: all.filter((a) => a.error !== undefined),
       }),
     );
-    return Promise.any(sends).then(
+    const accepted = answers.map(async (answer) => {
+      const { host, error } = await answer;
+      if (error !== undefined) throw new Error(`${host}: ${error}`);
+    });
+    return Promise.any(accepted).then(
       () => hash,
       (error: AggregateError) => {
-        throw new Error(`no RPC accepted the transaction: ${reasons(error.errors).join("; ")}`);
+        const reasons = error.errors.map((e) => (e as Error).message);
+        throw new Error(`no RPC accepted the transaction: ${reasons.join("; ")}`);
       },
     );
   };
