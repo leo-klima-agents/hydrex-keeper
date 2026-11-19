@@ -7,6 +7,7 @@ import { keccak256, type Abi, type Address, type Hex } from "viem";
 import { base } from "viem/chains";
 import {
   broadcaster,
+  channels,
   CHUNK,
   CONDUITS,
   finder,
@@ -17,6 +18,7 @@ import {
   lastBlockBefore,
   readAddresses,
   readMany,
+  SEQUENCER_URL,
   TRAITS,
   type Call,
   type Client,
@@ -26,23 +28,31 @@ import { logged } from "./helpers.ts";
 
 type Answer = { delay?: number; hang?: boolean; status?: number; error?: { code: number; message: string } };
 
-async function rpc(result: (params: unknown[]) => unknown, answer: () => Answer = () => ({})) {
+type Request = { id: number; method: string; params?: unknown[] };
+
+/** A fake node. `answer` and `result` are told the method of each request, and `methods` records them. */
+async function rpc(
+  result: (params: unknown[], method: string) => unknown,
+  answer: (method: string) => Answer = () => ({}),
+) {
   const received: unknown[][] = [];
+  const methods: string[] = [];
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
-      const a = answer();
-      const parsed = JSON.parse(body) as { id: number; params?: unknown[] } | { id: number; params?: unknown[] }[];
+      const parsed = JSON.parse(body) as Request | Request[];
       const calls = Array.isArray(parsed) ? parsed : [parsed];
+      const a = answer(calls[0]!.method);
       received.push(...calls.map((c) => c.params ?? []));
+      methods.push(...calls.map((c) => c.method));
       if (a.hang) return;
       setTimeout(() => {
         if (a.status) return res.writeHead(a.status).end("unavailable");
-        const reply = ({ id, params = [] }: { id: number; params?: unknown[] }) => ({
+        const reply = ({ id, method, params = [] }: Request) => ({
           jsonrpc: "2.0",
           id,
-          ...(a.error ? { error: a.error } : { result: result(params) }),
+          ...(a.error ? { error: a.error } : { result: result(params, method) }),
         });
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify(Array.isArray(parsed) ? parsed.map(reply) : reply(parsed)));
@@ -51,7 +61,7 @@ async function rpc(result: (params: unknown[]) => unknown, answer: () => Answer 
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/secret-key`;
-  return { url, received, close: () => (server.closeAllConnections(), server.close()) };
+  return { url, received, methods, close: () => (server.closeAllConnections(), server.close()) };
 }
 
 const signed = "0x02f86c82210503808203e8830186a0940000000000000000000000000000000000000001808412345678c0" as Hex;
@@ -124,6 +134,58 @@ test("broadcast logs how long each node took to answer, accepted or not, and by 
   assert.ok(rejected[0]!.ms < accepted[0]!.ms, "the refusal came first");
   assert.match(rejected[0]!.error, /nonce too low/);
   assert.ok(!JSON.stringify(lines).includes("secret-key"), "no URL path, where keys go");
+});
+
+/** Answers a node gives: a hash for a transaction, nothing for a lookup, and block 16 for anything else. */
+const node = (params: unknown[], method: string) =>
+  method === "eth_sendRawTransaction"
+    ? keccak256(params[0] as Hex)
+    : method === "eth_getTransactionByHash"
+      ? null
+      : "0x10";
+
+test("reads and lookups go through the RPCs alone, and transactions straight to the sequencer too", async (t) => {
+  const [rpcNode, sequencer] = [await rpc(node), await rpc(node)];
+  t.after(() => [rpcNode, sequencer].forEach((n) => n.close()));
+  assert.equal(SEQUENCER_URL, "https://mainnet-sequencer.base.org");
+  const { client, bulk, broadcast, known } = channels([rpcNode.url], [sequencer.url]);
+  await client.getBlockNumber({ cacheTime: 0 });
+  await bulk.getBlockNumber({ cacheTime: 0 });
+  await logged(t, async () => {
+    await broadcast(signed, Date.now() + 60_000);
+    await sleep(50);
+  });
+  await known([keccak256(signed)]);
+  assert.deepEqual(sequencer.methods, ["eth_sendRawTransaction"]);
+  assert.deepEqual(rpcNode.methods.sort(), [
+    "eth_blockNumber",
+    "eth_blockNumber",
+    "eth_getTransactionByHash",
+    "eth_sendRawTransaction",
+  ]);
+});
+
+test("a transaction only the sequencer took is unknown to lookups, which can't ask it, not gone", async (t) => {
+  const refusesSends = (method: string) =>
+    method === "eth_sendRawTransaction" ? { error: { code: -32000, message: "nonce too low" } } : {};
+  const [refusing, accepting, sequencer] = [await rpc(node, refusesSends), await rpc(node), await rpc(node)];
+  t.after(() => [refusing, accepting, sequencer].forEach((n) => n.close()));
+  const hash = keccak256(signed);
+  const send = async (rpcUrls: string[]) => {
+    const { broadcast, known } = channels(rpcUrls, [sequencer.url]);
+    const hosts: string[] = [];
+    await logged(t, async () => {
+      await broadcast(signed, Date.now() + 60_000, ({ host, error }) => error === undefined && hosts.push(host));
+      await sleep(50);
+    });
+    return { known: await known([hash]), hosts: hosts.sort() };
+  };
+  const alone = await send([refusing.url]);
+  assert.deepEqual(alone.hosts, [new URL(sequencer.url).host], "only the sequencer took it");
+  assert.equal(alone.known, undefined, "the RPC has none, but can't speak for the sequencer");
+  const both = await send([accepting.url]);
+  assert.equal(both.hosts.length, 2);
+  assert.equal(both.known, false, "an RPC took it, and has none now: it is gone");
 });
 
 test("a transaction is known while any node has it, and unknown only when no node answers", async (t) => {

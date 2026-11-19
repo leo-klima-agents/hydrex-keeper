@@ -13,14 +13,17 @@ import { Blocks, sleep, watch } from "./blocks.ts";
 import {
   blocksBetween,
   CONDUITS,
+  hostOf,
   lastBlockBefore,
   lower,
   msOf,
   otherOf,
   byConduit,
   readMany,
+  SEQUENCER_URL,
   voterCall,
   WEEK,
+  type Answer,
   type Chain,
   type Client,
   type Conduit,
@@ -63,6 +66,7 @@ const SETTLE_MS = 10_000; // after the flip, so that lagging RPCs have the last 
 const OUTCOME_TRIES = 3;
 const OUTCOME_RETRY_MS = 2_000;
 const WATCHED_S = 10n; // anyone's votes in this many seconds before the flip are logged
+const SEQUENCER = hostOf(SEQUENCER_URL); // how broadcast answers name the sequencer
 
 /** `target` is the time (ms) of the block a last-block vote was sent for, and `sentAt` when it was sent. */
 export type Sent = {
@@ -590,17 +594,33 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
     const sentAt = Date.now();
     sent.set(id, { ...record, target: time, sentAt });
     log.info("voting", { ...fields, nonce: tx.nonce, tip: tx.maxPriorityFeePerGas });
+    let first: Answer | undefined;
+    // The sequencer puts the vote in the block it is building when the vote gets there, which is before its answer comes
+    // back: `building` is the latest block the vote can have arrived in. It is `block` unless the vote got there late.
+    const onAnswer = (answer: Answer) => {
+      if (answer.error === undefined) first ??= answer;
+      if (answer.host !== SEQUENCER) return;
+      const fields = { conduit: address, hash: record.hash, block: time / 1000, ms: answer.ms };
+      if (answer.error !== undefined)
+        return log.info("the sequencer refused the vote", { ...fields, error: answer.error });
+      const building = blocks.building(Date.now());
+      log.info("vote at the sequencer", {
+        ...fields,
+        ...(building !== undefined ? { building: building / 1000 } : {}),
+      });
+    };
     sending.push(
-      broadcastTx(chain, { ...prepared, signed }, flipMs).then(
+      broadcastTx(chain, { ...prepared, signed }, flipMs, onAnswer).then(
         (hash) => {
-          // The block being built when the first node took the vote, about when that node passes it to the sequencer,
-          // which puts it in the block it is building. It is `block` unless the vote reached the node late.
+          // The block being built when the first node, `acceptedBy`, took the vote. An RPC still has to pass the vote on
+          // to the sequencer, which then puts it in the block it is building.
           const accepted = Date.now();
           const building = blocks.building(accepted);
           log.info("vote sent", {
             conduit: address,
             hash,
             block: time / 1000,
+            acceptedBy: first?.host,
             acceptedMs: accepted - sentAt,
             ...(building !== undefined ? { building: building / 1000 } : {}),
           });

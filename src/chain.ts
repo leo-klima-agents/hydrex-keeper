@@ -25,6 +25,7 @@ const TIMEOUT_MS = 5_000;
 const BULK_TIMEOUT_MS = 30_000;
 const LOOKUP_TIMEOUT_MS = 2_000;
 export const BLOCK_MS = 200; // Base's block time
+export const SEQUENCER_URL = "https://mainnet-sequencer.base.org"; // Base's sequencer
 
 export const WETH: Address = "0x4200000000000000000000000000000000000006";
 
@@ -95,30 +96,41 @@ export function hedged(rpcUrls: string[]): Transport {
   };
 }
 
-/** Sends to every URL at once, so that inclusion doesn't depend on one node. */
 /** A node's answer to a transaction sent to every URL, `ms` after it was sent. */
-type Answer = { host: string; ms: number; error?: string };
+export type Answer = { host: string; ms: number; error?: string };
 
-export function broadcaster(rpcUrls: string[]) {
+/** Sends to every URL at once, so that inclusion doesn't depend on one node. */
+export function broadcaster(rpcUrls: string[], direct: string[] = [], unlisted = new Set<Hex>()) {
   // Not batched, so that a transaction never waits behind reads to the same URL.
-  const nodes = rpcUrls.map((url) => ({ host: hostOf(url), transport: http(url) }));
-  return (signed: Hex, until: number): Promise<Hex> => {
+  const nodes = [
+    ...direct.map((url) => ({ url, listed: false })),
+    ...rpcUrls.map((url) => ({ url, listed: true })),
+  ].map(({ url, listed }) => ({ host: hostOf(url), listed, transport: http(url) }));
+  const listed = new Set<Hex>(); // transactions an RPC took, which lookups can find
+  return (signed: Hex, until: number, onAnswer?: (answer: Answer) => void): Promise<Hex> => {
     const hash = keccak256(signed);
     const started = Date.now();
     const timeout = Math.max(1, Math.min(TIMEOUT_MS, until - started));
-    const answers = nodes.map(async ({ host, transport }): Promise<Answer> => {
+    const answers = nodes.map(async ({ host, listed: lookedUp, transport }): Promise<Answer> => {
+      let answer: Answer = { host, ms: 0 };
       try {
         const node = transport({ chain: base, retryCount: 0, timeout });
         await node.request({ method: "eth_sendRawTransaction", params: [signed] });
       } catch (error) {
         const message = errorMessage(error);
-        if (!/already known|known transaction|already imported/i.test(message)) {
-          return { host, ms: Date.now() - started, error: message };
-        }
+        if (!/already known|known transaction|already imported/i.test(message))
+          answer = { host, ms: 0, error: message };
       }
-      return { host, ms: Date.now() - started };
+      answer.ms = Date.now() - started;
+      if (answer.error === undefined && lookedUp) {
+        listed.add(hash);
+        unlisted.delete(hash);
+      } else if (answer.error === undefined && !listed.has(hash)) unlisted.add(hash);
+      onAnswer?.(answer);
+      return answer;
     });
-    // How long each node took, to time the votes: the first to accept forwards the transaction to the sequencer.
+    // How long each node took, to time the votes. The sequencer's answer bounds when a transaction reached it, while an
+    // RPC still has to pass it on.
     void Promise.all(answers).then((all) =>
       log.info("broadcast", {
         hash,
@@ -143,9 +155,10 @@ export function broadcaster(rpcUrls: string[]) {
 /**
  * Whether a node has any of the transactions, pending or in a block, asking every URL. A node keeps each transaction it
  * forwarded to the sequencer until the transaction lands or is dropped, and transactions are sent to every URL, so when
- * the nodes that answer have none, none can land. Undefined when no node answered.
+ * the nodes that answer have none, none can land. Undefined when no node answered, or when the nodes have none but one
+ * of the transactions is `unlisted`: only the sequencer took it, and it can't be asked.
  */
-export function finder(rpcUrls: string[]) {
+export function finder(rpcUrls: string[], unlisted: ReadonlySet<Hex> = new Set()) {
   const nodes = rpcUrls.map((url) => http(url));
   return async (hashes: readonly Hex[]): Promise<boolean | undefined> => {
     if (hashes.length === 0) return false;
@@ -163,7 +176,10 @@ export function finder(rpcUrls: string[]) {
             if (tx !== null) resolve(true);
           })
           .catch(() => undefined)
-          .finally(() => ++settled === asks.length && resolve(answered ? false : undefined));
+          .finally(() => {
+            if (++settled < asks.length) return;
+            resolve(answered && !hashes.some((hash) => unlisted.has(hash)) ? false : undefined);
+          });
       }
     });
   };
@@ -302,14 +318,32 @@ export type Settings = { klima: { module: Address }; immutable: { conduit: Addre
 
 const MAX_PRICED_TOKENS = 4; // a checking conduit's limit
 
+/**
+ * How the job reaches Base. Reads, and lookups of the transactions it sent, go through the RPCs. Transactions also go
+ * straight to the `direct` URLs, which take nothing else, and lookups know which transactions only those took.
+ */
+export function channels(rpcUrls: string[], direct = [SEQUENCER_URL]) {
+  const unlisted = new Set<Hex>();
+  return {
+    client: makeClient(hedged(rpcUrls)),
+    bulk: makeClient(bulkTransport(rpcUrls)),
+    broadcast: broadcaster(
+      rpcUrls,
+      direct.filter((url) => !rpcUrls.includes(url)),
+      unlisted,
+    ),
+    known: finder(rpcUrls, unlisted),
+  };
+}
+
 export async function connect(settings: Settings, rpcUrls: string[]): Promise<Chain> {
-  const client = makeClient(hedged(rpcUrls));
+  const { client, bulk, broadcast, known } = channels(rpcUrls);
   const { voter, ve, places } = await readAddresses(client, settings);
   return {
     client,
-    bulk: makeClient(bulkTransport(rpcUrls)),
-    broadcast: broadcaster(rpcUrls),
-    known: finder(rpcUrls),
+    bulk,
+    broadcast,
+    known,
     voter,
     ve,
     conduits: byConduit((name) => conduitOf(name, places[name], makeClient(hedged(rpcUrls)))),
