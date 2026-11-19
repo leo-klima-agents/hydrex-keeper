@@ -12,7 +12,17 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 import type { immutableAbi } from "./abi.ts";
-import { blocksBetween, lower, readMany, voterCall, WEEK, type Chain, type Client, type Conduit } from "./chain.ts";
+import {
+  blocksBetween,
+  lower,
+  readMany,
+  voterCall,
+  WEEK,
+  type Answer,
+  type Chain,
+  type Client,
+  type Conduit,
+} from "./chain.ts";
 import { NoMetadataServer } from "./kms.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Vote } from "./select.ts";
@@ -280,10 +290,12 @@ export async function signTx(
   }
 }
 
+/** `onAnswer` hears each node's answer as it comes. */
 export async function broadcastTx(
   chain: Chain,
   { tx, signed, lastVoted, from }: Prepared & { signed: Hex },
   until: number,
+  onAnswer?: (answer: Answer) => void,
 ): Promise<Hex> {
   if (Date.now() >= until) throw new Error("out of time before sending");
   // Recorded before sending, because a send that fails may still have reached a node.
@@ -293,7 +305,7 @@ export async function broadcastTx(
   const earlier = last && !last.mined && last.nonce === tx.nonce ? last.hashes : [];
   sent.set(lower(from), { ...tx, hashes: [...earlier, hash], lastVoted });
   try {
-    return await chain.broadcast(signed, until);
+    return await chain.broadcast(signed, until, onAnswer);
   } catch (error) {
     const record = sent.get(lower(from));
     if (/underpriced/i.test(errorMessage(error)) && record?.hashes.at(-1) === hash) {
@@ -305,7 +317,8 @@ export async function broadcastTx(
 
 /**
  * Whether a transaction this process sent from `from` at `nonce`, and hasn't seen in a block, may still land: a node
- * holds it. Undefined when no node answers. A claim or a top-up must not replace one, since it may be a vote.
+ * holds it. Undefined when no node answers, or when only the sequencer took it, which can't be asked. A claim or a
+ * top-up must not replace one, since it may be a vote.
  */
 export async function heldAt(chain: Chain, from: Address, nonce: number): Promise<boolean | undefined> {
   const last = sentBy(chain.client).get(lower(from));

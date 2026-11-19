@@ -170,7 +170,8 @@ because `check.sh` only detects keys. And change `tokens.json` through a pull re
 
 ## Failure modes
 
-- **RPCs:** a read that fails or takes more than 250 ms is also sent to the next URL. Transactions go to every URL.
+- **RPCs:** a read that fails or takes more than 250 ms is also sent to the next URL. Transactions go to every URL at
+  once, and straight to Base's sequencer, `https://mainnet-sequencer.base.org`.
 - **Prices:** a price is the median of the sources' quotes, or the lower of two. A token without a price counts as zero.
   If every source fails, the job reuses the last prices it fetched for the same tokens.
 - **Balances:** a key that can't pay for a vote, a claim or a top-up logs `fund the Klima conduit's keeper` or
