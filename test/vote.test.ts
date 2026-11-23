@@ -21,6 +21,8 @@ import {
   markMined,
   nonceTaken,
   pendingVote,
+  prepareCall,
+  prepareTx,
   prepareVote,
   votedAt,
   VoteSent,
@@ -55,7 +57,7 @@ const MINED_AT = 1_790_812_801n; // timestamp of block 42, where the receipt lan
 
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
-  const simulatedAt: bigint[] = [];
+  const simulatedAt: (bigint | undefined)[] = [];
   const simulatedOn: (bigint | undefined)[] = [];
   const simulatedCalls: number[] = [];
   const client = {
@@ -64,12 +66,12 @@ function fakeChain(b: Behaviour = {}) {
       blockNumber,
       blockTag,
     }: {
-      blocks: { blockOverrides: { time: bigint }; calls: unknown[] }[];
+      blocks: { blockOverrides?: { time: bigint }; calls: unknown[] }[];
       blockNumber?: bigint;
       blockTag?: string;
     }) => {
       assert.equal(blockTag, undefined, "simulates on top of the latest block, or of the one read");
-      simulatedAt.push(blocks[0]!.blockOverrides.time);
+      simulatedAt.push(blocks[0]!.blockOverrides?.time);
       simulatedOn.push(blockNumber);
       simulatedCalls.push(blocks[0]!.calls.length);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
@@ -163,6 +165,19 @@ test("after a congested block, the tip rises to what the top of it paid, up to 0
   const capped = fakeChain({ congested: true, topTip: 10n ** 18n });
   await castVote(capped.chain, capped.chain.conduits.klima, signer, vote, false, far);
   assert.equal(parseTransaction(capped.sent[0]!).maxPriorityFeePerGas, 100_000_000n);
+});
+
+test("only a vote pays more after a congested block: a claim or a top-up pays the estimate, since an hour is enough", async () => {
+  const { chain } = fakeChain({ congested: true });
+  const claim: Parameters<typeof prepareCall>[2] = { functionName: "claim", args: [1n, [], [OTHER], [OTHER]] };
+  const claimed = await prepareCall(chain, chain.conduits.immutable, claim);
+  assert.deepEqual([claimed.tx.maxPriorityFeePerGas, claimed.congested], [100n, true], "a claim");
+  const transfer = { to: OTHER, value: 1n };
+  const sent = await prepareTx(chain, chain.conduits.immutable, transfer, { what: "the transfer" });
+  assert.equal(sent.tx.maxPriorityFeePerGas, 100n, "a top-up's transfer");
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const { tx } = await prepareVote(chain, chain.conduits.immutable, proposer, vote, false, { target });
+  assert.equal(tx.maxPriorityFeePerGas, 400n, "a vote");
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {

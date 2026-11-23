@@ -148,6 +148,7 @@ export async function prepareCall(
       calls: [txCallOf(rival.conduit, voteCall(rival.vote))],
     },
     landed: later,
+    urgent: call.functionName === "vote",
     fees,
   });
 }
@@ -169,6 +170,11 @@ type TxOptions = {
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
+  /**
+   * Whether landing a block late costs more than a block's wait, as for a vote, which can then miss its second. Without
+   * `fees`, only an urgent transaction pays more than the suggested tip in congested blocks.
+   */
+  urgent?: boolean;
   /** Read with `readFees` if not given. */
   fees?: Fees | undefined;
 };
@@ -177,10 +183,10 @@ type TxOptions = {
 export type Fees = { baseFee: bigint; tip: bigint; congested: boolean };
 
 /**
- * The tip is the suggested one, or if any of the last FEE_BLOCKS blocks was congested, the 99th percentile of their
- * tips, up to MAX_TIP.
+ * The tip is the suggested one. For an `urgent` transaction, if any of the last FEE_BLOCKS blocks was congested, it is
+ * the 99th percentile of their tips, up to MAX_TIP: in a block that full, the builder orders by tip.
  */
-export async function readFees(client: Client): Promise<Fees> {
+export async function readFees(client: Client, urgent: boolean): Promise<Fees> {
   const [suggested, history] = await Promise.all([
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
@@ -189,7 +195,7 @@ export async function readFees(client: Client): Promise<Fees> {
   if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  return { baseFee, tip: congested ? max(suggested, min(top, MAX_TIP)) : suggested, congested };
+  return { baseFee, tip: urgent && congested ? max(suggested, min(top, MAX_TIP)) : suggested, congested };
 }
 
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
@@ -221,7 +227,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const [[block], afterRival, fees, latest, balance, l1Fee] = await allOrFirstFailure([
     simulate([]),
     rival ? simulate(rival.calls.map(simulatedAs(rival.from))) : Promise.resolve(undefined),
-    options.fees ? Promise.resolve(options.fees) : readFees(client),
+    options.fees ? Promise.resolve(options.fees) : readFees(client, options.urgent ?? false),
     client.getTransactionCount({ address: from }),
     client.getBalance({ address: from }),
     client.estimateL1Fee({ account: from, to, data, ...(value ? { value } : {}) }),

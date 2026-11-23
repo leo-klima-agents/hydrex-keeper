@@ -510,7 +510,7 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
   const votesNow = () => {
     const now = Date.now();
     if (!votes || now - votes.readAt >= SHARED_READ_MS) {
-      const read = Promise.all([readVotes(chain, rewards), readFees(chain.client)]);
+      const read = Promise.all([readVotes(chain, rewards), readFees(chain.client, true)]);
       const time = blocks.upcoming(flipMs, now) ?? now;
       votes = { readAt: now, time, read: read.then(([state, fees]) => ({ state, fees })) };
     }
