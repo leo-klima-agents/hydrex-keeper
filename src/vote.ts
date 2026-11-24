@@ -148,7 +148,8 @@ export async function prepareCall(
       calls: [txCallOf(rival.conduit, voteCall(rival.vote))],
     },
     landed: later,
-    urgent: call.functionName === "vote",
+    // Only a last-block vote has a target, and one a block late can miss its second.
+    urgent: target !== undefined,
     fees,
   });
 }
@@ -170,23 +171,23 @@ type TxOptions = {
   rival?: { name: string; from: Address; calls: readonly TxCall[] } | undefined;
   /** Whether the sender's last transaction is known to be in a block. */
   landed?: boolean;
-  /**
-   * Whether landing a block late costs more than a block's wait, as for a vote, which can then miss its second. Without
-   * `fees`, only an urgent transaction pays more than the suggested tip in congested blocks.
-   */
+  /** Whether the transaction must land in the block it is sent for. It then pays the fees' `urgentTip`. */
   urgent?: boolean;
   /** Read with `readFees` if not given. */
   fees?: Fees | undefined;
 };
 
-/** The next block's base fee, and the tip to pay: `congested` when any of the last FEE_BLOCKS blocks was. */
-export type Fees = { baseFee: bigint; tip: bigint; congested: boolean };
+/**
+ * The next block's base fee, and the tips to pay: `tip` for a transaction that can wait a few blocks, and `urgentTip`
+ * for one that must land in its block. `congested` when any of the last FEE_BLOCKS blocks was.
+ */
+export type Fees = { baseFee: bigint; tip: bigint; urgentTip: bigint; congested: boolean };
 
 /**
- * The tip is the suggested one. For an `urgent` transaction, if any of the last FEE_BLOCKS blocks was congested, it is
- * the 99th percentile of their tips, up to MAX_TIP: in a block that full, the builder orders by tip.
+ * `tip` is the suggested one. So is `urgentTip`, unless any of the last FEE_BLOCKS blocks was congested: then it is the
+ * 99th percentile of their tips, up to MAX_TIP, since in a block that full the builder orders by tip.
  */
-export async function readFees(client: Client, urgent: boolean): Promise<Fees> {
+export async function readFees(client: Client): Promise<Fees> {
   const [suggested, history] = await Promise.all([
     client.estimateMaxPriorityFeePerGas(),
     client.getFeeHistory({ blockCount: FEE_BLOCKS, rewardPercentiles: [TIP_PERCENTILE] }),
@@ -195,7 +196,8 @@ export async function readFees(client: Client, urgent: boolean): Promise<Fees> {
   if (baseFee === undefined) throw new Error("no base fee");
   const congested = history.gasUsedRatio.some((ratio) => ratio >= CONGESTED);
   const top = (history.reward ?? []).reduce((a, [reward]) => max(a, reward ?? 0n), 0n);
-  return { baseFee, tip: urgent && congested ? max(suggested, min(top, MAX_TIP)) : suggested, congested };
+  const urgentTip = congested ? max(suggested, min(top, MAX_TIP)) : suggested;
+  return { baseFee, tip: suggested, urgentTip, congested };
 }
 
 const dataOf = ({ abi, functionName, args }: TxCall): Hex =>
@@ -216,7 +218,7 @@ const simulatedAs =
  * wei, include the L1 fee and leave out the value sent.
  */
 export async function prepareTx(chain: Chain, { from, client }: From, call: TxCall, options: TxOptions) {
-  const { what, before = [], blockNumber, time, rival, landed = false } = options;
+  const { what, before = [], blockNumber, time, rival, landed = false, urgent = false } = options;
   const { to, value } = call;
   const data = dataOf(call);
   const on = blockNumber === undefined ? {} : { blockNumber };
@@ -227,7 +229,7 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
   const [[block], afterRival, fees, latest, balance, l1Fee] = await allOrFirstFailure([
     simulate([]),
     rival ? simulate(rival.calls.map(simulatedAs(rival.from))) : Promise.resolve(undefined),
-    options.fees ? Promise.resolve(options.fees) : readFees(client, options.urgent ?? false),
+    options.fees ? Promise.resolve(options.fees) : readFees(client),
     client.getTransactionCount({ address: from }),
     client.getBalance({ address: from }),
     client.estimateL1Fee({ account: from, to, data, ...(value ? { value } : {}) }),
@@ -239,7 +241,8 @@ export async function prepareTx(chain: Chain, { from, client }: From, call: TxCa
     const reason = second.error ? errorMessage(second.error) : "no reason given";
     throw new Error(`${what} would revert after ${rival!.name}'s vote: ${reason}`);
   }
-  const { baseFee, tip, congested } = fees;
+  const { baseFee, congested } = fees;
+  const tip = urgent ? fees.urgentTip : fees.tip;
   // The confirmed nonce, so that a transaction this process sent and hasn't seen in a block is replaced rather than
   // queued behind, at a quarter more than its fees, or twice them if nodes refused it as underpriced. The last
   // transaction counts as mined, whatever the node says, once its receipt was seen, once the Voter shows its votes (see

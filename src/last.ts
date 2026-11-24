@@ -370,9 +370,9 @@ const keyOf = ({ epoch, pools, scores }: State) =>
 
 const voteKey = (vote: Vote | undefined) => (vote ? `${vote.pools.join()}:${vote.weights.join()}` : "-");
 
-// The tip, and the power of two the base fee is under: as long as the base fee stays under it, twice the base fee a
-// vote was prepared with still covers it with the tip on top, so the vote pays its tip in full.
-const feeKey = ({ tip, baseFee }: Fees) => `${tip}:${baseFee.toString(2).length}`;
+// The tip a last-block vote pays, and the power of two the base fee is under: as long as the base fee stays under it,
+// twice the base fee a vote was prepared with still covers it with the tip on top, so the vote pays its tip in full.
+const feeKey = ({ urgentTip, baseFee }: Fees) => `${urgentTip}:${baseFee.toString(2).length}`;
 
 /** What the lanes plan from: the votes and the fees, read once for the lanes that plan at about the same time. */
 export type Snapshot = { readAt: number; time: number; read: Promise<{ state: State; fees: Fees }> };
@@ -510,7 +510,7 @@ export async function lastBlocks(run: Run, flip: bigint, voting: ByConduit<boole
   const votesNow = () => {
     const now = Date.now();
     if (!votes || now - votes.readAt >= SHARED_READ_MS) {
-      const read = Promise.all([readVotes(chain, rewards), readFees(chain.client, true)]);
+      const read = Promise.all([readVotes(chain, rewards), readFees(chain.client)]);
       const time = blocks.upcoming(flipMs, now) ?? now;
       votes = { readAt: now, time, read: read.then(([state, fees]) => ({ state, fees })) };
     }
