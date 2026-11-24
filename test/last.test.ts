@@ -490,7 +490,7 @@ function lanesOn(prepareWith?: (from: Address) => void) {
       ],
       scores: { immutable: 0n },
     } as State,
-    fees: { baseFee: 5_000_000n, tip: 1_000_000n, congested: false } as Fees,
+    fees: { baseFee: 5_000_000n, tip: 1_000_000n, urgentTip: 1_000_000n, congested: false } as Fees,
   };
   const prepared: { from: Address; fees: Fees | undefined }[] = [];
   const prepare = (async (_chain, conduit, _signer, _vote, _dryRun, options): Promise<Prepared> => {
@@ -552,7 +552,7 @@ test("plans share a preparation until the tip, the base fee's power of two or th
   read.fees = { ...read.fees, baseFee: 9_000_000n };
   await klima.plan();
   assert.equal(preparations(), 2, "past it");
-  read.fees = { ...read.fees, tip: 100_000_000n, congested: true };
+  read.fees = { ...read.fees, urgentTip: 100_000_000n, congested: true };
   await klima.plan();
   assert.equal(preparations(), 3, "a tip raised by congestion");
   assert.deepEqual(prepared.at(-1)!.fees, read.fees, "prepared with the fees read with the votes");

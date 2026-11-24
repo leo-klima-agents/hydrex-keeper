@@ -21,7 +21,10 @@ import {
   markMined,
   nonceTaken,
   pendingVote,
+  prepareCall,
+  prepareTx,
   prepareVote,
+  readFees,
   votedAt,
   VoteSent,
 } from "../src/vote.ts";
@@ -55,7 +58,7 @@ const MINED_AT = 1_790_812_801n; // timestamp of block 42, where the receipt lan
 
 function fakeChain(b: Behaviour = {}) {
   const sent: Hex[] = [];
-  const simulatedAt: bigint[] = [];
+  const simulatedAt: (bigint | undefined)[] = [];
   const simulatedOn: (bigint | undefined)[] = [];
   const simulatedCalls: number[] = [];
   const client = {
@@ -64,12 +67,12 @@ function fakeChain(b: Behaviour = {}) {
       blockNumber,
       blockTag,
     }: {
-      blocks: { blockOverrides: { time: bigint }; calls: unknown[] }[];
+      blocks: { blockOverrides?: { time: bigint }; calls: unknown[] }[];
       blockNumber?: bigint;
       blockTag?: string;
     }) => {
       assert.equal(blockTag, undefined, "simulates on top of the latest block, or of the one read");
-      simulatedAt.push(blocks[0]!.blockOverrides.time);
+      simulatedAt.push(blocks[0]!.blockOverrides?.time);
       simulatedOn.push(blockNumber);
       simulatedCalls.push(blocks[0]!.calls.length);
       const failure = { status: "failure", error: new Error("VoteDelayNotMet()") };
@@ -155,14 +158,27 @@ test("signs with the confirmed nonce and twice the next base fee plus the tip, t
   assert.equal(tx.to, KLIMA_MODULE);
 });
 
-test("after a congested block, the tip rises to what the top of it paid, up to 0.1 gwei", async () => {
-  const { chain, sent } = fakeChain({ congested: true });
-  await castVote(chain, chain.conduits.klima, signer, vote, false, far);
-  const tx = parseTransaction(sent[0]!);
+test("after a congested block, a last-block vote's tip rises to what the top of it paid, up to 0.1 gwei", async () => {
+  const target = { time: 1_790_812_799n, lastVoted: 0n };
+  const { chain } = fakeChain({ congested: true });
+  const { tx } = await prepareVote(chain, chain.conduits.klima, signer, vote, false, { target });
   assert.deepEqual([tx.maxPriorityFeePerGas, tx.maxFeePerGas], [400n, 1_300n]);
   const capped = fakeChain({ congested: true, topTip: 10n ** 18n });
-  await castVote(capped.chain, capped.chain.conduits.klima, signer, vote, false, far);
-  assert.equal(parseTransaction(capped.sent[0]!).maxPriorityFeePerGas, 100_000_000n);
+  const fees = await readFees(capped.chain.client);
+  const shared = await prepareVote(capped.chain, capped.chain.conduits.klima, signer, vote, false, { target, fees });
+  assert.equal(shared.tx.maxPriorityFeePerGas, 100_000_000n, "with the fees read with the votes too");
+});
+
+test("only a last-block vote pays more after a congested block: a day-before vote, a claim or a top-up pays the estimate", async () => {
+  const { chain, sent } = fakeChain({ congested: true });
+  await castVote(chain, chain.conduits.klima, signer, vote, false, far);
+  assert.equal(parseTransaction(sent[0]!).maxPriorityFeePerGas, 100n, "a day-before vote");
+  const claim: Parameters<typeof prepareCall>[2] = { functionName: "claim", args: [1n, [], [OTHER], [OTHER]] };
+  const claimed = await prepareCall(chain, chain.conduits.immutable, claim);
+  assert.deepEqual([claimed.tx.maxPriorityFeePerGas, claimed.congested], [100n, true], "a claim");
+  const transfer = { to: OTHER, value: 1n };
+  const topUp = await prepareTx(chain, chain.conduits.immutable, transfer, { what: "the transfer" });
+  assert.equal(topUp.tx.maxPriorityFeePerGas, 100n, "a top-up's transfer");
 });
 
 test("a re-vote under the same nonce pays a quarter more than the pending one", async () => {
@@ -182,9 +198,9 @@ test("a vote prepared with the fees read with the votes reads none of its own", 
   chain.client.estimateMaxPriorityFeePerGas = (async () => (feeReads++, estimateMaxPriorityFeePerGas())) as never;
   chain.client.getFeeHistory = (async (args: never) => (feeReads++, getFeeHistory(args))) as never;
   const target = { time: 1_790_812_799n, lastVoted: 0n };
-  const fees = { baseFee: 600n, tip: 70n, congested: false };
+  const fees = { baseFee: 600n, tip: 50n, urgentTip: 70n, congested: true };
   const { tx } = await prepareVote(chain, chain.conduits.klima, signer, vote, false, { target, fees });
-  assert.deepEqual([tx.maxFeePerGas, tx.maxPriorityFeePerGas, feeReads], [1_270n, 70n, 0]);
+  assert.deepEqual([tx.maxFeePerGas, tx.maxPriorityFeePerGas, feeReads], [1_270n, 70n, 0], "their urgent tip");
   const read = await prepareVote(chain, chain.conduits.klima, signer, vote, false, { target });
   assert.deepEqual([read.tx.maxFeePerGas, feeReads], [1_000n, 2], "without them, it reads them");
 });
